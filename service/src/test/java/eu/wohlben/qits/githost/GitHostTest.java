@@ -19,7 +19,7 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.junit.jupiter.api.Test;
 
 /**
- * Verifies the in-process JGit smart-HTTP server ({@link QitsGitServlet} at {@code /git/*}) that
+ * Verifies the in-process JGit smart-HTTP server ({@link GitHostRoutes} at {@code /git/*}) that
  * workspace containers clone from and push to: a real {@code git clone} + {@code push} round-trip
  * moves the ref in the served bare origin, an unknown repo id is a 404, and a traversal-shaped id
  * is rejected. No docker is involved — this exercises only the git hosting.
