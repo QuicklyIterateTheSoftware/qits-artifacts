@@ -32,10 +32,12 @@ import org.jboss.logging.Logger;
  * docs/issues/2026-07-15_packaged-spa-not-served.md}). Keeping the git host off the servlet stack
  * lets Quinoa serve the UI exactly as it does in a plain Quinoa app.
  *
- * <p>No authentication: repo ids are capability UUIDs, the same trust level as the rest of
- * unauthenticated local qits — revisit alongside any qits-wide auth. Anonymous fetch AND push are
- * both enabled. The git CLI ({@code GitExecutor}) remains the only thing that mutates repositories;
- * JGit here speaks the wire protocol and nothing else.
+ * <p>No authentication: repo ids are capability UUIDs, and the callers are workspace containers,
+ * which cannot hold a user token — so {@code /git/*} deliberately stays on {@code QitsAuthPolicy}'s
+ * public list in every auth build variant (container traffic reaches qits directly on qits-net,
+ * bypassing any forward-auth proxy — see auth-core's {@code PublicPaths}). Anonymous fetch AND push
+ * are both enabled. The git CLI ({@code GitExecutor}) remains the only thing that mutates
+ * repositories; JGit here speaks the wire protocol and nothing else.
  *
  * <p>The three smart-HTTP endpoints (relative to {@code /git/:repoId}):
  *
