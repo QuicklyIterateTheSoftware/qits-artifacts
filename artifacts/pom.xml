@@ -3,8 +3,8 @@
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <groupId>eu.wohlben</groupId>
-        <artifactId>qits</artifactId>
+        <groupId>eu.wohlben.qits</groupId>
+        <artifactId>qits-artifacts</artifactId>
         <version>1.0.0-SNAPSHOT</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
@@ -15,8 +15,12 @@
          and flows by *string metadata*, never by foreign key, so artifacts never breaks when qits'
          schema moves. Its REST boundary is hosted (for now) by `service`. It owns its OWN named
          datasource + Flyway lineage (see src/main/resources/META-INF/microprofile-config.properties)
-         so the likely future standalone deployable moves files, not data. -->
-    <artifactId>artifacts</artifactId>
+         so the likely future standalone deployable moves files, not data.
+
+         The directory stays `artifacts/` (the filtered history is anchored to that path); only the
+         coordinates are namespaced, hence the doubled name. -->
+    <artifactId>qits-artifacts-artifacts</artifactId>
+    <name>qits-artifacts :: artifacts</name>
 
     <dependencies>
         <dependency>
@@ -66,6 +70,17 @@
             </plugin>
             <plugin>
                 <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <systemPropertyVariables>
+                        <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
+                    </systemPropertyVariables>
+                </configuration>
+            </plugin>
+            <plugin>
+                <!-- Index the jar so a consuming app discovers its CDI beans and entities without
+                     needing a quarkus.index-dependency entry (the monorepo's `service` needed one). -->
+                <groupId>io.smallrye</groupId>
+                <artifactId>jandex-maven-plugin</artifactId>
             </plugin>
         </plugins>
     </build>
