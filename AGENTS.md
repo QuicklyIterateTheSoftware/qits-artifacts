@@ -63,7 +63,7 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 
 ## Tests
 
-- `mvn verify` runs 48 tests (28 in `artifacts/`, 20 in `service/`) in about 30s. There are no
+- `mvn verify` runs 53 tests (28 in `artifacts/`, 25 in `service/`) in about 30s. There are no
   integration tests and no failsafe binding: nothing here needs docker.
 - `GitHostTest.seedOrigin()` shells `git init` + `git clone --bare` into
   `target/githost-test-repos/<uuid>/origin`. Tests that need the name-addressed scheme register the
@@ -84,9 +84,12 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   (`docs/issues/2026-07-19_artifacts-global-max-body-size-widens-public-ingest-dos.md`) and it is
   carried over rather than solved. It is now *narrower* than it was: this module is its own process,
   so the ceiling no longer reaches a consuming app's unrelated routes — only this service's.
-- `src/test/resources/application.properties` is **no longer the only copy** of
-  `quarkus.rest.path` — `src/main/resources/application.properties` carries it for the packaged
-  process. Change one and you must change both.
+- App-level config lives in `service/src/main/resources/application.properties` — the shipped copy —
+  and the tests **inherit** it: Quarkus merges main's `application.properties` into the test config
+  rather than letting the test one shadow it. So never re-declare an app-level setting
+  (`quarkus.rest.path`, the openapi settings, ...) in `src/test/resources`. A second copy only has to
+  drift once for the suite to be green against a value the packaged process never sees. That file is
+  for genuine test-only overrides: in-memory H2, `target/` data dirs, the closed-port intake url.
 - `OpenApiSchemaExportTest` writes `docs/openapi.yml`
   (`./mvnw -pl service test -Dtest=OpenApiSchemaExportTest`). **`paths: {}` is correct output here**:
   every artifacts operation carries `@Operation(hidden = true)`, as in the monorepo's own document,
