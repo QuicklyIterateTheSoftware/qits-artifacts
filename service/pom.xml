@@ -13,7 +13,7 @@
 
     <!-- The web half of this context: the JAX-RS boundary over the `artifacts` library
          (eu.wohlben.qits.artifacts.api) and the in-process JGit smart-HTTP git host
-         (eu.wohlben.qits.githost, plain Vert.x routes at /git/*).
+         (eu.wohlben.qits.githost, plain Vert.x routes at /artifacts/git/*).
 
          A DEPLOYABLE APP, not a library JAR. It was extracted as a library — "a consuming Quarkus
          application pulls it in and gets the routes" — because packaging it would have needed an

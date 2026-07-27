@@ -21,16 +21,20 @@ and neither has an inbound edge from the rest of qits. The git host landed here 
 `quarkus-maven-plugin` into a process:
 
     ./mvnw verify
-    java -jar service/target/quarkus-app/quarkus-run.jar   # :8080, blobs on /api/artifacts/**, git on /git/**
+    java -jar service/target/quarkus-app/quarkus-run.jar   # :8080, blobs on /artifacts/api/**, git on /artifacts/git/**
 
 It was extracted as a library, on the reasoning that packaging it would need an auth variant, a
 webui and a main class. All three have lapsed: authentication terminates at `qits-gateway` and this
 service reads a header, the webui stays in the monorepo, and Quarkus supplies the main class.
 
-Note the two route stacks resolve differently: `/api/artifacts/**` is JAX-RS and moves with
-`quarkus.rest.path`; `/git/**` is registered straight onto the Vert.x router and does not. A `git
-clone http://<host>/git/<repoId>` against the packaged process is the check that matters, because
-nothing in the JAX-RS configuration can prove it.
+Everything is served under the `/artifacts` gateway segment, because `qits-gateway` routes
+verbatim by prefix and rewrites nothing — there is no unprefixed form, on `qits-net` either.
+
+Note the two route stacks resolve differently: `/artifacts/api/**` is JAX-RS and moves with
+`quarkus.rest.path`; `/artifacts/git/**` is registered straight onto the Vert.x router with the
+segment as a literal, and does not. A `git clone http://<host>/artifacts/git/<repoId>` against the
+packaged process is the check that matters, because nothing in the JAX-RS configuration can prove
+it.
 
 `artifacts/` owns its **own datasource, persistence unit and Flyway lineage**
 (`db/artifacts/migration`, a separate H2 under `~/.qits/data/artifacts`). It always did — that
@@ -49,10 +53,14 @@ whole coupling model: **blobs reference qits branches and flows by string metada
 foreign key.** Nothing here breaks when qits' schema moves, and nothing here needs a JPA relation
 into another context's tables.
 
-    PUT  /api/artifacts/repositories/{repo}                 ensure a repository (token-guarded)
-    POST /api/artifacts/repositories/{repo}/blobs           upload, raw body + X-Artifacts-Meta-*
-    GET  /api/artifacts/repositories/{repo}/blobs/{id}      serve — open, cacheable, immutable
-    GET  /api/artifacts/repositories/{repo}/blobs?meta.…    query
+    PUT  /artifacts/api/repositories/{repo}                 ensure a repository (token-guarded)
+    POST /artifacts/api/repositories/{repo}/blobs           upload, raw body + X-Artifacts-Meta-*
+    GET  /artifacts/api/repositories/{repo}/blobs/{id}      serve — open, cacheable, immutable
+    GET  /artifacts/api/repositories/{repo}/blobs?meta.…    query
+
+A **repository** here is a named bucket of artifacts — the Maven/npm sense of the word, not
+`domain.repository`. The resource keeps that name; the `artifacts` the path used to repeat is gone,
+because the segment already says it.
 
 Writes are guarded by a single static token (`X-Artifacts-Token`, config `qits.artifacts.token`;
 blank in dev/test disables the guard). Reads are never guarded — a blob must be usable directly as
@@ -60,20 +68,30 @@ an `<img>`/`<video>` src.
 
 ## The git host
 
-`GitHostRoutes` mounts JGit's `UploadPack`/`ReceivePack` on plain Vert.x routes at `/git/*` —
+`GitHostRoutes` mounts JGit's `UploadPack`/`ReceivePack` on plain Vert.x routes at `/artifacts/git/*` —
 deliberately **not** as a servlet, because `quarkus-undertow`'s presence breaks Quinoa's production
 static serving in the consuming app. JGit speaks the wire protocol and nothing else; the git CLI
 remains the only thing that mutates a repository.
 
-There is **no authentication** on `/git/*`. Repo ids are capability UUIDs and the callers are
-workspace containers, which cannot hold a user session. A deployment must therefore allow-list
-`/git/*` (in the monorepo that is `auth/core`'s `PublicPaths`).
+`git` is a second-level segment beside `api`, not `/artifacts/api/git/*`: it is a wire protocol
+spoken by `git`, not a JSON API, and it appears in no OpenAPI document. Git treats the url as an
+opaque base and appends the suffixes itself, so a base of any depth works — the segment is a
+routing decision, not a protocol one.
 
-Two addressing schemes:
+There is **no authentication** on `/artifacts/git/*`. Repo ids are capability UUIDs and the callers
+are workspace containers, which cannot hold a user session. A deployment must therefore allow-list
+`/artifacts/git/*` (in the monorepo that is `auth/core`'s `PublicPaths`).
 
-- `/git/:repoId` — the opaque UUID, resolving to `<data-dir>/<repoId>/origin`.
-- `/git/:projectId/:repoName` — a project's repositories served as siblings, so committed relative
-  submodule urls (`../<name>.git`) resolve natively. Needs the `RepositoryNameResolver` port.
+Two addressing schemes, told apart by path length — which the fixed prefix preserves, since it adds
+one segment to both:
+
+- `/artifacts/git/:repoId` — the opaque UUID, resolving to `<data-dir>/<repoId>/origin`.
+- `/artifacts/git/:projectId/:repoName` — a project's repositories served as siblings, so committed
+  relative submodule urls (`../<name>.git`) resolve natively. Needs the `RepositoryNameResolver`
+  port.
+
+This base is a **cross-repo contract**: qits-ci fetches pipeline config from it and
+qits-workspace-daemon's `Provisioner` clones from it, both against the literal `/artifacts/git`.
 
 After a successful push, `CiPostReceiveNotifier` POSTs `{repoId, branch, oldSha, newSha}` per
 updated branch ref to `qits.ci.intake-url`. That was already an HTTP call inside the monolith, which
@@ -88,7 +106,7 @@ consuming application implements:
 
 | Port | Required? | Absent means |
 |---|---|---|
-| `RepositoryNameResolver` | no | `/git/:projectId/:repoName` is 404; `/git/:repoId` — the older scheme and the daemon's own fallback — still serves |
+| `RepositoryNameResolver` | no | `/artifacts/git/:projectId/:repoName` is 404; `/artifacts/git/:repoId` — the older scheme and the daemon's own fallback — still serves |
 
 That is the only one. In the monorepo `GitHostRoutes` injected
 `domain.repository.persistence.RepositoryNameRepository` directly; that alias table belongs to the
@@ -107,7 +125,7 @@ app's `application.properties` overrides them.
 | `qits.artifacts.token` | blank (open) | the write guard |
 | `qits.artifacts.startup-seed.enabled` | `true` | self-seed `ci-screenshots` + `ci-videos` |
 | `qits.repositories.data-dir` | `~/.qits/data/repositories` | where the git host finds `<repoId>/origin` |
-| `qits.ci.intake-url` | `http://localhost:8080/api/ci/events/post-receive` | post-receive delivery |
+| `qits.ci.intake-url` | `http://localhost:8080/ci/api/events/post-receive` | post-receive delivery |
 | `qits.ci.token` | blank | `X-CI-Token` on those events |
 | `quarkus.http.limits.max-body-size` | `64M` | **global**; sized to the largest upload cap |
 
@@ -115,8 +133,13 @@ The last one is a hard *global* ceiling in Quarkus — a custom Vert.x route doe
 this jar raising it also raises it for the consuming app's own routes. That tradeoff is the
 monorepo's `docs/issues/2026-07-19_artifacts-global-max-body-size-widens-public-ingest-dos.md`.
 
-`quarkus.rest.path=/api` is **not** shipped as a default: it is an app-wide decision. The consuming
-application sets it; the tests here set it too, because they assert absolute paths.
+`quarkus.rest.path=/artifacts/api` and `quarkus.http.non-application-root-path=/artifacts/q` are
+**not** shipped from the jar's defaults: they are the deployable's own decision and live in
+`service/src/main/resources/application.properties`. The suite inherits that file rather than
+carrying a copy, so the absolute paths the tests assert are the ones the process serves.
+
+The intake url's **path** is not ours either — `/ci/api/events/post-receive` is qits-ci's segment,
+and only the host part is a deployment decision.
 
 ## What is deliberately *not* here
 

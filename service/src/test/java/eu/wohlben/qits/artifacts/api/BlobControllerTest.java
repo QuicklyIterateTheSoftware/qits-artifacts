@@ -21,7 +21,7 @@ class BlobControllerTest {
         .contentType(ContentType.JSON)
         .body(Map.of("type", "ci-screenshots"))
         .when()
-        .put("/api/artifacts/repositories/ci-screenshots")
+        .put("/artifacts/api/repositories/ci-screenshots")
         .then()
         .statusCode(200);
   }
@@ -42,7 +42,7 @@ class BlobControllerTest {
     byte[] big = Arrays.copyOf(ArtifactsTestMedia.png(100, 50, 99), 11 * 1024 * 1024);
     upload("main", "big", big)
         .when()
-        .post("/api/artifacts/repositories/ci-screenshots/blobs")
+        .post("/artifacts/api/repositories/ci-screenshots/blobs")
         .then()
         .statusCode(201);
   }
@@ -53,7 +53,7 @@ class BlobControllerTest {
     String id =
         upload("main", "checkout", png)
             .when()
-            .post("/api/artifacts/repositories/ci-screenshots/blobs")
+            .post("/artifacts/api/repositories/ci-screenshots/blobs")
             .then()
             .statusCode(201)
             .extract()
@@ -63,7 +63,7 @@ class BlobControllerTest {
     byte[] served =
         given()
             .when()
-            .get("/api/artifacts/repositories/ci-screenshots/blobs/" + id)
+            .get("/artifacts/api/repositories/ci-screenshots/blobs/" + id)
             .then()
             .statusCode(200)
             .contentType("image/png")
@@ -77,7 +77,7 @@ class BlobControllerTest {
         .queryParam("meta.git.branch.name", "main")
         .queryParam("latest", "true")
         .when()
-        .get("/api/artifacts/repositories/ci-screenshots/blobs")
+        .get("/artifacts/api/repositories/ci-screenshots/blobs")
         .then()
         .statusCode(200)
         .body("records.id", hasItem(id))
@@ -93,7 +93,7 @@ class BlobControllerTest {
             .headers(ArtifactsTestMedia.screenshotHeaders("main", "checkout", 100, 50))
             .body(png)
             .when()
-            .post("/api/artifacts/repositories/ci-screenshots/blobs")
+            .post("/artifacts/api/repositories/ci-screenshots/blobs")
             .then()
             .statusCode(201)
             .extract()
@@ -101,7 +101,7 @@ class BlobControllerTest {
 
     given()
         .when()
-        .get("/api/artifacts/repositories/ci-screenshots/blobs/" + id)
+        .get("/artifacts/api/repositories/ci-screenshots/blobs/" + id)
         .then()
         .statusCode(200)
         .contentType("image/png");
@@ -116,7 +116,7 @@ class BlobControllerTest {
         .headers(headers)
         .body(ArtifactsTestMedia.png(100, 50, 3))
         .when()
-        .post("/api/artifacts/repositories/ci-screenshots/blobs")
+        .post("/artifacts/api/repositories/ci-screenshots/blobs")
         .then()
         .statusCode(400);
   }
@@ -125,7 +125,7 @@ class BlobControllerTest {
   void uploadToUnknownRepositoryIs404() {
     upload("main", "checkout", ArtifactsTestMedia.png(100, 50, 4))
         .when()
-        .post("/api/artifacts/repositories/nope/blobs")
+        .post("/artifacts/api/repositories/nope/blobs")
         .then()
         .statusCode(404);
   }
@@ -135,7 +135,7 @@ class BlobControllerTest {
     given()
         .when()
         .get(
-            "/api/artifacts/repositories/ci-screenshots/blobs/"
+            "/artifacts/api/repositories/ci-screenshots/blobs/"
                 + "0000000000000000000000000000000000000000000000000000000000000000")
         .then()
         .statusCode(404);
@@ -145,7 +145,7 @@ class BlobControllerTest {
   void serveMalformedIdIs404NotATraversal() {
     given()
         .when()
-        .get("/api/artifacts/repositories/ci-screenshots/blobs/not-a-sha")
+        .get("/artifacts/api/repositories/ci-screenshots/blobs/not-a-sha")
         .then()
         .statusCode(404);
   }

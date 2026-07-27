@@ -13,6 +13,30 @@ That is why: the poms duplicate versions instead of inheriting them, no pom decl
 dependency, and `GitHostTest` builds its own bare origin with the git CLI instead of using the
 monorepo's antrun-derived `fixtures/testing-repo.git`.
 
+## Paths
+
+Everything is served under the `/artifacts` gateway segment — `qits-gateway` routes verbatim by
+prefix, so an unprefixed route is simply unreachable, on `qits-net` as much as through the gateway.
+Three second-level segments:
+
+| Prefix | Machinery | Moves with |
+|---|---|---|
+| `/artifacts/api/**` | JAX-RS | `quarkus.rest.path` |
+| `/artifacts/q/**` | Quarkus' non-application root (openapi, swagger-ui, health) | `quarkus.http.non-application-root-path` |
+| `/artifacts/git/**` | raw Vert.x routes in `GitHostRoutes` | **nothing** — the segment is a literal in the code |
+
+The third line is the one that bites: no config key moves those six routes, and no JAX-RS test
+covers them. `GitHostTest` is the only thing that would catch them drifting, which is why its paths
+are spelled out absolutely.
+
+Two outbound/inbound addresses are contracts other repos hold:
+
+- `/artifacts/git/<repoId>` and `/artifacts/git/<projectId>/<repoName>` — dialled by qits-ci and by
+  qits-workspace-daemon's `Provisioner`.
+- `qits.ci.intake-url` → `/ci/api/events/post-receive` — qits-ci's path, not ours. The notifier
+  swallows delivery failures at debug, so a wrong value here produces no error anywhere and CI
+  simply never runs.
+
 ## Package and module conventions
 
 Two top-level packages, deliberately kept apart:
@@ -76,9 +100,13 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 
 ## What not to "fix"
 
-- `ArtifactsTokenFilter` matches on `getUriInfo().getPath()` starting with `artifacts` — the path
-  relative to the JAX-RS base, so it holds whatever `quarkus.rest.path` is. It guards writes only,
-  by design, and is a no-op when `qits.artifacts.token` is blank.
+- `ArtifactsTokenFilter` matches on `getUriInfo().getPath()` starting with `repositories` — the
+  path relative to the JAX-RS base, so it holds whatever `quarkus.rest.path` is. It was `artifacts`
+  until the resource `@Path`s dropped that segment (the gateway segment carries it now); every
+  JAX-RS resource this service ships is under `repositories/`, so the match is still the whole write
+  surface. **A resource added outside `repositories/` is unguarded** — extend the prefix set, do not
+  assume it is covered. It guards writes only, by design, and is a no-op when `qits.artifacts.token`
+  is blank.
 - `service` ships `quarkus.http.limits.max-body-size=64M`, which is a **global** ceiling — every
   route in the process, not just the upload. The monorepo tracks this as an open tradeoff
   (`docs/issues/2026-07-19_artifacts-global-max-body-size-widens-public-ingest-dos.md`) and it is
@@ -87,14 +115,15 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 - App-level config lives in `service/src/main/resources/application.properties` — the shipped copy —
   and the tests **inherit** it: Quarkus merges main's `application.properties` into the test config
   rather than letting the test one shadow it. So never re-declare an app-level setting
-  (`quarkus.rest.path`, the openapi settings, ...) in `src/test/resources`. A second copy only has to
-  drift once for the suite to be green against a value the packaged process never sees. That file is
-  for genuine test-only overrides: in-memory H2, `target/` data dirs, the closed-port intake url.
-- `OpenApiSchemaExportTest` writes `docs/openapi.yml`
+  (`quarkus.rest.path`, `quarkus.http.non-application-root-path`, the openapi settings, ...) in
+  `src/test/resources`. A second copy only has to drift once for the suite to be green against a
+  value the packaged process never sees. That file is for genuine test-only overrides: in-memory H2,
+  `target/` data dirs, the closed-port intake url.
+- `OpenApiSchemaExportTest` writes `docs/openapi.yml` from `/artifacts/q/openapi`
   (`./mvnw -pl service test -Dtest=OpenApiSchemaExportTest`). **`paths: {}` is correct output here**:
   every artifacts operation carries `@Operation(hidden = true)`, as in the monorepo's own document,
-  and `/git/**` is Vert.x so it appears in no OpenAPI document at all. Committed anyway so unhiding
-  an operation shows up as a diff.
+  and `/artifacts/git/**` is Vert.x so it appears in no OpenAPI document at all. Committed anyway so
+  unhiding an operation shows up as a diff.
 - A `Failed to start quarkus` / `Port already bound: 8081` failure is the known flake
   (`migration-plan.md` §9 item 14) — `@QuarkusTest` restarts racing for the test port. Re-run first.
 - The blob store's `RepositoryType` enum hardcodes the two CI types. Adding a type is a schema check

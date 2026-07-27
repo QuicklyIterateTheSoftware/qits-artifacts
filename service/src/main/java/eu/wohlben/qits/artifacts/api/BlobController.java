@@ -37,7 +37,7 @@ import org.eclipse.microprofile.openapi.annotations.Operation;
  * the service config), sized to the largest type cap; the specific per-type cap is enforced while
  * streaming.
  */
-@Path("/artifacts/repositories/{repo}/blobs")
+@Path("/repositories/{repo}/blobs")
 public class BlobController {
 
   /**

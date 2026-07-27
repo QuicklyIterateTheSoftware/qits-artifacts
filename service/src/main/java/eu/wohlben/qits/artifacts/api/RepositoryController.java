@@ -19,11 +19,14 @@ import org.eclipse.microprofile.openapi.annotations.Operation;
 
 /**
  * The artifacts repository lifecycle boundary (docs/epics/qits-artifacts/). Thin controllers over
- * the {@code artifacts} module's services; all paths are relative to {@code /api}. Hidden from the
- * OpenAPI document (a wire/system API — like the capture/OTLP receivers — so {@code
- * docs/openapi.yml} and the generated Angular client stay untouched).
+ * the {@code artifacts} module's services; all paths are relative to {@code quarkus.rest.path},
+ * which is {@code /artifacts/api} — so this resource is served at {@code
+ * /artifacts/api/repositories}. The {@code artifacts} the path used to carry is gone: the gateway
+ * segment already says it. Hidden from the OpenAPI document (a wire/system API — like the
+ * capture/OTLP receivers — so {@code docs/openapi.yml} and the generated Angular client stay
+ * untouched).
  */
-@Path("/artifacts/repositories")
+@Path("/repositories")
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
 public class RepositoryController {

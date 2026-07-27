@@ -33,7 +33,7 @@ class ArtifactsTokenGuardTest {
         .contentType(ContentType.JSON)
         .body(Map.of("type", "ci-screenshots"))
         .when()
-        .put("/api/artifacts/repositories/guarded")
+        .put("/artifacts/api/repositories/guarded")
         .then()
         .statusCode(401);
   }
@@ -45,7 +45,7 @@ class ArtifactsTokenGuardTest {
         .contentType(ContentType.JSON)
         .body(Map.of("type", "ci-screenshots"))
         .when()
-        .put("/api/artifacts/repositories/guarded")
+        .put("/artifacts/api/repositories/guarded")
         .then()
         .statusCode(401);
   }
@@ -57,7 +57,7 @@ class ArtifactsTokenGuardTest {
         .contentType(ContentType.JSON)
         .body(Map.of("type", "ci-screenshots"))
         .when()
-        .put("/api/artifacts/repositories/guarded")
+        .put("/artifacts/api/repositories/guarded")
         .then()
         .statusCode(200);
 
@@ -68,7 +68,7 @@ class ArtifactsTokenGuardTest {
             .headers(ArtifactsTestMedia.screenshotHeaders("main", "checkout", 100, 50))
             .body(ArtifactsTestMedia.png(100, 50, 11))
             .when()
-            .post("/api/artifacts/repositories/guarded/blobs")
+            .post("/artifacts/api/repositories/guarded/blobs")
             .then()
             .statusCode(201)
             .extract()
@@ -77,7 +77,7 @@ class ArtifactsTokenGuardTest {
     // Serve is a read — no token required.
     given()
         .when()
-        .get("/api/artifacts/repositories/guarded/blobs/" + id)
+        .get("/artifacts/api/repositories/guarded/blobs/" + id)
         .then()
         .statusCode(200)
         .contentType("image/png");
@@ -90,7 +90,7 @@ class ArtifactsTokenGuardTest {
         .headers(ArtifactsTestMedia.screenshotHeaders("main", "checkout", 100, 50))
         .body(ArtifactsTestMedia.png(100, 50, 12))
         .when()
-        .post("/api/artifacts/repositories/guarded/blobs")
+        .post("/artifacts/api/repositories/guarded/blobs")
         .then()
         .statusCode(401);
   }

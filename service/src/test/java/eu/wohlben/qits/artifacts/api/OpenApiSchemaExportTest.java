@@ -14,7 +14,7 @@ import org.junit.jupiter.api.Test;
  * reviewable diff instead of something a caller discovers at runtime.
  *
  * <p>This is a test only because {@code @QuarkusTest} is the cheapest way to stand the application
- * up and read its own {@code /q/openapi}. It asserts nothing — the assertion is the diff.
+ * up and read its own {@code /artifacts/q/openapi}. It asserts nothing — the assertion is the diff.
  *
  * <p>The test classpath is indexed too, so any {@code @Path} resource under {@code src/test} lands
  * in the committed document unless it is {@code @Operation(hidden = true)} — see {@code
@@ -25,7 +25,10 @@ public class OpenApiSchemaExportTest {
 
   @Test
   public void exportOpenApiSchema() throws Exception {
-    String schema = given().when().get("/q/openapi").then().statusCode(200).extract().asString();
+    // /artifacts/q/openapi, not /q/openapi: quarkus.http.non-application-root-path carries the
+    // gateway segment, because a document left at the root is unreachable through the gateway.
+    String schema =
+        given().when().get("/artifacts/q/openapi").then().statusCode(200).extract().asString();
 
     // The module is `service/`, so this resolves to the repo root's docs/ — matching the monorepo,
     // where the same test runs from a `service` module too.

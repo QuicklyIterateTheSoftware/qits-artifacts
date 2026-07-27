@@ -19,7 +19,7 @@ class RepositoryControllerTest {
         .contentType(ContentType.JSON)
         .body(Map.of("type", "ci-screenshots"))
         .when()
-        .put("/api/artifacts/repositories/ci-screenshots")
+        .put("/artifacts/api/repositories/ci-screenshots")
         .then()
         .statusCode(200)
         .body("repository.name", is("ci-screenshots"))
@@ -30,13 +30,13 @@ class RepositoryControllerTest {
         .contentType(ContentType.JSON)
         .body(Map.of("type", "ci-screenshots"))
         .when()
-        .put("/api/artifacts/repositories/ci-screenshots")
+        .put("/artifacts/api/repositories/ci-screenshots")
         .then()
         .statusCode(200);
 
     given()
         .when()
-        .get("/api/artifacts/repositories")
+        .get("/artifacts/api/repositories")
         .then()
         .statusCode(200)
         .body("repositories.name", hasItem("ci-screenshots"));
@@ -48,14 +48,14 @@ class RepositoryControllerTest {
         .contentType(ContentType.JSON)
         .body(Map.of("type", "ci-videos"))
         .when()
-        .put("/api/artifacts/repositories/clip-repo")
+        .put("/artifacts/api/repositories/clip-repo")
         .then()
         .statusCode(200);
     given()
         .contentType(ContentType.JSON)
         .body(Map.of("type", "ci-screenshots"))
         .when()
-        .put("/api/artifacts/repositories/clip-repo")
+        .put("/artifacts/api/repositories/clip-repo")
         .then()
         .statusCode(400);
   }

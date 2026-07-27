@@ -12,7 +12,7 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /**
  * Guards the artifacts <b>write</b> surface (POST upload + PUT repository ensure under {@code
- * /api/artifacts/}) with a single static token — this is a pure system API
+ * /artifacts/api/repositories/}) with a single static token — this is a pure system API
  * (docs/epics/qits-artifacts/). The paths are on {@code auth-core}'s token-free {@code PublicPaths}
  * allowlist (their callers are CI processes in containers with no user session), so this filter is
  * the write protection.
@@ -39,13 +39,16 @@ public class ArtifactsTokenFilter implements ContainerRequestFilter {
     if (token == null) {
       return; // open in dev/test — no token configured
     }
-    // getPath() is relative to the JAX-RS base (/api); normalize any leading slash. A write to
-    // /api/artifacts/... lands here as "artifacts/...".
+    // getPath() is relative to the JAX-RS base (quarkus.rest.path, /artifacts/api); normalize any
+    // leading slash. A write to /artifacts/api/repositories/... lands here as "repositories/...".
+    // The prefix is "repositories" and not "artifacts" because the segment carries that now — the
+    // resource @Paths dropped it. Every JAX-RS resource this service ships is under repositories/,
+    // so the match is the whole write surface, exactly as it was.
     String path = requestContext.getUriInfo().getPath();
     if (path.startsWith("/")) {
       path = path.substring(1);
     }
-    if (!path.startsWith("artifacts") || !WRITE_METHODS.contains(requestContext.getMethod())) {
+    if (!path.startsWith("repositories") || !WRITE_METHODS.contains(requestContext.getMethod())) {
       return;
     }
     if (!token.equals(requestContext.getHeaderString(TOKEN_HEADER))) {
