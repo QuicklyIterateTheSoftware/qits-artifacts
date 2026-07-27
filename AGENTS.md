@@ -79,9 +79,20 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 - `ArtifactsTokenFilter` matches on `getUriInfo().getPath()` starting with `artifacts` — the path
   relative to the JAX-RS base, so it holds whatever `quarkus.rest.path` is. It guards writes only,
   by design, and is a no-op when `qits.artifacts.token` is blank.
-- `service` shipping `quarkus.http.limits.max-body-size=64M` from a library jar raises a **global**
-  ceiling for the consuming app's routes too. That is the monorepo's own open tradeoff
-  (`docs/issues/2026-07-19_artifacts-global-max-body-size-widens-public-ingest-dos.md`), carried
-  over rather than solved here.
+- `service` ships `quarkus.http.limits.max-body-size=64M`, which is a **global** ceiling — every
+  route in the process, not just the upload. The monorepo tracks this as an open tradeoff
+  (`docs/issues/2026-07-19_artifacts-global-max-body-size-widens-public-ingest-dos.md`) and it is
+  carried over rather than solved. It is now *narrower* than it was: this module is its own process,
+  so the ceiling no longer reaches a consuming app's unrelated routes — only this service's.
+- `src/test/resources/application.properties` is **no longer the only copy** of
+  `quarkus.rest.path` — `src/main/resources/application.properties` carries it for the packaged
+  process. Change one and you must change both.
+- `OpenApiSchemaExportTest` writes `docs/openapi.yml`
+  (`./mvnw -pl service test -Dtest=OpenApiSchemaExportTest`). **`paths: {}` is correct output here**:
+  every artifacts operation carries `@Operation(hidden = true)`, as in the monorepo's own document,
+  and `/git/**` is Vert.x so it appears in no OpenAPI document at all. Committed anyway so unhiding
+  an operation shows up as a diff.
+- A `Failed to start quarkus` / `Port already bound: 8081` failure is the known flake
+  (`migration-plan.md` §9 item 14) — `@QuarkusTest` restarts racing for the test port. Re-run first.
 - The blob store's `RepositoryType` enum hardcodes the two CI types. Adding a type is a schema check
   constraint change plus a validation profile, not a config knob.

@@ -17,10 +17,20 @@ and neither has an inbound edge from the rest of qits. The git host landed here 
 | `artifacts/` | `eu.wohlben.qits.artifacts.*` — entity, persistence, dto, mapper, control, error. The blob store proper. No web, no JAX-RS. |
 | `service/` | `eu.wohlben.qits.artifacts.api` (the JAX-RS boundary) and `eu.wohlben.qits.githost` (the Vert.x + JGit smart-HTTP host). |
 
-Both are library jars, in the shape the monorepo already packaged `artifacts` in: a consuming
-Quarkus application pulls them in and gets the routes. Packaging `service` as an app would need an
-auth variant, a webui and a main class, none of which belong to this context — the same gap
-`migration-plan.md` §9 item 7 records for qits-workspaces.
+`artifacts/` is a library jar. **`service/` is the application** — augmented by the
+`quarkus-maven-plugin` into a process:
+
+    ./mvnw verify
+    java -jar service/target/quarkus-app/quarkus-run.jar   # :8080, blobs on /api/artifacts/**, git on /git/**
+
+It was extracted as a library, on the reasoning that packaging it would need an auth variant, a
+webui and a main class. All three have lapsed: authentication terminates at `qits-gateway` and this
+service reads a header, the webui stays in the monorepo, and Quarkus supplies the main class.
+
+Note the two route stacks resolve differently: `/api/artifacts/**` is JAX-RS and moves with
+`quarkus.rest.path`; `/git/**` is registered straight onto the Vert.x router and does not. A `git
+clone http://<host>/git/<repoId>` against the packaged process is the check that matters, because
+nothing in the JAX-RS configuration can prove it.
 
 `artifacts/` owns its **own datasource, persistence unit and Flyway lineage**
 (`db/artifacts/migration`, a separate H2 under `~/.qits/data/artifacts`). It always did — that

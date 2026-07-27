@@ -15,11 +15,13 @@
          (eu.wohlben.qits.artifacts.api) and the in-process JGit smart-HTTP git host
          (eu.wohlben.qits.githost, plain Vert.x routes at /git/*).
 
-         A library JAR, not a deployable app — the same shape the monorepo packages `artifacts`/`ci`
-         in, and the same shape qits-workspaces' `service` module has. A consuming Quarkus
-         application pulls it in and gets the routes. Packaging it as an app would need an auth
-         variant, a webui and a main class, none of which belong to this bounded context
-         (migration-plan.md §9 item 7 tracks the same gap for qits-workspaces).
+         A DEPLOYABLE APP, not a library JAR. It was extracted as a library — "a consuming Quarkus
+         application pulls it in and gets the routes" — because packaging it would have needed an
+         auth variant, a webui and a main class. All three reasons have lapsed: authentication
+         terminates at qits-gateway and this module reads a header (see security/), the webui stays
+         in the monorepo, and Quarkus supplies the main class.
+
+         See migration-deployables-plan.md in the superproject.
 
          Deliberately absent vs. the monorepo's `service`: quarkus-quinoa, quarkus-undertow (the git
          host is on Vert.x routes precisely to stay off the servlet stack), the MCP server tree, the
@@ -82,6 +84,24 @@
 
     <build>
         <plugins>
+            <plugin>
+                <!-- This module is the DEPLOYABLE, not a library jar. Augmentation is what produces
+                     target/quarkus-app/quarkus-run.jar; without this execution `mvn verify` proves
+                     the tests pass and proves nothing about whether the thing starts. Version comes
+                     from the root pom's pluginManagement. -->
+                <groupId>${quarkus.platform.group-id}</groupId>
+                <artifactId>quarkus-maven-plugin</artifactId>
+                <extensions>true</extensions>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>build</goal>
+                            <goal>generate-code</goal>
+                            <goal>generate-code-tests</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
             <plugin>
                 <artifactId>maven-compiler-plugin</artifactId>
             </plugin>
