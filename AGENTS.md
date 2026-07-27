@@ -48,6 +48,19 @@ do not renumber it, and do not treat `V1__init.sql` as a squash baseline. Never 
 
 The git host owns no tables at all.
 
+## Authentication
+
+Authentication happens at `qits-gateway`. This service resolves a principal from a trusted header
+(`X-Qits-User`, read by `artifacts/security/ForwardAuthMechanism`) and authenticates nothing.
+
+**`identity.isAnonymous()` is not a security state** — it means "no name for the audit row". A check
+of the form `if (identity.isAnonymous()) deny` would look like a security control and be worth
+nothing, because reaching this service at all already implies you are inside the trusted network.
+
+There is no auth variant to select and no authorization policy here, and roles are deliberately not
+resolved — the single role check the system has (`qits.auth.required-role`) is the gateway's. See
+`migration-auth-plan.md`.
+
 ## Tests
 
 - `mvn verify` runs 48 tests (28 in `artifacts/`, 20 in `service/`) in about 30s. There are no
