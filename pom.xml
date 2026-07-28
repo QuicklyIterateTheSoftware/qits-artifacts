@@ -63,6 +63,12 @@
         <mapstruct.version>1.6.3</mapstruct.version>
         <!-- Not in the platform BOM, so pinned here exactly as the monorepo pins it. -->
         <jgit.version>7.3.0.202506031305-r</jgit.version>
+        <failsafe-plugin.version>${surefire-plugin.version}</failsafe-plugin.version>
+
+        <!-- Integration tests run against a PACKAGED artifact, so a plain `mvn verify` — which
+             produces the fast-jar — skips them; `service`'s `native` profile flips this to false so
+             a `-Dnative` build exercises the binary it just compiled. -->
+        <skipITs>true</skipITs>
     </properties>
 
     <dependencyManagement>
@@ -138,6 +144,11 @@
                 <plugin>
                     <artifactId>maven-surefire-plugin</artifactId>
                     <version>${surefire-plugin.version}</version>
+                </plugin>
+                <plugin>
+                    <!-- `service` binds it; declared here so the version lives with surefire's. -->
+                    <artifactId>maven-failsafe-plugin</artifactId>
+                    <version>${failsafe-plugin.version}</version>
                 </plugin>
                 <plugin>
                     <groupId>io.smallrye</groupId>

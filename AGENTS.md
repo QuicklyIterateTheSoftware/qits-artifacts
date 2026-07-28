@@ -3,15 +3,52 @@
 Read `README.md` first: it defines the two things this repo owns (the blob store and the git host),
 the one port, and the config surface. This file is the working conventions on top of it.
 
-## The one rule that shapes everything
+## The two rules that shape everything
 
-This repo must build and test green from a **clone of itself alone** — no monorepo, no docker, no
-prior `mvn install` elsewhere, no credentials. `mvn verify` is the gate. Anything that would break
-that is not a tradeoff to weigh, it is the thing this repo exists to avoid.
+**A clone of this repo alone builds and tests green** — no monorepo, no docker, no prior
+`mvn install` elsewhere, no credentials. `mvn verify` is the gate. Anything that would break that is
+not a tradeoff to weigh, it is the thing this repo exists to avoid.
 
 That is why: the poms duplicate versions instead of inheriting them, no pom declares a `eu.wohlben:*`
 dependency, and `GitHostTest` builds its own bare origin with the git CLI instead of using the
 monorepo's antrun-derived `fixtures/testing-repo.git`.
+
+**`service/` compiles to a GraalVM native image**, the same rule qits-workspace-daemon and
+qits-gateway carry, and it extends the clone-alone rule rather than qualifying it: `.sdkmanrc` names
+`25.0.2-graalce`, so `sdk env` gives you a `native-image` and `./mvnw verify -Dnative` produces
+`service/target/qits-artifacts` in about a minute with no container involved.
+
+Two consequences worth stating before you reach for a dependency:
+
+- **A missing GraalVM does not fail the build.** Quarkus logs `Cannot find the native-image ...
+  Attempting to fall back to container build` and shells docker with a 1.8 GB Mandrel image. Green
+  either way, so the fallback is easy to be in without noticing — recognise it by the image pull.
+- **Every dependency is a decision about what the builder has to be told.** Reflection, dynamic
+  proxies, `ServiceLoader`, resource loading by computed name and JNI/JNA all need registering, and
+  the failure lands at *runtime* in the binary while the JVM suite stays green. This repo has
+  already paid that bill four times over — see "Native" below — so treat `PackagedProcessIT`, not
+  `mvn verify`, as the gate for anything that touches JGit, Jackson-serialised DTOs or the
+  datasource url.
+
+## Native
+
+`-Dnative` lives in `service/pom.xml`, not the root pom: only `service` is an application. It flips
+`skipITs` so the build runs `PackagedProcessIT` against the binary rather than skipping past it.
+`quarkus.package.output-name` and failsafe's `native.image.path` spell `qits-artifacts` twice and
+must move together, or the native IT launches nothing and passes.
+
+Everything that had to be declared, and the symptom each one produces if it is dropped:
+
+| Where | What | Symptom without it |
+|---|---|---|
+| `application.properties` | `--initialize-at-run-time` for `jgit.util.FileUtils`, `jgit.lib.internal.WorkQueue`, `jgit.internal.storage.file.WindowCache` | build fails: a seeded `Random`, a started `JGit-WorkQueue` thread in the image heap |
+| `githost/JGitReflection` | `values()` on every enum `Config.getEnum` reads | **every** git route 404s — `FileRepositoryBuilder.build` throws `NoSuchMethodException` and `open()` returns null |
+| `dto/UploadResult` | `@RegisterForReflection` | every upload 500s: the type is behind a `Response` return, so nothing registers it |
+| `CiPostReceiveNotifier` | the `HttpClient` is an instance field, not static | build fails: an `HttpClientFacade` in the image heap |
+| artifacts' `microprofile-config.properties` | H2 url with no `AUTO_SERVER` | the binary dies at boot on `ClassNotFoundException: org.h2.server.TcpServer` |
+
+Only the first is a build-time failure. The rest are green builds that fail in production, which is
+why the IT exists and why it drives a real `git clone`/`push` rather than asserting a status code.
 
 ## Paths
 
@@ -87,8 +124,15 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 
 ## Tests
 
-- `mvn verify` runs 53 tests (28 in `artifacts/`, 25 in `service/`) in about 30s. There are no
-  integration tests and no failsafe binding: nothing here needs docker.
+- `mvn verify` runs 53 tests (28 in `artifacts/`, 25 in `service/`) in about 30s. Nothing here
+  needs docker.
+- `mvn verify -Dnative` runs those, then 7 more: `PackagedProcessIT` against the compiled binary.
+  It is the only suite that starts a **process** rather than an in-JVM Quarkus, so it is where the
+  three route stacks are proved to coexist and where JGit is proved to have survived the compile.
+  Its `@TestProfile` points the datasource, the blobs dir and the git data-dir under `target/`,
+  passed to the launched binary as `-D` flags; it uses a **file** H2 of the same shape the
+  deployment runs, not the unit suite's in-memory one, because the file/embedded shape is the thing
+  that broke. Do not add a build-time property there — an IT cannot re-augment.
 - `GitHostTest.seedOrigin()` shells `git init` + `git clone --bare` into
   `target/githost-test-repos/<uuid>/origin`. Tests that need the name-addressed scheme register the
   alias on `FakeRepositoryNameResolver`, which is a plain `@ApplicationScoped` bean in test sources

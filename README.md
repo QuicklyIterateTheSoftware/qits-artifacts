@@ -17,11 +17,26 @@ and neither has an inbound edge from the rest of qits. The git host landed here 
 | `artifacts/` | `eu.wohlben.qits.artifacts.*` — entity, persistence, dto, mapper, control, error. The blob store proper. No web, no JAX-RS. |
 | `service/` | `eu.wohlben.qits.artifacts.api` (the JAX-RS boundary) and `eu.wohlben.qits.githost` (the Vert.x + JGit smart-HTTP host). |
 
-`artifacts/` is a library jar. **`service/` is the application** — augmented by the
-`quarkus-maven-plugin` into a process:
+`artifacts/` is a library jar. **`service/` is the application** — it carries
+`<packaging>quarkus</packaging>` and produces a process, as a JVM fast-jar or as a native binary:
 
     ./mvnw verify
     java -jar service/target/quarkus-app/quarkus-run.jar   # :8080, blobs on /artifacts/api/**, git on /artifacts/git/**
+
+    ./mvnw verify -Dnative
+    ./service/target/qits-artifacts                        # same routes, ~35ms to listening
+
+**Native is the shipping form.** `.sdkmanrc` names a GraalVM (`25.0.2-graalce`) so `sdk env` alone
+is enough toolchain: the build wants a `native-image` on `GRAALVM_HOME`, `JAVA_HOME` or `PATH`, and
+finding none it does not fail — it falls back to pulling a 1.8 GB Mandrel image and compiling under
+docker. That fallback still works and is what a CI without a GraalVM gets; it is just not the
+intended path, and it is worth recognising by name when a build that normally takes a minute starts
+downloading a container image.
+
+`-Dnative` also flips `skipITs`, so it runs `PackagedProcessIT` against the binary it just built —
+openapi, swagger-ui, a blob round trip and a real `git clone` + `push`. That suite is the only thing
+in this repo that exercises **JGit compiled ahead of time**, which is the part of this service most
+likely to break in a native image (see "The git host" below).
 
 It was extracted as a library, on the reasoning that packaging it would need an auth variant, a
 webui and a main class. All three have lapsed: authentication terminates at `qits-gateway` and this
@@ -40,6 +55,11 @@ it.
 (`db/artifacts/migration`, a separate H2 under `~/.qits/data/artifacts`). It always did — that
 lineage was never part of the monorepo's shared `db/migration`, so unlike every other extraction
 target nothing here had to be squashed or rebased. `V1__init.sql` is the original file, unchanged.
+
+That H2 is **embedded only** — the url no longer carries `AUTO_SERVER=TRUE`. Automatic mixed mode
+made sense while this was a library inside the monolith and a second JVM might open the same file;
+as its own process on its own volume a second writer would be a bug, and the option is fatal to the
+native binary, which has no `org.h2.server.TcpServer` to start.
 
 ## The blob store
 
@@ -72,6 +92,14 @@ an `<img>`/`<video>` src.
 deliberately **not** as a servlet, because `quarkus-undertow`'s presence breaks Quinoa's production
 static serving in the consuming app. JGit speaks the wire protocol and nothing else; the git CLI
 remains the only thing that mutates a repository.
+
+JGit is **not** a Quarkus extension, so nothing tells the native compiler about it and the whole git
+host is the part of this service that a GraalVM build breaks silently. Three things had to be
+declared, all of them in `service/src/main/resources/application.properties` and
+`githost/JGitReflection.java`, and each failed only in the binary while `mvn verify` stayed green:
+JGit's statics that cannot be frozen into an image (a `Random`, a started thread pool), and the enum
+`values()` methods `Config.getEnum` recovers reflectively — without which *every* repository fails
+to open and the host answers 404 to everything, indistinguishable from an unknown repo id.
 
 `git` is a second-level segment beside `api`, not `/artifacts/api/git/*`: it is a wire protocol
 spoken by `git`, not a JSON API, and it appears in no OpenAPI document. Git treats the url as an
