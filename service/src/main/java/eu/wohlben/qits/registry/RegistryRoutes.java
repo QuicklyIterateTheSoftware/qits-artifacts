@@ -251,10 +251,23 @@ public class RegistryRoutes {
     accepted(rc, name, session);
   }
 
-  /** {@code PUT /v2/<name>/blobs/uploads/<session>?digest=} — verify and promote. */
+  /**
+   * {@code PUT /v2/<name>/blobs/uploads/<session>?digest=} — verify and promote.
+   *
+   * <p>The final chunk is range-checked exactly like a {@code PATCH}: spec §"Pushing a blob in
+   * chunks" makes 416 a <b>MUST</b> for an out-of-order final chunk, and this path skipped the check
+   * until the upstream conformance suite failed on it. Without it the bytes were appended anyway and
+   * the mismatch surfaced as {@code 400 DIGEST_INVALID} — the same rejection, but a code that tells
+   * a client its content was wrong rather than that its offset was, so a resumable client retried
+   * the upload instead of resyncing. Note the check goes here rather than in
+   * {@link #finalizeUpload}: the monolithic {@code POST ...?digest=} shares that method and carries
+   * no {@code Content-Range}, and answering 4xx on that path is the classic way to break
+   * {@code docker push}.
+   */
   private void finishUpload(RoutingContext rc) {
     OciImageName name = registry.requireOciRepository(rc.pathParam("name"));
     OciUploadSessions.Session session = uploads.require(rc.pathParam("session"));
+    requireChunkStartsAtTheCurrentOffset(rc, session);
     finalizeUpload(rc, name, session, rc.request().getParam("digest"));
   }
 
@@ -307,6 +320,32 @@ public class RegistryRoutes {
     blobStore.promote(staged);
     created(rc, name, claimed);
   }
+
+  /**
+   * A manifest reference is a tag or a digest, and anything else is a {@code 400} — never a 404.
+   *
+   * <p>{@link RegistryPaths#REF} matches any non-slash segment so that a malformed reference reaches
+   * a handler at all; this is where it is judged. The distinction the two codes carry is the point:
+   * a reference carrying {@code :} is an attempt at a digest, so a bad one is {@code DIGEST_INVALID}
+   * and the client learns its digest was wrong, while a bad tag is {@code MANIFEST_INVALID}. Both are
+   * 400. Answering 404, as this route did until the conformance suite caught it, tells a client the
+   * manifest does not exist — which is a different and misleading claim.
+   */
+  private static void requireWellFormedReference(String reference) {
+    if (reference.indexOf(':') >= 0) {
+      OciDigest.requireHex(reference); // throws DIGEST_INVALID (400)
+      return;
+    }
+    if (!TAG.matcher(reference).matches()) {
+      throw new OciException(
+          OciCode.MANIFEST_INVALID,
+          "manifest reference is neither a valid tag nor a digest",
+          Map.of("reference", reference));
+    }
+  }
+
+  private static final java.util.regex.Pattern TAG =
+      java.util.regex.Pattern.compile(RegistryPaths.TAG);
 
   /**
    * A {@code Content-Range} whose start is not where the session currently stands is
@@ -384,6 +423,7 @@ public class RegistryRoutes {
   private void serveManifest(RoutingContext rc, boolean withBody) {
     OciImageName name = registry.requireOciRepository(rc.pathParam("name"));
     String reference = rc.pathParam("ref");
+    requireWellFormedReference(reference);
 
     OciRegistryService.StoredManifest manifest =
         registry
@@ -417,6 +457,7 @@ public class RegistryRoutes {
   private void putManifest(RoutingContext rc) {
     OciImageName name = registry.requireOciRepository(rc.pathParam("name"));
     String reference = rc.pathParam("ref");
+    requireWellFormedReference(reference);
     byte[] bytes = rc.body().buffer() == null ? new byte[0] : rc.body().buffer().getBytes();
 
     OciManifestParser.ParsedManifest parsed =

@@ -35,13 +35,23 @@ final class RegistryPaths {
   /** A wire digest. Only sha256, because it is the only one we can verify. */
   static final String DIGEST = "(?<digest>sha256:[a-f0-9]{64})";
 
+  /** The tag grammar, as the spec writes it. Note {@code :} is not in it, so a tag is never a digest. */
+  static final String TAG = "[a-zA-Z0-9_][a-zA-Z0-9._\\-]{0,127}";
+
   /**
-   * A {@code <ref>}: a tag or a digest. The two alternatives are disjoint — {@code :} is not in the
-   * tag grammar — so there is no precedence rule to get wrong, and a reference matching neither
-   * never reaches a handler at all.
+   * A {@code <ref>}: anything that is not a path segment separator. Deliberately looser than "a tag
+   * or a digest", for the same reason {@link #UPLOAD_SESSION}'s id is looser than a UUID — a
+   * malformed reference should reach the handler and be answered {@code 400}, not miss the route and
+   * be answered {@code 404}, which tells a client the manifest is absent when the truth is that its
+   * request was unusable.
+   *
+   * <p>This regex used to be {@code TAG|sha256:<64 hex>}, and the disjointness was its selling
+   * point. The upstream conformance suite falsified it: {@code PUT .../manifests/sha256:baddigest}
+   * matched neither alternative, so it fell to the catch-all and answered 404 where the spec asks for
+   * 400. Well-formedness is now the handlers' job — {@code requireWellFormedReference} — which is
+   * where it can distinguish "not a valid digest" from "not a valid tag" and say so.
    */
-  static final String REF =
-      "(?<ref>[a-zA-Z0-9_][a-zA-Z0-9._\\-]{0,127}|sha256:[a-f0-9]{64})";
+  static final String REF = "(?<ref>[^/]{1,256})";
 
   /**
    * An upload session id. Deliberately looser than a UUID: a malformed id should reach the handler

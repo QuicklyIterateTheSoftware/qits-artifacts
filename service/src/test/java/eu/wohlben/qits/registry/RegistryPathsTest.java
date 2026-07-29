@@ -82,9 +82,27 @@ class RegistryPathsTest {
     // A blob is addressed by digest only — a tag there is not a route.
     assertFalse(matches(RegistryPaths.BLOB, "/v2/qits/alpine/blobs/latest"));
     assertFalse(matches(RegistryPaths.BLOB, "/v2/qits/alpine/blobs/sha256:" + "a".repeat(63)));
-    // A tag may not begin with a separator.
-    assertFalse(matches(RegistryPaths.MANIFEST, "/v2/qits/alpine/manifests/-latest"));
-    assertFalse(matches(RegistryPaths.MANIFEST, "/v2/qits/alpine/manifests/.latest"));
+  }
+
+  @Test
+  void aMalformedReferenceReachesTheHandlerRatherThanMissingTheRoute() {
+    // The same stance as the single-segment name below: the route matches and the HANDLER judges, so
+    // the answer is 400 with a reason rather than a 404 claiming the manifest is absent. These four
+    // asserted `false` until the upstream conformance suite failed on the third one — a reference
+    // matching neither a tag nor a digest fell to the catch-all and answered 404 where the spec asks
+    // for 400. RegistryTest covers what each is answered with; this only pins that they arrive.
+    assertTrue(matches(RegistryPaths.MANIFEST, "/v2/qits/alpine/manifests/-latest"), "tag: leading -");
+    assertTrue(matches(RegistryPaths.MANIFEST, "/v2/qits/alpine/manifests/.latest"), "tag: leading .");
+    assertTrue(
+        matches(RegistryPaths.MANIFEST, "/v2/qits/alpine/manifests/sha256:baddigeststring"),
+        "digest-shaped but invalid — the conformance failure");
+    assertTrue(
+        matches(RegistryPaths.MANIFEST, "/v2/qits/alpine/manifests/sha512:" + "a".repeat(128)),
+        "an algorithm we do not implement is still a 400, not a 404");
+
+    // A reference still cannot span a path separator: that is a different route, or none.
+    assertFalse(matches(RegistryPaths.MANIFEST, "/v2/qits/alpine/manifests/foo/bar"));
+    assertFalse(matches(RegistryPaths.MANIFEST, "/v2/qits/alpine/manifests/"));
   }
 
   @Test

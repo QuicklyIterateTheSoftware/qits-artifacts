@@ -285,23 +285,34 @@ this registry's `405 UNSUPPORTED` is exactly that, so declaring the three is a s
 and not a shield. Turn them on and the count stays 430 pass / 2 fail; only the label on 283 tests
 changes.
 
-#### Known non-conformance
+#### Conformance status
 
-As of the run against `distribution-spec` `967efdc` (spec 1.1), **430 pass and 2 fail**:
+Against `distribution-spec` `967efdc` (spec 1.1): **586 run, 0 failures, 0 errors, 6 skipped**,
+under the capability declarations above.
 
-- **`sha256 blobs/chunked out-of-order and put chunk`** — the final `PUT` of a chunked upload does
-  not validate `Content-Range`. An out-of-order `PATCH` is correctly refused with `416`, but an
-  out-of-order final `PUT` has its bytes appended anyway and then fails the digest check with
-  `400 DIGEST_INVALID`. The spec: "If the final chunk is uploaded out of order, the registry MUST
-  respond with a `416 Requested Range Not Satisfiable`."
-- **`invalid-digest-format/manifest-put`** — `PUT /v2/<name>/manifests/sha256:baddigeststring` is a
-  reference that is neither a valid tag nor a valid digest, so it matches no route regex and falls
-  through to the catch-all `404 UNSUPPORTED`. The spec asks for `400`: "if the client provided
-  digest is invalid or uses an unsupported algorithm, the registry SHOULD respond with a response
-  code `400 Bad Request`."
+The suite found two genuine non-conformances on its first run, and both are fixed. Recorded because
+each was a deliberate design choice whose consequence was a wrong status code, and each is the kind
+of thing a client-side test written from our own reading of the spec cannot catch — `RegistryTest`
+and `PackagedProcessIT` drive a client built from the same reading that was wrong:
 
-Both are real, both are ours, and the IT is left failing on them on purpose. Do not widen the
-assertion or filter them out — fix the registry.
+- **The final `PUT` of a chunked upload did not validate `Content-Range`.** An out-of-order `PATCH`
+  was correctly refused with 416, but the final `PUT` skipped that check, appended the bytes anyway,
+  and failed the digest comparison with `400 DIGEST_INVALID`. The same rejection with the wrong
+  diagnosis: a resumable client was told its content was corrupt when its offset was stale. The spec
+  makes 416 a **MUST** here. Fixed in `RegistryRoutes.finishUpload`; covered by
+  `RegistryTest.theFinalChunkOfAnUploadMustStartWhereTheSessionStands`.
+- **An invalid digest in a manifest reference answered 404.** `sha256:baddigeststring` matched
+  neither alternative of the old `REF` regex, so it missed the route and hit the catch-all — telling
+  a client the manifest was absent when its request was unusable. The spec asks for 400. `REF` now
+  matches any non-slash segment and the handler judges well-formedness, the same stance the upload
+  session id already took; covered by
+  `RegistryTest.aMalformedReferenceIsRejectedRatherThanReportedAbsent`.
+
+Both fixes are guarded by ordinary unit tests, not by the conformance suite: it is opt-in and needs
+Go plus a checkout of the spec, so a regression must be catchable by `mvn verify` alone.
+
+If the suite ever reports a failure, **do not widen the IT's assertion or filter the case out** —
+either the registry is wrong, or a capability declaration above is.
 
 ## The boundary
 

@@ -150,11 +150,15 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   and `PackagedProcessIT` drive a client written from that same reading. It is gated on
   `-Doci.conformance-binary=<path>` and **skips** without it, which is load-bearing: `-Dnative`
   flips `skipITs`, so a failing gate would make a native build need Go. See README, "Conformance",
-  for how to build the binary, why three capability flags are declared `false`, and the **two
-  genuine non-conformances it currently reports** (an out-of-order final chunk `PUT` answers 400
-  rather than the mandated 416; an invalid digest in a manifest reference falls through to 404
-  rather than the 400 the spec asks for). Those two are left failing deliberately — the fix belongs
-  in `RegistryRoutes`, not in the assertion.
+  for how to build the binary and why three capability flags are declared `false`. It currently
+  reports 586 run, 0 failures.
+  Its first run found **two genuine non-conformances**, both since fixed, and both worth knowing as a
+  pattern: each was a deliberate design decision whose consequence was the wrong status code — an
+  out-of-order final chunk `PUT` answered 400 instead of the mandated 416, and an invalid digest in a
+  manifest reference missed the route and answered 404 instead of 400. Neither was reachable by
+  `RegistryTest`, because that suite drives a client written from the same misreading. **The fixes are
+  guarded by unit tests, not by this IT** — it is opt-in and needs Go, so anything it proves must also
+  be provable by `mvn verify` alone or it is not actually guarded.
 - `GitHostTest.seedOrigin()` shells `git init` + `git clone --bare` into
   `target/githost-test-repos/<uuid>/origin`. Tests that need the name-addressed scheme register the
   alias on `FakeRepositoryNameResolver`, which is a plain `@ApplicationScoped` bean in test sources

@@ -182,6 +182,83 @@ class RegistryTest {
         .body("errors[0].code", equalTo("MANIFEST_UNKNOWN"));
   }
 
+  /**
+   * "Absent" and "unusable" are different answers, and the difference is the whole point: a 404 says
+   * the manifest is not here, which invites a client to push it. These references cannot address a
+   * manifest at all.
+   *
+   * <p>Both cases answered 404 until the upstream conformance suite failed on the digest one — the
+   * reference matched neither the tag nor the digest alternative of the route regex, so it fell to
+   * the catch-all. See {@code RegistryPaths.REF}.
+   */
+  @Test
+  void aMalformedReferenceIsRejectedRatherThanReportedAbsent() {
+    // Digest-shaped, so the complaint is about the digest. This exact request is the conformance
+    // suite's `invalid-digest-format/manifest-put`.
+    http()
+        .contentType("application/vnd.oci.image.manifest.v1+json")
+        .body("{}")
+        .when()
+        .put("/v2/" + image + "/manifests/sha256:baddigeststring")
+        .then()
+        .statusCode(400)
+        .body("errors[0].code", equalTo("DIGEST_INVALID"));
+
+    // An algorithm we do not implement is the same answer, not a 404 and not a 501.
+    http()
+        .when()
+        .get("/v2/" + image + "/manifests/sha512:" + "a".repeat(128))
+        .then()
+        .statusCode(400)
+        .body("errors[0].code", equalTo("DIGEST_INVALID"));
+
+    // Not digest-shaped, so the complaint is about the tag.
+    http()
+        .when()
+        .get("/v2/" + image + "/manifests/-latest")
+        .then()
+        .statusCode(400)
+        .body("errors[0].code", equalTo("MANIFEST_INVALID"));
+  }
+
+  /**
+   * The spec makes 416 a <b>MUST</b> for an out-of-order final chunk, and the {@code PUT} skipped the
+   * check that {@code PATCH} already had — so the bytes were appended and the failure surfaced as
+   * {@code 400 DIGEST_INVALID}. Same rejection, wrong diagnosis: a resumable client was told its
+   * content was corrupt when its offset was stale, so it retried the upload instead of resyncing
+   * against the {@code Range} header.
+   */
+  @Test
+  void theFinalChunkOfAnUploadMustStartWhereTheSessionStands() {
+    String session =
+        given()
+            .when()
+            .post("/v2/" + image + "/blobs/uploads/")
+            .then()
+            .statusCode(202)
+            .extract()
+            .header("location");
+
+    byte[] first = "0123456789".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+    http()
+        .header("Content-Range", "0-" + (first.length - 1))
+        .body(first)
+        .when()
+        .patch(session)
+        .then()
+        .statusCode(202);
+
+    // The session stands at 10; claim to continue at 4096.
+    http()
+        .header("Content-Range", "4096-4100")
+        .body("world")
+        .when()
+        .put(session + (session.contains("?") ? "&" : "?") + "digest=" + ABSENT_DIGEST)
+        .then()
+        .statusCode(416)
+        .header("Range", equalTo("0-" + (first.length - 1)));
+  }
+
   // --- the roundtrip ------------------------------------------------------------------------
 
   @Test
