@@ -232,6 +232,77 @@ private-deployment scale. Nothing should come to depend on deletion semantics be
 `/v2/<name>/referrers/` is also absent; a manifest's `subject` is parsed and ignored rather than
 required to resolve.
 
+`sha512` content is rejected: the blob store is SHA-256 throughout — the content id *is* the
+sha256 — so a `sha512:` digest answers `400 DIGEST_INVALID`, which is the spec's own SHOULD for an
+unsupported algorithm. sha256 is the one algorithm the spec requires.
+
+### Conformance
+
+`RegistryTest` and `PackagedProcessIT` drive a client this repo wrote, so they can only assert the
+reading of the spec that went into writing it. `OciConformanceIT` runs
+[the upstream suite](https://github.com/opencontainers/distribution-spec/tree/main/conformance)
+instead — several hundred assertions nobody here authored — against the packaged process.
+
+It is **opt-in and run on demand**, never in a pipeline and never in a plain `verify`: the suite is
+a Go binary with no published release, and a clone of this repo must keep building green with
+nothing but a JDK. Build it once, then point the IT at it:
+
+```
+git clone https://github.com/opencontainers/distribution-spec.git
+cd distribution-spec/conformance && go build -o conformance .    # needs Go >= 1.24
+
+./mvnw verify -DskipITs=false \
+    -Doci.conformance-binary=/abs/path/to/distribution-spec/conformance/conformance
+```
+
+Add `-Dit.test=OciConformanceIT` to run only this one, or `-Dnative` to exercise the GraalVM binary
+instead of the fast-jar. **Without the property the IT skips**, which is what keeps `-Dnative` —
+which flips `skipITs` — from starting to need Go.
+
+The IT ensures the `conformance` repository over the REST API first (nothing is created implicitly),
+then asserts on the suite's `junit.xml`: zero failures, zero errors. It parses that file rather than
+trusting the exit code, because the binary's `main` *returns* — status 0 — when its config fails to
+load, having written no report at all. Failures name the failing testcases and the path to
+`report.html`, which carries every request and response.
+
+**Three capabilities are declared `false`, and they are design decisions of this service, not
+failing tests being hidden.** The suite has no notion of "this registry chose not to implement
+that"; every optional API is a flag the operator declares, and leaving one on that the registry
+never serves fails tests for an endpoint it states it does not have:
+
+| Flag | Why |
+|---|---|
+| Flag | Cost of leaving it on | Why it is off |
+|---|---|---|
+| `OCI_API_BLOBS_DELETE`, `OCI_API_MANIFESTS_DELETE`, `OCI_API_TAGS_DELETE` | **0 failures** (283 tests move from Disabled to Skip) | `DELETE` is 405 by design — the store is append-only and there is no garbage collector, so deletion has no meaning here yet. See "Deliberately not implemented" above. |
+| `OCI_API_REFERRER` | **+15 failures** | `/v2/<name>/referrers/` is absent. The spec makes it optional in as many words: a 404 is the defined "referrers API unavailable" signal with a mandated client fallback to the referrers tag schema, and the `OCI-Subject` response header is required only of "a registry implementation that supports the referrers API". |
+| `OCI_DATA_SHA512` | **+81 failures** | The blob store is SHA-256 only, and answers `400` to a sha512 digest — the spec's own SHOULD for an unsupported algorithm. sha256, the required one, stays fully exercised. |
+
+Everything the spec makes mandatory is left on. The costs above are measured, one flag at a time,
+not estimated — and the first row is the one worth knowing: **the delete flags hide nothing.** The
+suite tracks an endpoint that answers with a valid "unsupported" status rather than failing it, and
+this registry's `405 UNSUPPORTED` is exactly that, so declaring the three is a statement of intent
+and not a shield. Turn them on and the count stays 430 pass / 2 fail; only the label on 283 tests
+changes.
+
+#### Known non-conformance
+
+As of the run against `distribution-spec` `967efdc` (spec 1.1), **430 pass and 2 fail**:
+
+- **`sha256 blobs/chunked out-of-order and put chunk`** — the final `PUT` of a chunked upload does
+  not validate `Content-Range`. An out-of-order `PATCH` is correctly refused with `416`, but an
+  out-of-order final `PUT` has its bytes appended anyway and then fails the digest check with
+  `400 DIGEST_INVALID`. The spec: "If the final chunk is uploaded out of order, the registry MUST
+  respond with a `416 Requested Range Not Satisfiable`."
+- **`invalid-digest-format/manifest-put`** — `PUT /v2/<name>/manifests/sha256:baddigeststring` is a
+  reference that is neither a valid tag nor a valid digest, so it matches no route regex and falls
+  through to the catch-all `404 UNSUPPORTED`. The spec asks for `400`: "if the client provided
+  digest is invalid or uses an unsupported algorithm, the registry SHOULD respond with a response
+  code `400 Bad Request`."
+
+Both are real, both are ours, and the IT is left failing on them on purpose. Do not widen the
+assertion or filter them out — fix the registry.
+
 ## The boundary
 
 Everything this context needs from the rest of qits goes through a port it declares and the

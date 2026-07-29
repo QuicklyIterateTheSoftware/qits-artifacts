@@ -145,6 +145,16 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   passed to the launched binary as `-D` flags; it uses a **file** H2 of the same shape the
   deployment runs, not the unit suite's in-memory one, because the file/embedded shape is the thing
   that broke. Do not add a build-time property there — an IT cannot re-augment.
+- `OciConformanceIT` runs the **upstream** OCI distribution-spec suite against the packaged process,
+  and it is the only test here that can falsify this repo's own reading of the spec — `RegistryTest`
+  and `PackagedProcessIT` drive a client written from that same reading. It is gated on
+  `-Doci.conformance-binary=<path>` and **skips** without it, which is load-bearing: `-Dnative`
+  flips `skipITs`, so a failing gate would make a native build need Go. See README, "Conformance",
+  for how to build the binary, why three capability flags are declared `false`, and the **two
+  genuine non-conformances it currently reports** (an out-of-order final chunk `PUT` answers 400
+  rather than the mandated 416; an invalid digest in a manifest reference falls through to 404
+  rather than the 400 the spec asks for). Those two are left failing deliberately — the fix belongs
+  in `RegistryRoutes`, not in the assertion.
 - `GitHostTest.seedOrigin()` shells `git init` + `git clone --bare` into
   `target/githost-test-repos/<uuid>/origin`. Tests that need the name-addressed scheme register the
   alias on `FakeRepositoryNameResolver`, which is a plain `@ApplicationScoped` bean in test sources
