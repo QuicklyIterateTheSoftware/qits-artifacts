@@ -81,10 +81,6 @@ RUN ./mvnw --version
 # already sitting here.
 COPY . .
 
-# The whole reactor again, for the same reason: no `-pl service -am`. That would build exactly
-# today's dependency graph, so a module added tomorrow would be silently absent from the image
-# rather than merely unused. Both modules are on `service`'s path anyway, so selecting costs
-# nothing and buys nothing.
 #
 # -Dnative flips quarkus.native.enabled (the `native` profile lives in service/pom.xml — only that
 # module is an application). Cap native-image RAM so the build is deterministic on small machines.
@@ -93,7 +89,15 @@ COPY . .
 # --bare` to seed its origins, and the `native` profile flips skipITs so PackagedProcessIT would
 # launch the freshly built binary as a second process inside this stage. `./mvnw verify -Dnative` on
 # a clone is the gate for both.
-RUN ./mvnw -B -ntp package -Dnative -DskipTests \
+#
+# `-pl service -am` builds the app and its dependency closure, not the whole reactor. That is not a
+# module list — it names the one module this image ships, which the COPY below already names anyway,
+# so nothing is gained by leaving it out. What it buys: this repo will publish libraries as well as
+# an image, and a reactor then holds modules that exist for consumers rather than for the binary. On
+# a whole-reactor build a compile error in one of those would block deploying this service, and build
+# time would grow with the published surface instead of with the app. The image build should depend
+# on exactly what the image contains.
+RUN ./mvnw -B -ntp -pl service -am package -Dnative -DskipTests \
       -Dquarkus.native.native-image-xmx=4g
 
 # --- runtime --------------------------------------------------------------------------------------
