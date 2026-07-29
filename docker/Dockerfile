@@ -29,13 +29,29 @@
 # qits-projects clones bare origins into it and qits-workspaces branches from them, so all three
 # must resolve it to the SAME volume or the git host serves an empty tree. A container that came up
 # healthy on an ephemeral copy is the failure that hides; one that refuses to start is the failure
-# you see. So a deployment mounts a volume at /data (which this image owns, see the runtime stage)
-# and names all three:
+# you see.
+#
+# The three paths are NOT the same kind of state, and this image treats them differently:
+#
+#   the git tree      `qits.repositories.data-dir` is settled, and nothing in it is stored in SQL —
+#                     it is bare origins on disk. The image names it itself (see the runtime stage)
+#                     so it is correct out of the box, and it names the SAME literal qits-projects
+#                     and qits-workspaces ship, so one volume satisfies the three-way contract
+#                     without a deployment having to get one string right in three places.
+#
+#   the database      the prototype. Deliberately unnamed here; the service will not start until a
+#                     deployment says where it goes.
+#
+#   the blob dir      files on disk, but every one of them is indexed by a row in that database —
+#                     blobs whose index did not survive are not data, they are orphans. So it stays
+#                     with the database rather than with the git tree, and is named alongside it.
+#
+# So a deployment mounts a volume at /data (which this image owns, see the runtime stage) and names
+# the two that belong to the prototype:
 #
 #   docker run -v qits-artifacts-data:/data \
 #     -e QUARKUS_DATASOURCE_ARTIFACTS_JDBC_URL=jdbc:h2:file:/data/artifacts/h2/artifacts \
 #     -e QITS_ARTIFACTS_BLOBS_DIR=/data/artifacts/blobs \
-#     -e QITS_REPOSITORIES_DATA_DIR=/data/repositories \
 #     qits/artifacts:latest
 #
 # One more has no safe default and no error when it is wrong: `qits.ci.intake-url`, where the git
@@ -96,7 +112,16 @@ RUN chmod +x /work/qits-artifacts
 # of the config error, which reads like a bug in this image and is not one. Group-writable and
 # group-root because a ubi image is meant to survive being assigned an arbitrary UID with GID 0.
 # (A bind mount still takes its ownership from the host — nothing in an image can fix that.)
-RUN mkdir -p /data && chown 1001:root /data && chmod 775 /data
+RUN mkdir -p /data/repositories && chown -R 1001:root /data && chmod -R 775 /data
+
+# The git tree, named here rather than left to a deployment: it is not the prototype, and nothing in
+# it is stored in SQL. `/data/repositories` is a literal qits-projects and qits-workspaces also ship
+# — the three-way contract in the header only holds if all three resolve it to the same volume, and
+# three services each told the same string separately is three chances to get it wrong.
+#
+# Note what is NOT set beside it: no QUARKUS_DATASOURCE_* and no QITS_ARTIFACTS_BLOBS_DIR. That
+# asymmetry is the point — the git host works out of the box, the prototype's storage refuses to.
+ENV QITS_REPOSITORIES_DATA_DIR=/data/repositories
 
 # One port for all of it — /artifacts/api/** (JAX-RS), /artifacts/q/** (openapi, swagger-ui) and
 # /artifacts/git/** (raw Vert.x) are three route stacks in one process, not three listeners.
