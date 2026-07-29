@@ -2,6 +2,7 @@ package eu.wohlben.qits;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -11,6 +12,9 @@ import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusIntegrationTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
+import eu.wohlben.qits.registry.OciClient;
+import eu.wohlben.qits.registry.TinyImage;
+import java.net.URI;
 import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -76,6 +80,9 @@ class PackagedProcessIT {
   @TestHTTPResource("/artifacts/git")
   URL gitBase;
 
+  @TestHTTPResource("/")
+  URL root;
+
   @Test
   void frameworkSurfaceIsServedUnderTheQSegment() {
     // quarkus.http.non-application-root-path, and swagger-ui only because always-include=true
@@ -132,6 +139,63 @@ class PackagedProcessIT {
   }
 
   @Test
+  void theRegistryIsMountedAtTheHostRootNotUnderTheArtifactsSegment() {
+    // /v2 is a literal in the route code, like /artifacts/git — no config key moves it, and docker
+    // and podman hardcode the prefix at the ROOT, so a drift to /artifacts/v2 would be invisible
+    // everywhere except here.
+    given()
+        .when()
+        .get("/v2/")
+        .then()
+        .statusCode(200)
+        .header("Docker-Distribution-Api-Version", "registry/2.0");
+    given().when().get("/artifacts/v2/").then().statusCode(404);
+  }
+
+  @Test
+  void anImageRoundTripsThroughTheBinary() {
+    // The registry's whole path in one test, and the parts of it that only a binary can falsify:
+    // a blob is served with HttpServerResponse.sendFile — through Vert.x' FileResolver and a Netty
+    // file region, neither of which behaves the same in a native image as on the JVM — and the
+    // upload arrives CHUNKED, which is the encoding docker uses and the one the global wire ceiling
+    // does not gate.
+    ensureOciRepository();
+
+    try (OciClient client = new OciClient(URI.create(root.toString()))) {
+      TinyImage subject = TinyImage.of("packaged-it");
+      client.push("qits/it", "latest", subject);
+
+      TinyImage pulled = client.pull("qits/it", "latest");
+      assertArrayEquals(subject.manifest(), pulled.manifest());
+      assertArrayEquals(
+          subject.layer().bytes(),
+          pulled.layer().bytes(),
+          "sendFile must return the exact bytes from the binary");
+    }
+  }
+
+  @Test
+  void anUnknownBlobAnswersTheSpecErrorEnvelopeRatherThanA500() {
+    // The UploadResult lesson, restated for a raw Vert.x route: nothing in the build sees a type
+    // that is only serialised inside such a handler, so a DTO there 500s in the binary while the
+    // JVM suite stays green. Asserting the envelope's SHAPE is what catches that — a bare 404 would
+    // not. (The registry builds this with JsonObject precisely so it cannot happen.)
+    //
+    // The repository has to exist for this to be a BLOB_UNKNOWN rather than a NAME_UNKNOWN; both
+    // would prove the envelope, but a test that asserts one and accepts the other depending on
+    // method order is not asserting anything.
+    ensureOciRepository();
+    given()
+        .urlEncodingEnabled(false)
+        .when()
+        .get("/v2/qits/it/blobs/sha256:" + "0".repeat(64))
+        .then()
+        .statusCode(404)
+        .contentType(containsString("json"))
+        .body("errors[0].code", equalTo("BLOB_UNKNOWN"));
+  }
+
+  @Test
   void gitSmartHttpAdvertisesRefsFromTheBinary() throws Exception {
     // JGit's UploadPack running inside the compiled binary. A 404 here would mean the route is
     // missing; a 500 would mean JGit itself did not survive the compile.
@@ -184,6 +248,17 @@ class PackagedProcessIT {
 
     String originSha = runGit(origin, "git", "rev-parse", "refs/heads/" + branch).trim();
     assertEquals(pushedSha, originSha, "push should have advanced the origin's branch ref");
+  }
+
+  /** Idempotent, like the endpoint itself — the registry never creates a repository implicitly. */
+  private void ensureOciRepository() {
+    given()
+        .contentType("application/json")
+        .body("{\"type\":\"oci-images\"}")
+        .when()
+        .put("/artifacts/api/repositories/qits")
+        .then()
+        .statusCode(200);
   }
 
   /**

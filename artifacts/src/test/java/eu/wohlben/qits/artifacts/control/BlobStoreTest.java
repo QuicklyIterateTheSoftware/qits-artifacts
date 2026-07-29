@@ -13,6 +13,8 @@ import jakarta.inject.Inject;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.HexFormat;
 import org.junit.jupiter.api.Test;
@@ -55,10 +57,72 @@ class BlobStoreTest extends ArtifactsTestSupport {
   }
 
   @Test
+  void appendingInChunksGivesTheSameDigestAsOneShot() {
+    // The OCI upload session spans three HTTP requests, so the registry cannot use stage(): it
+    // needs a handle that survives between them. What must not change is the answer.
+    byte[] bytes = TestMedia.png(4, 4, 11);
+    String oneShot = blobStore.stage(new ByteArrayInputStream(bytes), 1024).sha256();
+
+    int third = bytes.length / 3;
+    try (BlobStore.IncrementalStage staged = blobStore.stageIncremental()) {
+      staged.append(new ByteArrayInputStream(bytes, 0, third), 1024);
+      assertEquals(third, staged.written(), "written() is the offset a resume must continue from");
+      staged.append(new ByteArrayInputStream(bytes, third, third), 1024);
+      staged.append(
+          new ByteArrayInputStream(bytes, 2 * third, bytes.length - 2 * third), 1024);
+
+      BlobStore.StagedBlob finished = staged.finish();
+      assertEquals(oneShot, finished.sha256(), "three chunks must hash to the same blob as one");
+      assertEquals(bytes.length, finished.size());
+      assertFalse(blobStore.promote(finished));
+    }
+    assertTrue(blobStore.exists(oneShot));
+  }
+
+  @Test
+  void aCapTrippedMidSessionLeavesNoTempFile() throws Exception {
+    // The cap counts the blob's TOTAL size, not one call's contribution, and the temp file must go
+    // with it — a session that dies holding 900 MB of a rejected layer is the disk-exhaustion path.
+    byte[] bytes = TestMedia.png(4, 4, 12);
+    BlobStore.IncrementalStage staged = blobStore.stageIncremental();
+    staged.append(new ByteArrayInputStream(bytes, 0, 4), 8);
+    assertThrows(
+        PayloadTooLargeException.class,
+        () -> staged.append(new ByteArrayInputStream(bytes, 4, bytes.length - 4), 8));
+    assertEquals(0, tempFileCount(), "the aborted stage must not leave its temp file behind");
+  }
+
+  @Test
+  void locateIsAbsoluteAndGuardsTheSameIdsOpenDoes() {
+    // sendFile needs a path, but handing one out must not become the traversal hole that a caller
+    // building Path.of(blobsDir, id) itself would be — so locate() goes through the same gate.
+    byte[] bytes = TestMedia.png(2, 2, 13);
+    BlobStore.StagedBlob staged = blobStore.stage(new ByteArrayInputStream(bytes), 1024);
+    blobStore.promote(staged);
+
+    Path located = blobStore.locate(staged.sha256());
+    assertTrue(located.isAbsolute(), "Vert.x' FileResolver falls back to the classpath on a name");
+    assertTrue(Files.exists(located));
+
+    assertThrows(NotFoundException.class, () -> blobStore.locate("../../etc/passwd"));
+    assertThrows(NotFoundException.class, () -> blobStore.locate("a".repeat(64)));
+  }
+
+  @Test
   void malformedIdIsNotFoundNotATraversal() {
     assertThrows(NotFoundException.class, () -> blobStore.open("../../etc/passwd"));
     assertThrows(NotFoundException.class, () -> blobStore.open("not-a-sha"));
     assertFalse(blobStore.exists("../../etc/passwd"));
+  }
+
+  private long tempFileCount() throws IOException {
+    Path temp = Path.of(blobsDir, "tmp");
+    if (!Files.isDirectory(temp)) {
+      return 0;
+    }
+    try (var entries = Files.list(temp)) {
+      return entries.count();
+    }
   }
 
   @Test

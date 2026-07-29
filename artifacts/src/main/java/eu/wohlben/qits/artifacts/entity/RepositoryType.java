@@ -11,9 +11,16 @@ import java.util.Set;
  * Deliberately thin — the deferred protocol types (maven/npm/docker) slot in as new constants
  * without touching the core.
  *
- * <p>This feature ships the two media types that serve the golden-diff loop. Required keys are the
- * pairing/comparison keys the future diff UI needs (branch, commit, flow name + hash, display name,
- * diff hash) plus the media resolution each type can express.
+ * <p>The two CI types serve the golden-diff loop. Their required keys are the pairing/comparison
+ * keys the future diff UI needs (branch, commit, flow name + hash, display name, diff hash) plus the
+ * media resolution each type can express.
+ *
+ * <p>{@code OCI_IMAGES} is the first constant to take the other option the seam allows: a protocol
+ * type, whose bytes bypass the validating upload path entirely and reach {@code BlobStore} through
+ * its own wire routes. Read its javadoc before assuming a new type behaves like the CI ones.
+ *
+ * <p>Adding a constant is a schema change as well as a code change — {@code artifact_repository.type}
+ * carries a check constraint, named {@code ck_artifact_repository_type} since V2.
  */
 public enum RepositoryType {
 
@@ -44,7 +51,31 @@ public enum RepositoryType {
           "media.resolution.length"),
       // 64 MB: generous for a short compressed golden clip, matched to the global HTTP body ceiling
       // (see service application.properties + docs/issues on the max-body-size tradeoff).
-      64L * 1024 * 1024);
+      64L * 1024 * 1024),
+
+  /**
+   * Container images, served over the OCI Distribution API at {@code /v2}.
+   *
+   * <p>Unlike the two CI types this one is <b>not</b> served by {@link
+   * eu.wohlben.qits.artifacts.control.BlobService}: its bytes arrive through the registry routes
+   * ({@code eu.wohlben.qits.registry}), which talk to {@link
+   * eu.wohlben.qits.artifacts.control.BlobStore} directly — no media-type sniffing (a gzipped tar
+   * layer sniffs to nothing and would 400), no required metadata keys, no {@code artifact_record}
+   * row. A layer is addressed by its digest and nothing else.
+   *
+   * <p>So both profile fields are <b>empty</b> and the cap is <b>zero</b> — "not applicable", not
+   * "unlimited". The empty media-type set is what makes that safe rather than merely unused: a stray
+   * {@code POST /artifacts/api/repositories/&lt;an oci repo&gt;/blobs} fails {@code accepts()} and is
+   * rejected before {@code BlobService} ever reads {@link #maxBytes()}. And zero rather than a
+   * plausible-looking number is deliberate: if this profile ever gains a media type, a zero cap
+   * fails loudly at the first byte instead of quietly accepting a gigabyte down a path that was
+   * never meant to carry one.
+   *
+   * <p>The real layer cap is {@code qits.artifacts.oci.max-layer-size} (default 1G), resolved in the
+   * registry. It is a config knob and not a constant here because it has to move with {@code
+   * quarkus.http.limits.max-body-size} — a deployment's disk budget, not a property of the format.
+   */
+  OCI_IMAGES(Set.of(), Set.of(), 0L);
 
   private final Set<String> allowedMediaTypes;
   private final Set<String> requiredMetadataKeys;

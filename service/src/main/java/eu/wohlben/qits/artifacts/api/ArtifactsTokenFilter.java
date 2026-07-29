@@ -1,14 +1,14 @@
 package eu.wohlben.qits.artifacts.api;
 
+import eu.wohlben.qits.artifacts.control.ArtifactsToken;
+import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ContainerRequestFilter;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.ext.Provider;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
-import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /**
  * Guards the artifacts <b>write</b> surface (POST upload + PUT repository ensure under {@code
@@ -20,6 +20,11 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
  * <p>The header is {@code X-Artifacts-Token}. When {@code qits.artifacts.token} is blank (the
  * dev/test default) the guard is a no-op, keeping dev and the suites friction-free. Reads (GET) are
  * never guarded — a blob must be usable directly as an {@code <img>}/{@code <video>} src.
+ *
+ * <p>This filter is JAX-RS, so it sees only what RESTEasy dispatches. It does <b>not</b> run on the
+ * raw Vert.x routes — neither {@code /artifacts/git/*} nor the registry's {@code /v2/*}, which
+ * carries its own guard in {@code RegistryAuthGuard}. The two share the secret and the blank-is-open
+ * rule through {@link ArtifactsToken}, and nothing else.
  */
 @Provider
 public class ArtifactsTokenFilter implements ContainerRequestFilter {
@@ -28,15 +33,11 @@ public class ArtifactsTokenFilter implements ContainerRequestFilter {
 
   private static final Set<String> WRITE_METHODS = Set.of("POST", "PUT", "DELETE", "PATCH");
 
-  // Optional so a blank/absent value is "no token configured" (open) — an empty String value is
-  // treated as absent by SmallRye Config and would fail a plain String injection.
-  @ConfigProperty(name = "qits.artifacts.token")
-  Optional<String> configuredToken;
+  @Inject ArtifactsToken token;
 
   @Override
   public void filter(ContainerRequestContext requestContext) {
-    String token = configuredToken.map(String::trim).filter(t -> !t.isEmpty()).orElse(null);
-    if (token == null) {
+    if (!token.enforced()) {
       return; // open in dev/test — no token configured
     }
     // getPath() is relative to the JAX-RS base (quarkus.rest.path, /artifacts/api); normalize any
@@ -51,7 +52,7 @@ public class ArtifactsTokenFilter implements ContainerRequestFilter {
     if (!path.startsWith("repositories") || !WRITE_METHODS.contains(requestContext.getMethod())) {
       return;
     }
-    if (!token.equals(requestContext.getHeaderString(TOKEN_HEADER))) {
+    if (!token.matches(requestContext.getHeaderString(TOKEN_HEADER))) {
       requestContext.abortWith(
           Response.status(Response.Status.UNAUTHORIZED)
               .entity(Map.of("message", "Missing or invalid " + TOKEN_HEADER))

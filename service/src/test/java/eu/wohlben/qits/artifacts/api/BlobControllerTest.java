@@ -48,6 +48,26 @@ class BlobControllerTest {
   }
 
   @Test
+  void thePerTypeCapStillFiresWellBelowTheRaisedGlobalCeiling() {
+    // The other half of the test above, and the half the OCI registry's ceiling raise threatened.
+    // 26 MB is over ci-screenshots' 25 MB type cap but far under the 1088M wire ceiling, so the
+    // only thing that can reject it is BlobStore's own cap.
+    //
+    // The assertion that matters is the BODY, not the status: both rejections are a 413, but a
+    // wire-level one (Quarkus' order -2 route, or VertxInputStream) answers with an empty body,
+    // while BlobStore's cap comes back through ArtifactsExceptionMapper with a message. Only the
+    // second proves the two limits are still independent — which is exactly what M0 had to
+    // establish before the ceiling could move.
+    byte[] overCap = Arrays.copyOf(ArtifactsTestMedia.png(100, 50, 7), 26 * 1024 * 1024);
+    upload("main", "over-cap", overCap)
+        .when()
+        .post("/artifacts/api/repositories/ci-screenshots/blobs")
+        .then()
+        .statusCode(413)
+        .body("message", containsString("size cap"));
+  }
+
+  @Test
   void uploadServeAndQueryRoundTrip() {
     byte[] png = ArtifactsTestMedia.png(100, 50, 1);
     String id =

@@ -2,6 +2,8 @@ package eu.wohlben.qits.artifacts.control;
 
 import eu.wohlben.qits.artifacts.persistence.ArtifactRecordRepository;
 import eu.wohlben.qits.artifacts.persistence.ArtifactRepositoryRepository;
+import eu.wohlben.qits.artifacts.persistence.OciManifestRepository;
+import eu.wohlben.qits.artifacts.persistence.OciTagRepository;
 import io.quarkus.narayana.jta.QuarkusTransaction;
 import jakarta.inject.Inject;
 import java.io.IOException;
@@ -20,6 +22,10 @@ abstract class ArtifactsTestSupport {
 
   @Inject ArtifactRepositoryRepository repositories;
 
+  @Inject OciManifestRepository ociManifests;
+
+  @Inject OciTagRepository ociTags;
+
   @ConfigProperty(name = "qits.artifacts.blobs-dir")
   String blobsDir;
 
@@ -28,6 +34,9 @@ abstract class ArtifactsTestSupport {
     QuarkusTransaction.requiringNew()
         .run(
             () -> {
+              // The registry tables first: both carry a foreign key to artifact_repository.
+              ociTags.deleteAll();
+              ociManifests.deleteAll();
               records.deleteAll();
               repositories.deleteAll();
             });
