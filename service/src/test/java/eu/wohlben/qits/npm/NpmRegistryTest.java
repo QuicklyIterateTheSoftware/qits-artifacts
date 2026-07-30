@@ -154,6 +154,44 @@ class NpmRegistryTest {
   }
 
   @Test
+  void theForwardedPortIsPartOfTheTarballUrl() {
+    // The gateway splits the dialled authority across two headers — X-Forwarded-Host is the host
+    // alone, the port travels as X-Forwarded-Port. A local deployment's gateway sits on 8080, so
+    // dropping the port header rewrites localhost:8080 into localhost and every tarball dials 80.
+    TinyPackage subject = TinyPackage.of(scopedName(), "1.0.0");
+    try (NpmClient npm = client()) {
+      npm.publish("npm", encoded(subject.name()), subject.publishDocument("latest"));
+    }
+    try (NpmClient viaGateway =
+        client()
+            .header("X-Forwarded-Host", "localhost")
+            .header("X-Forwarded-Proto", "http")
+            .header("X-Forwarded-Port", "8080")) {
+      assertEquals(
+          "http://localhost:8080/artifacts/npm/npm/" + subject.name() + "/-/" + subject.tarballFile(),
+          NpmClient.tarballUrl(viaGateway.packumentJson("npm", encoded(subject.name())), "1.0.0"));
+    }
+  }
+
+  @Test
+  void aSchemeDefaultForwardedPortStaysOutOfTheUrl() {
+    // 443 on https (and 80 on http) re-appended would be harmless but ugly; canonical urls omit it.
+    TinyPackage subject = TinyPackage.of(scopedName(), "1.0.0");
+    try (NpmClient npm = client()) {
+      npm.publish("npm", encoded(subject.name()), subject.publishDocument("latest"));
+    }
+    try (NpmClient viaGateway =
+        client()
+            .header("X-Forwarded-Host", "qits.example")
+            .header("X-Forwarded-Proto", "https")
+            .header("X-Forwarded-Port", "443")) {
+      assertEquals(
+          "https://qits.example/artifacts/npm/npm/" + subject.name() + "/-/" + subject.tarballFile(),
+          NpmClient.tarballUrl(viaGateway.packumentJson("npm", encoded(subject.name())), "1.0.0"));
+    }
+  }
+
+  @Test
   void withNoForwardingHopTheUrlIsTheAuthorityTheClientActuallyDialled() {
     // A qits-net client dials qits-artifacts:8080 directly and there is no gateway to ask.
     TinyPackage subject = TinyPackage.of(scopedName(), "1.0.0");

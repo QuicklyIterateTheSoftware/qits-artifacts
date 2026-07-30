@@ -485,6 +485,15 @@ public class NpmRoutes {
           forwardedProto == null
               ? defaultScheme(request)
               : forwardedProto.toLowerCase(Locale.ROOT);
+      // The gateway splits the dialled authority across two headers: X-Forwarded-Host carries the
+      // host alone and the port travels separately. Reading only the host silently rewrites
+      // localhost:8080 into localhost — a document whose tarball urls dial port 80.
+      String forwardedPort = firstToken(request.getHeader("X-Forwarded-Port"));
+      if (forwardedPort != null
+          && authority.indexOf(':') < 0
+          && !isDefaultPort(scheme, forwardedPort)) {
+        authority = authority + ":" + forwardedPort;
+      }
     } else {
       HostAndPort dialled = request.authority();
       authority = dialled == null ? null : dialled.toString();
@@ -501,6 +510,12 @@ public class NpmRoutes {
 
   private static String defaultScheme(HttpServerRequest request) {
     return request.isSSL() ? "https" : "http";
+  }
+
+  /** A default port re-appended would be harmless but ugly; canonical urls omit it. */
+  private static boolean isDefaultPort(String scheme, String port) {
+    return ("http".equals(scheme) && "80".equals(port))
+        || ("https".equals(scheme) && "443".equals(port));
   }
 
   /** {@code X-Forwarded-*} may be a comma-joined chain; the first entry is the original client's. */
