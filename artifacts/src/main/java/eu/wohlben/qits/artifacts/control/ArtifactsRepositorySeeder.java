@@ -7,10 +7,10 @@ import jakarta.inject.Inject;
 
 /**
  * Idempotently ensures the default repository rows exist: the two CI types ({@code ci-screenshots},
- * {@code ci-videos}) and the platform image repository ({@code qits}, type {@code oci-images}).
- * Invoked by the service-side startup gate ({@code ArtifactsStartupSeed}); also usable directly
- * (e.g. the standalone deployable's own boot). Purely additive — re-running is a no-op via {@link
- * ArtifactRepositoryService#ensure}.
+ * {@code ci-videos}), the platform image repository ({@code qits}, type {@code oci-images}) and the
+ * two npm roots ({@code npm} hosted, {@code npmjs} proxy). Invoked by the service-side startup gate
+ * ({@code ArtifactsStartupSeed}); also usable directly (e.g. the standalone deployable's own boot).
+ * Purely additive — re-running is a no-op via {@link ArtifactRepositoryService#ensure}.
  */
 @ApplicationScoped
 public class ArtifactsRepositorySeeder {
@@ -28,6 +28,20 @@ public class ArtifactsRepositorySeeder {
    */
   public static final String IMAGES = "qits";
 
+  /**
+   * The hosted npm registry, at {@code /artifacts/npm/npm/}. Same argument as {@link #IMAGES}: a
+   * pipeline's {@code npm publish} step names this root by env alone, so the one namespace nobody
+   * chooses must not also be a manual step.
+   */
+  public static final String NPM = "npm";
+
+  /**
+   * The pull-through cache of npmjs, at {@code /artifacts/npm/npmjs/}. Separate row and separate
+   * type from {@link #NPM} on purpose — cached upstream content and published content never share a
+   * namespace, and a {@code PUT} here is refused by type.
+   */
+  public static final String NPM_PROXY = "npmjs";
+
   @Inject ArtifactRepositoryService repositoryService;
 
   @ActivateRequestContext
@@ -35,5 +49,7 @@ public class ArtifactsRepositorySeeder {
     repositoryService.ensure(CI_SCREENSHOTS, RepositoryType.CI_SCREENSHOTS);
     repositoryService.ensure(CI_VIDEOS, RepositoryType.CI_VIDEOS);
     repositoryService.ensure(IMAGES, RepositoryType.OCI_IMAGES);
+    repositoryService.ensure(NPM, RepositoryType.NPM_PACKAGES);
+    repositoryService.ensure(NPM_PROXY, RepositoryType.NPM_PROXY);
   }
 }

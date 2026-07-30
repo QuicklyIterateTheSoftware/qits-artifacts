@@ -24,13 +24,15 @@ class ArtifactsRepositorySeederTest extends ArtifactsTestSupport {
   @Inject ArtifactRepositoryService service;
 
   @Test
-  void seedsTheTwoCiTypesAndThePlatformImageRepository() {
+  void seedsTheTwoCiTypesThePlatformImageRepositoryAndTheTwoNpmRoots() {
     seeder.ensureDefaults();
     assertEquals(
         Map.of(
             ArtifactsRepositorySeeder.CI_SCREENSHOTS, RepositoryType.CI_SCREENSHOTS,
             ArtifactsRepositorySeeder.CI_VIDEOS, RepositoryType.CI_VIDEOS,
-            ArtifactsRepositorySeeder.IMAGES, RepositoryType.OCI_IMAGES),
+            ArtifactsRepositorySeeder.IMAGES, RepositoryType.OCI_IMAGES,
+            ArtifactsRepositorySeeder.NPM, RepositoryType.NPM_PACKAGES,
+            ArtifactsRepositorySeeder.NPM_PROXY, RepositoryType.NPM_PROXY),
         seededTypesByName());
   }
 
@@ -40,7 +42,7 @@ class ArtifactsRepositorySeederTest extends ArtifactsTestSupport {
     // the seed must never be what keeps a restarted instance from coming up.
     seeder.ensureDefaults();
     seeder.ensureDefaults();
-    assertEquals(3, service.list().size());
+    assertEquals(5, service.list().size());
   }
 
   private Map<String, RepositoryType> seededTypesByName() {

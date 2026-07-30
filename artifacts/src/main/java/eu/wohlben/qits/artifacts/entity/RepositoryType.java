@@ -8,8 +8,8 @@ import java.util.Set;
 /**
  * A repository's <b>type</b> = its validation/convention profile over the shared blob core: which
  * media types it accepts, which metadata keys it requires, and its per-upload size cap.
- * Deliberately thin — the deferred protocol types (maven/npm/docker) slot in as new constants
- * without touching the core.
+ * Deliberately thin — the deferred protocol types (maven, and now npm/docker) slot in as new
+ * constants without touching the core.
  *
  * <p>The two CI types serve the golden-diff loop. Their required keys are the pairing/comparison
  * keys the future diff UI needs (branch, commit, flow name + hash, display name, diff hash) plus the
@@ -75,7 +75,35 @@ public enum RepositoryType {
    * registry. It is a config knob and not a constant here because it has to move with {@code
    * quarkus.http.limits.max-body-size} — a deployment's disk budget, not a property of the format.
    */
-  OCI_IMAGES(Set.of(), Set.of(), 0L);
+  OCI_IMAGES(Set.of(), Set.of(), 0L),
+
+  /**
+   * A <b>hosted</b> npm registry, served at {@code /artifacts/npm/<repository>} by {@code
+   * eu.wohlben.qits.npm}.
+   *
+   * <p>A protocol type on the {@link #OCI_IMAGES} pattern, and everything that javadoc says about
+   * empty profiles and a zero cap holds verbatim: a tarball arrives base64-inflated inside a publish
+   * document on a raw Vert.x route and goes straight to {@code BlobStore}, so there is no media type
+   * to sniff and no metadata to require, and the empty media-type set is what makes the zero cap
+   * safe rather than merely unused. The real cap is {@code qits.artifacts.npm.max-publish-size}.
+   *
+   * <p>Versions are immutable — re-publishing one is {@code 403}, the npm analog of the registry's
+   * append-only stance.
+   */
+  NPM_PACKAGES(Set.of(), Set.of(), 0L),
+
+  /**
+   * A <b>pull-through cache</b> of an upstream npm registry (default {@code
+   * https://registry.npmjs.org}), served on the same routes as {@link #NPM_PACKAGES}.
+   *
+   * <p>Separate from the hosted type rather than a flag on it, following the namespacing rule the
+   * OCI mirror already settled: cached upstream content and published content must not share a
+   * namespace, and a mirror must reject pushes <em>by type</em> rather than by configuration. So a
+   * {@code PUT} here is refused because of what this constant is, not because of how a deployment
+   * set it up, and no repository can drift from one meaning to the other — {@code
+   * ArtifactRepositoryService.ensure} makes a repository's type immutable.
+   */
+  NPM_PROXY(Set.of(), Set.of(), 0L);
 
   private final Set<String> allowedMediaTypes;
   private final Set<String> requiredMetadataKeys;

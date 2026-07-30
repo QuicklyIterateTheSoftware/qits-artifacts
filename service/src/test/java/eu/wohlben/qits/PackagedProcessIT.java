@@ -12,6 +12,9 @@ import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusIntegrationTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
+import com.fasterxml.jackson.databind.JsonNode;
+import eu.wohlben.qits.npm.NpmClient;
+import eu.wohlben.qits.npm.TinyPackage;
 import eu.wohlben.qits.registry.OciClient;
 import eu.wohlben.qits.registry.TinyImage;
 import java.net.URI;
@@ -32,9 +35,9 @@ import org.junit.jupiter.api.Test;
  *
  * <p>Deliberately <b>one</b> class spanning both packages rather than one per context, because the
  * thing under test is the single process: {@code /artifacts/api/**} is JAX-RS, {@code /artifacts/q/**}
- * is Quarkus' non-application root and {@code /artifacts/git/**} is raw Vert.x, and what needs
- * proving is that all three resolve in the same binary. Splitting it by package would split the
- * subject.
+ * is Quarkus' non-application root, and {@code /artifacts/git/**}, {@code /v2/**} and {@code
+ * /artifacts/npm/**} are three independent raw-Vert.x route stacks — and what needs proving is that
+ * all of them resolve in the same binary. Splitting it by package would split the subject.
  *
  * <p>JGit is the reason this exists. It is not a Quarkus extension, so nothing registers its
  * {@code ServiceLoader} providers or its {@code JGitText} resource bundle for native-image on its
@@ -94,15 +97,16 @@ class PackagedProcessIT {
   @Test
   void theBlobStoreBootsItsOwnSchemaAndServesBytes() {
     // Reaching a repository row at all means Flyway migrated this process' own H2 file, the
-    // startup seed wrote its rows through Panache, and Jackson serialised them back. `qits` is in
-    // the set because a packaged process is the only thing here that runs the seed for real: it is
-    // what lets a fresh deployment take a `docker push` with no manual ensure call.
+    // startup seed wrote its rows through Panache, and Jackson serialised them back. `qits`, `npm`
+    // and `npmjs` are in the set because a packaged process is the only thing here that runs the
+    // seed for real: they are what let a fresh deployment take a `docker push` and an `npm publish`
+    // with no manual ensure call.
     given()
         .when()
         .get("/artifacts/api/repositories")
         .then()
         .statusCode(200)
-        .body("repositories.name", hasItems("ci-screenshots", "ci-videos", "qits"));
+        .body("repositories.name", hasItems("ci-screenshots", "ci-videos", "qits", "npm", "npmjs"));
 
     byte[] png = png(120, 80);
     String id =
@@ -195,6 +199,53 @@ class PackagedProcessIT {
         .statusCode(404)
         .contentType(containsString("json"))
         .body("errors[0].code", equalTo("BLOB_UNKNOWN"));
+  }
+
+  @Test
+  void anNpmPackageRoundTripsThroughTheBinary() {
+    // The third raw-Vert.x route stack, proved to coexist with /v2 and /artifacts/git in one
+    // binary — and the parts of it only a binary can falsify: a scoped name arrives percent-encoded
+    // and is matched by a regex route, the packument is built as a Jackson tree with no bound type
+    // anywhere (the dto/UploadResult lesson), and the tarball comes back through
+    // HttpServerResponse.sendFile, which behaves differently under native-image than on the JVM.
+    //
+    // The seed has already written the `npm` row in a packaged process; this states its own
+    // precondition anyway rather than resting on another test's subject.
+    given()
+        .contentType("application/json")
+        .body("{\"type\":\"npm-packages\"}")
+        .when()
+        .put("/artifacts/api/repositories/npm")
+        .then()
+        .statusCode(200);
+
+    TinyPackage subject = TinyPackage.of("@qits/packaged-it", "1.0.0");
+    try (NpmClient npm = new NpmClient(URI.create(root.toString()))) {
+      assertEquals(
+          201,
+          npm.publish("npm", "@qits%2fpackaged-it", subject.publishDocument("latest")).statusCode());
+
+      JsonNode packument = npm.packumentJson("npm", "@qits%2fpackaged-it");
+      assertEquals("1.0.0", packument.path("dist-tags").path("latest").asText());
+      assertArrayEquals(
+          subject.tarball(),
+          npm.tarball(NpmClient.tarballUrl(packument, "1.0.0")).body(),
+          "sendFile must return the exact bytes from the binary");
+    }
+  }
+
+  @Test
+  void anUnknownNpmPackageAnswersNpmsErrorShapeRatherThanA500() {
+    // The UploadResult lesson once more, on a third stack: the error envelope is built with a
+    // JsonObject precisely so nothing has to be registered for reflection, and asserting its SHAPE
+    // is what would catch a DTO creeping in — a bare 404 would not.
+    given()
+        .when()
+        .get("/artifacts/npm/npm/no-such-package")
+        .then()
+        .statusCode(404)
+        .contentType(containsString("json"))
+        .body("error", containsString("no such package"));
   }
 
   @Test

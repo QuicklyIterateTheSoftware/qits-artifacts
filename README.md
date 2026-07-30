@@ -1,15 +1,16 @@
 # qits-artifacts
 
 qits' **byte plane**: the metadata-rich blob store, the in-process git smart-HTTP host workspace
-containers clone from and push to, and the OCI registry they pull images from.
+containers clone from and push to, the OCI registry they pull images from, and the npm registry —
+hosted, plus a pull-through cache of npmjs — they install from.
 
-Three things, one repo, because all three are "qits serves bytes over HTTP against on-disk state it
-owns" and none has an inbound edge from the rest of qits. The registry is the third use of the byte
-plane and the first the code predicted — `RepositoryType` already reserved the seam — and it needed
-no new storage layer, because a content-addressed SHA-256 blob store *is* the OCI blob model. The
-git host landed here rather than in a
-`qits-repositories` service because that name collides with `domain.repository` — see
-`migration-plan.md` §3.4 in the home repo.
+One repo, because every one of them is "qits serves bytes over HTTP against on-disk state it owns"
+and none has an inbound edge from the rest of qits. The two protocol registries are the third and
+fourth uses of the byte plane and both were predicted by the code — `RepositoryType` already
+reserved the seam — and neither needed a new storage layer, because a content-addressed SHA-256 blob
+store *is* the OCI blob model and is a perfectly good home for a tarball. The git host landed here
+rather than in a `qits-repositories` service because that name collides with `domain.repository` —
+see `migration-plan.md` §3.4 in the home repo.
 
     mvn verify        # a clone of this repo alone builds and tests green — no monorepo, no docker
 
@@ -18,13 +19,14 @@ git host landed here rather than in a
 | Module | What |
 |---|---|
 | `artifacts/` | `eu.wohlben.qits.artifacts.*` — entity, persistence, dto, mapper, control, error. The blob store proper. No web, no JAX-RS. |
-| `service/` | `eu.wohlben.qits.artifacts.api` (the JAX-RS boundary), `eu.wohlben.qits.githost` (the Vert.x + JGit smart-HTTP host) and `eu.wohlben.qits.registry` (the Vert.x OCI Distribution API). |
+| `service/` | `eu.wohlben.qits.artifacts.api` (the JAX-RS boundary), `eu.wohlben.qits.githost` (the Vert.x + JGit smart-HTTP host), `eu.wohlben.qits.registry` (the Vert.x OCI Distribution API) and `eu.wohlben.qits.npm` (the Vert.x npm registry and its upstream proxy). |
 
 `artifacts/` is a library jar. **`service/` is the application** — it carries
 `<packaging>quarkus</packaging>` and produces a process, as a JVM fast-jar or as a native binary:
 
     ./mvnw verify
-    java -jar service/target/quarkus-app/quarkus-run.jar   # :8080 — blobs /artifacts/api/**, git /artifacts/git/**, images /v2/**
+    java -jar service/target/quarkus-app/quarkus-run.jar   # :8080 — blobs /artifacts/api/**, git /artifacts/git/**,
+                                                           #         npm /artifacts/npm/**, images /v2/**
 
     ./mvnw verify -Dnative
     ./service/target/qits-artifacts                        # same routes, ~35ms to listening
@@ -37,10 +39,11 @@ intended path, and it is worth recognising by name when a build that normally ta
 downloading a container image.
 
 `-Dnative` also flips `skipITs`, so it runs `PackagedProcessIT` against the binary it just built —
-openapi, swagger-ui, a blob round trip, a real `git clone` + `push`, and an image push/pull. That
-suite is the only thing in this repo that exercises **JGit compiled ahead of time**, which is the
-part of this service most likely to break in a native image (see "The git host" below), and the only
-thing that exercises the registry's zero-copy `sendFile` blob serving in a binary.
+openapi, swagger-ui, a blob round trip, a real `git clone` + `push`, an image push/pull and an npm
+publish/install. That suite is the only thing in this repo that exercises **JGit compiled ahead of
+time**, which is the part of this service most likely to break in a native image (see "The git host"
+below), the only thing that exercises zero-copy `sendFile` serving in a binary, and the only place
+the four route stacks are proved to coexist in one process.
 
 It was extracted as a library, on the reasoning that packaging it would need an auth variant, a
 webui and a main class. All three have lapsed: authentication terminates at `qits-gateway` and this
@@ -49,11 +52,11 @@ service reads a header, the webui stays in the monorepo, and Quarkus supplies th
 Everything is served under the `/artifacts` gateway segment, because `qits-gateway` routes
 verbatim by prefix and rewrites nothing — there is no unprefixed form, on `qits-net` either.
 
-Note the two route stacks resolve differently: `/artifacts/api/**` is JAX-RS and moves with
-`quarkus.rest.path`; `/artifacts/git/**` is registered straight onto the Vert.x router with the
-segment as a literal, and does not. A `git clone http://<host>/artifacts/git/<repoId>` against the
-packaged process is the check that matters, because nothing in the JAX-RS configuration can prove
-it.
+Note the route stacks resolve differently: `/artifacts/api/**` is JAX-RS and moves with
+`quarkus.rest.path`; `/artifacts/git/**`, `/artifacts/npm/**` and `/v2/**` are registered straight
+onto the Vert.x router with the segment as a literal, and do not. A `git clone
+http://<host>/artifacts/git/<repoId>` against the packaged process is the check that matters,
+because nothing in the JAX-RS configuration can prove it.
 
 `artifacts/` owns its **own datasource, persistence unit and Flyway lineage**
 (`db/artifacts/migration`, a separate H2 under `~/.qits/data/artifacts`). It always did — that
@@ -316,6 +319,132 @@ Go plus a checkout of the spec, so a regression must be catchable by `mvn verify
 If the suite ever reports a failure, **do not widen the IT's assertion or filter the case out** —
 either the registry is wrong, or a capability declaration above is.
 
+## The npm registry
+
+`NpmRoutes` serves the npm registry API at `/artifacts/npm/<repository>/…`. Two repository types
+share those routes, and which one a repository is decides what it will do:
+
+| Type | Wire name | Seeded row | What it is |
+|---|---|---|---|
+| `NPM_PACKAGES` | `npm-packages` | `npm` | hosted — accepts publishes |
+| `NPM_PROXY` | `npm-proxy` | `npmjs` | a pull-through cache of an upstream registry; a `PUT` is `405` |
+
+Unlike `/v2` the mount point is an ordinary choice: npm accepts a registry URL of any depth, so
+there is no second root-level segment and no gateway change — this lives inside the `/artifacts`
+prefix like everything else. The segment is still a literal in the code, and `NpmRegistryTest` is
+the only thing that would notice it drifting.
+
+Cached upstream content and published content **never share a namespace**, which is the same rule
+the OCI mirror settled, and it is enforced by the type rather than by configuration: a repository's
+type is immutable once chosen, so a mirror cannot become a publish target by editing a setting.
+Consumers need no merged "group" view because npm does the routing client-side — one `.npmrc`:
+
+```ini
+registry=http://qits-artifacts:8080/artifacts/npm/npmjs/     # everything, through the cache
+@qits:registry=http://qits-artifacts:8080/artifacts/npm/npm/  # ours, from the hosted repo
+```
+
+Both rows are seeded at startup alongside `qits`, so a fresh deployment needs no manual step.
+Additional npm repositories are created with the ordinary ensure endpoint, `{"type":"npm-packages"}`
+or `{"type":"npm-proxy"}`.
+
+### The wire
+
+```
+GET    /artifacts/npm/<repo>/<pkg>                    packument
+GET    /artifacts/npm/<repo>/<pkg>/-/<file>.tgz       tarball
+PUT    /artifacts/npm/<repo>/<pkg>                    publish
+DELETE anywhere                                       405 — no unpublish, no GC
+anything else under the base                          JSON 404; npm degrades gracefully
+```
+
+A **scoped name arrives percent-encoded** (`GET /@qits%2fangular`) and Vert.x' `normalizedPath()`
+leaves the escape alone, so the route grammar matches the encoded form and the handler decodes.
+Both spellings resolve, because the tarball URL this registry emits carries a real slash and a
+client follows it verbatim. `NpmPathsTest` pins the grammar; `NpmRegistryTest` pins that the router
+actually behaves that way.
+
+The **packument is derived state** for a hosted repository: assembled per request from `npm_version`
++ `npm_dist_tag` rows and never stored, so it cannot become a second source of truth — the same
+reasoning that keeps OCI tags in one table. `Accept: application/vnd.npm.install-v1+json`, the
+abbreviated form both npm and pnpm send, is answered with the full document. That is spec-legal (the
+abbreviated type is an optimization a registry may decline) and it is the honest first
+implementation: trimming it is a bandwidth change, and trimming it wrong silently breaks an install
+that needed a field we dropped.
+
+**Publishing** decodes the base64 `_attachments` tarball, recomputes `shasum` (sha1) and `integrity`
+(sha512 SRI) and rejects a mismatch with the client's claim — the npm restatement of "a blob that
+does not hash to its name is not a blob". The bytes then go through `BlobStore` like everything
+else, so a tarball's *storage* key is its sha256 while npm's two hashes are stored columns
+re-emitted in packuments; the store stays sha256-only. **Versions are immutable**: re-publishing one
+is `403`. Only `npm_dist_tag` mutates.
+
+`dist.tarball` **must be absolute** — npm refuses a relative one, so the OCI registry's
+path-form-`Location` trick does not transfer. It is built from `X-Forwarded-Host`/`X-Forwarded-Proto`
+when present and from the request's own authority otherwise, and **no config key names it**: the
+gateway emits the `X-Forwarded-*` set on every proxied request by default, and a qits-net client
+dialling `qits-artifacts:8080` has no forwarding hop, so the request always carries the right answer
+while a configured value would be right for one caller and quietly wrong for the other.
+
+### The proxy
+
+A `npm-proxy` repository fronts `qits.artifacts.npm.proxy.upstream` (default
+`https://registry.npmjs.org`), so npmjs is hit once per tarball rather than once per CI run. The two
+documents get opposite treatment, which is the whole design:
+
+- **Packuments mutate** — a new version appears upstream with nothing here changing — so they are
+  cached with a TTL (`qits.artifacts.npm.proxy.packument-ttl`, default `PT5M`) and revalidated with
+  `ETag`/`If-None-Match` on expiry, which costs a `304` rather than a document. Upstream's document
+  is stored **verbatim** and every `dist.tarball` is rewritten at *serve* time, not at store time:
+  the rewrite target depends on the request, and the original URLs are what the tarball miss path
+  fetches from. When upstream is unreachable the stale copy is served anyway — CI keeps installing
+  through an npmjs outage, which is half of why this exists.
+- **Tarballs are immutable**, so a hit is `sendFile` and a miss streams from upstream through
+  `BlobStore.stage()` (hashing while streaming, for free), promotes, and serves. A proxied version
+  gets its `npm_version` row written lazily on that first pull, which is what keeps the tarball
+  route one code path for both types.
+
+`integrity` is re-emitted **unmodified**, and nothing here verifies it. That is the safety argument
+rather than a gap: the client verifies the bytes end to end against a hash this service never
+computed, so the proxy cannot silently corrupt a package even in principle — while a mid-flight
+check would only add a way for a stale-but-correct upstream document to break an install.
+
+Growth is unbounded, exactly like the OCI mirror's; `artifact-access-tracking.md` is the
+prerequisite for cleanup and now has two more clients.
+
+**The upstream client is a plain JDK `HttpClient`** — no extension, no reflection registration, no
+new dependency — and it is the first outbound TLS in this process. The suite cannot exercise real
+TLS by construction (clone-alone, no network: `StubNpmRegistry` is an in-process upstream), so
+**a deployment gets one manual smoke against real npmjs**, once, on the native binary:
+
+```
+curl -s http://<host>/artifacts/npm/npmjs/left-pad | head -c 200
+```
+
+### No login here either
+
+**None. Not a token, not a guard, nothing** — the OCI registry's threat model verbatim (see "No
+login, in either direction" above). Producers and consumers are internal, dialling
+`qits-artifacts:8080` on qits-net, and from outside `/artifacts/npm/**` falls under qits-gateway's
+usual session auth like any other non-allowlisted artifacts path. No `PublicPaths` entry, no method
+split, nothing npm-specific; whether an npm client can operate *through* that auth from outside is
+deliberately out of scope.
+
+The one wrinkle is client-side and never reaches the wire: the npm CLI has historically refused
+`npm publish` when no credential is configured for the target registry (`ENEEDAUTH` is a pre-flight
+check). If current npm still enforces it, a pipeline's `.npmrc` carries one dummy `_authToken` line
+that **this server neither reads nor knows about** — npm-client ceremony, not an auth scheme, and it
+disappears the moment npm accepts an anonymous publish.
+
+### Deliberately not implemented
+
+`DELETE` (405), for the same reason as on `/v2`: the store is append-only and there is no garbage
+collector, so unpublish has no meaning here yet. `/-/v1/search`, `/-/npm/v1/security/audits/*`,
+`/-/whoami` and the login handshake are absent rather than stubbed — npm degrades gracefully on a
+404 for every one of them, so what matters is that the 404 carries npm's `{"error": …}` shape
+instead of Vert.x' HTML page. Dist-tag mutation APIs (`npm dist-tag add`) are absent too:
+publish-if-absent is the versioning convention, so a tag only ever moves as part of a publish.
+
 ## The boundary
 
 Everything this context needs from the rest of qits goes through a port it declares and the
@@ -340,7 +469,7 @@ app's `application.properties` overrides them.
 |---|---|---|
 | `qits.artifacts.blobs-dir` | `~/.qits/data/artifacts/blobs` | content-addressed blob bytes |
 | `qits.artifacts.token` | blank (open) | the JSON API's write guard (`X-Artifacts-Token`); the registry is deliberately tokenless |
-| `qits.artifacts.startup-seed.enabled` | `true` | self-seed `ci-screenshots` + `ci-videos` + the `qits` image repository |
+| `qits.artifacts.startup-seed.enabled` | `true` | self-seed `ci-screenshots` + `ci-videos` + the `qits` image repository + the two npm roots (`npm`, `npmjs`) |
 | `qits.repositories.data-dir` | `~/.qits/data/repositories` | where the git host finds `<repoId>/origin` |
 | `qits.ci.intake-url` | `http://localhost:8080/ci/api/events/post-receive` | post-receive delivery |
 | `qits.ci.token` | blank | `X-CI-Token` on those events |
@@ -348,6 +477,9 @@ app's `application.properties` overrides them.
 | `qits.artifacts.oci.max-manifest-size` | `4M` | manifests are buffered whole to be digested and parsed |
 | `qits.artifacts.oci.upload-session-ttl` | `PT30M` | in-memory upload sessions; lost on restart, by design |
 | `qits.artifacts.oci.upload-idle-timeout` | `PT1M` | wait for the *next* chunk, not for the whole upload |
+| `qits.artifacts.npm.max-publish-size` | `32M` | the largest npm tarball, in either direction — see below |
+| `qits.artifacts.npm.proxy.upstream` | `https://registry.npmjs.org` | what an `npm-proxy` repository caches |
+| `qits.artifacts.npm.proxy.packument-ttl` | `PT5M` | how long a cached packument serves before revalidation |
 | `qits.repositories.git.max-pack-size` | `64M` | the git host's `BodyHandler` limit |
 | `quarkus.http.limits.max-body-size` | `1088M` | **global**; above the largest upload cap |
 
@@ -367,6 +499,14 @@ tradeoff, the mechanism, and what an operator can actually do about it are in
 
 `qits.repositories.git.max-pack-size` is separate on purpose: a pack goes through a `BodyHandler`
 into memory, so it must not inherit a ceiling sized for something that streams to disk.
+
+`qits.artifacts.npm.max-publish-size` is the same kind of number for a third route, and stating it
+is not optional: `BodyHandler.create()` defaults to 10 MiB, and an npm publish document carries the
+tarball **base64-inflated by 4/3** inside JSON, so 32M here is roughly a 24M tarball ceiling. One
+knob covers both directions — it also caps a tarball streamed in from upstream by the proxy —
+because it answers one question, how large an npm tarball this deployment is willing to hold. A
+deployment that pulls large prebuilt binaries (the `@next/swc-*` shape of package) raises it once
+and both paths follow.
 
 `quarkus.rest.path=/artifacts/api` and `quarkus.http.non-application-root-path=/artifacts/q` are
 **not** shipped from the jar's defaults: they are the deployable's own decision and live in
@@ -389,8 +529,11 @@ and only the host part is a deployment decision.
   failing — consuming this registry works immediately, producing from within a step needs an
   unprivileged builder story of its own. Until then a producer is a host with a docker daemon; no
   credential, since the registry is tokenless and pushes stay inside the deployment.
-- **Garbage collection.** The registry is append-only; untagged manifests and orphaned blobs
-  accumulate. Acceptable at private-deployment scale, and the `DELETE` endpoints stay unimplemented
-  so nothing depends on deletion semantics before they exist.
-- **maven/npm repository types.** The same seam, different protocols.
+- **Garbage collection.** Both registries are append-only; untagged manifests, orphaned blobs and a
+  proxy cache that only grows all accumulate. Acceptable at private-deployment scale, and the
+  `DELETE` endpoints stay unimplemented so nothing depends on deletion semantics before they exist.
+- **A maven repository type.** The same seam again, a third protocol.
+- **Building packages.** The npm registry stores and serves them; nothing here runs `npm pack`. A
+  producer is a CI step that runs `npm publish` over plain HTTP to `qits-artifacts:8080` — no docker
+  socket, no credential, since the registry is tokenless and publishes stay inside the deployment.
 - **A deployable.** See "Layout" above.

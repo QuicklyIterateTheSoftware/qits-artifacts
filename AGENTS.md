@@ -1,7 +1,8 @@
 # qits-artifacts — working notes
 
-Read `README.md` first: it defines the two things this repo owns (the blob store and the git host),
-the one port, and the config surface. This file is the working conventions on top of it.
+Read `README.md` first: it defines what this repo owns (the blob store and the git host, plus the two
+protocol registries built on the blob store — OCI at `/v2` and npm at `/artifacts/npm`), the one
+port, and the config surface. This file is the working conventions on top of it.
 
 ## The two rules that shape everything
 
@@ -45,6 +46,7 @@ Everything that had to be declared, and the symptom each one produces if it is d
 | `githost/JGitReflection` | `values()` on every enum `Config.getEnum` reads | **every** git route 404s — `FileRepositoryBuilder.build` throws `NoSuchMethodException` and `open()` returns null |
 | `dto/UploadResult` | `@RegisterForReflection` | every upload 500s: the type is behind a `Response` return, so nothing registers it |
 | `CiPostReceiveNotifier` | the `HttpClient` is an instance field, not static | build fails: an `HttpClientFacade` in the image heap |
+| `npm/NpmUpstream` | the `HttpClient` is an instance field, not static | same as above — an `HttpClientFacade` frozen into the image heap |
 | artifacts' `microprofile-config.properties` | H2 url with no `AUTO_SERVER` | the binary dies at boot on `ClassNotFoundException: org.h2.server.TcpServer` |
 
 Only the first is a build-time failure. The rest are green builds that fail in production, which is
@@ -54,23 +56,29 @@ why the IT exists and why it drives a real `git clone`/`push` rather than assert
 
 Almost everything is served under the `/artifacts` gateway segment — `qits-gateway` routes verbatim
 by prefix, so an unprefixed route is normally unreachable, on `qits-net` as much as through the
-gateway. Three second-level segments, plus one root-level exception:
+gateway. Four second-level segments, plus one root-level exception:
 
 | Prefix | Machinery | Moves with |
 |---|---|---|
 | `/artifacts/api/**` | JAX-RS | `quarkus.rest.path` |
 | `/artifacts/q/**` | Quarkus' non-application root (openapi, swagger-ui, health) | `quarkus.http.non-application-root-path` |
 | `/artifacts/git/**` | raw Vert.x routes in `GitHostRoutes` | **nothing** — the segment is a literal in the code |
+| `/artifacts/npm/**` | raw Vert.x routes in `NpmRoutes` (the npm registry, hosted + proxy) | **nothing** — a literal, and `NpmPaths.BASE` is the only place it is spelled |
 | `/v2/**` | raw Vert.x routes in `RegistryRoutes` (the OCI Distribution API) | **nothing** — a literal, and not under `/artifacts` at all |
+
+`/artifacts/npm` is *not* forced on us the way `/v2` is: npm accepts a registry URL of any depth, so
+it sits inside the segment the gateway already routes here and needs no extra prefix on
+`QitsService.ARTIFACTS`. The first path segment after it is the `artifact_repository` row, the same
+first-segment rule the OCI registry uses.
 
 `/v2` is the exception to the segment rule and it is forced on us: docker and podman resolve an image
 reference against `<host>/v2/` and accept no path prefix. The gateway claims it as an *extra prefix*
 on its artifacts entry (`QitsService.ARTIFACTS("/v2")`) rather than as a service of its own, so a
 deployment still names one host and gets both.
 
-The last two lines are the ones that bite: no config key moves those routes, and no JAX-RS test
-covers them. `GitHostTest` and `RegistryTest` are the only things that would catch them drifting,
-which is why both spell their paths out absolutely.
+The last three lines are the ones that bite: no config key moves those routes, and no JAX-RS test
+covers them. `GitHostTest`, `RegistryTest` and `NpmRegistryTest` are the only things that would catch
+them drifting, which is why all three spell their paths out absolutely.
 
 Two outbound/inbound addresses are contracts other repos hold:
 
@@ -90,6 +98,12 @@ Two top-level packages, deliberately kept apart:
 - `eu.wohlben.qits.githost` — the git host, `service/` only. It is **not** folded into `artifacts`:
   it shares no code, no table and no datasource with the blob store, and keeping the package
   separate keeps a future second split cheap.
+- `eu.wohlben.qits.registry` and `eu.wohlben.qits.npm` — the two protocol wire stacks, `service/`
+  only. Unlike the git host these *do* share the blob store, so the split is by layer rather than by
+  context: every byte and every row goes through `artifacts/control` (`OciRegistryService`,
+  `NpmRegistryService`, `BlobStore`), and the `service/` package holds routes, error envelopes and —
+  for npm — the outbound upstream client. A wire package that touched a Panache repository directly
+  would be the drift to watch for.
 
 `artifacts` carries its own `error/` package (`ArtifactsException` and the four status-carrying
 subtypes) rather than the monorepo's `domain/error/*`. It always did — this is one of the few
@@ -130,7 +144,7 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 
 ## Tests
 
-- `mvn verify` runs 117 tests (47 in `artifacts/`, 70 in `service/`) in about 40s. Nothing here
+- `mvn verify` runs 173 tests (65 in `artifacts/`, 108 in `service/`) in about a minute. Nothing here
   needs docker — and that is the constraint that shapes the registry suite: `docker`, `podman` and
   `skopeo` may not be assumed present, so `registry/OciClient` + `registry/TinyImage` synthesise a
   real image in memory and drive a full push/pull over the JDK `HttpClient`. It uses that rather than
@@ -138,9 +152,19 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   `Content-Length`, which is the chunked path docker actually uses and the one the wire ceiling does
   not gate. RestAssured also percent-encodes the colon in a digest, so any assertion carrying one
   needs `urlEncodingEnabled(false)` or it tests RestAssured rather than the registry.
-- `mvn verify -Dnative` runs those, then 10 more: `PackagedProcessIT` against the compiled binary.
+- The npm suite is the same shape and the same rule: `npm/TinyPackage` + `npm/NpmClient` synthesise
+  a real gzipped tarball and a publish document and drive the round trip. RestAssured is unusable
+  for the packument routes specifically — it re-encodes a path, and the whole question there is
+  whether `@qits%2fangular` reaches the router with its escape intact. **There is no network**, so
+  the proxy suite runs against `npm/StubNpmRegistry`, an in-process JDK `HttpServer`; a test that
+  reached real npmjs would not merely be slow, it would pass *wrongly*, since npmjs answers 404 for
+  a synthetic package exactly as a misconfigured proxy does. That stub is driven over HTTP rather
+  than by touching its fields, and the reason is worth knowing before writing another one: Quarkus
+  instantiates a `QuarkusTestProfile` in **two** classloaders, so a static singleton exists twice
+  and the application ends up talking to a different instance than the test configures.
+- `mvn verify -Dnative` runs those, then 12 more: `PackagedProcessIT` against the compiled binary.
   It is the only suite that starts a **process** rather than an in-JVM Quarkus, so it is where the
-  three route stacks are proved to coexist and where JGit is proved to have survived the compile.
+  four route stacks are proved to coexist and where JGit is proved to have survived the compile.
   Its `@TestProfile` points the datasource, the blobs dir and the git data-dir under `target/`,
   passed to the launched binary as `-D` flags; it uses a **file** H2 of the same shape the
   deployment runs, not the unit suite's in-memory one, because the file/embedded shape is the thing
@@ -197,7 +221,9 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   host silently 413'd every push over 10 MB until `qits.repositories.git.max-pack-size` existed. Any
   new `BodyHandler` needs its limit stated. It must *not* be the global ceiling: a `BodyHandler`
   buffers into memory, so a route that uses one wants a much lower number than a route that streams
-  to disk.
+  to disk. The npm publish `PUT` is the third such route (`qits.artifacts.npm.max-publish-size`), and
+  the one where the number is least obvious: a publish document carries its tarball
+  **base64-inflated by 4/3** inside JSON, so 32M there is roughly a 24M tarball.
 - App-level config lives in `service/src/main/resources/application.properties` — the shipped copy —
   and the tests **inherit** it: Quarkus merges main's `application.properties` into the test config
   rather than letting the test one shadow it. So never re-declare an app-level setting
@@ -214,20 +240,29 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   (`migration-plan.md` §9 item 14) — `@QuarkusTest` restarts racing for the test port. Re-run first.
 - The blob store's `RepositoryType` enum hardcodes its types. Adding one is a schema check
   constraint change plus a validation profile, not a config knob — since V2 the constraint is named
-  (`ck_artifact_repository_type`), so widening it is a one-liner.
-- **`OCI_IMAGES`' profile is empty and its `maxBytes()` is `0`, and that is not an oversight.** Its
-  bytes never flow through `BlobService` — they arrive on the registry routes and go straight to
-  `BlobStore` — so there is no media type to sniff (a gzipped tar layer sniffs to nothing and would
-  400) and no metadata to require. The empty media-type set is what makes the zero cap safe:
-  `accepts()` rejects a stray JSON-API upload before anything reads the cap. The real layer cap is
-  `qits.artifacts.oci.max-layer-size`, a config knob because it has to move with the wire ceiling.
-- **Registry routes must not return DTOs.** The `dto/UploadResult` lesson is worse on a raw Vert.x
+  (`ck_artifact_repository_type`), so widening it is a one-liner (V3 is that one-liner, twice over).
+- **The three protocol types' profiles are empty and their `maxBytes()` is `0`, and that is not an
+  oversight.** `OCI_IMAGES`, `NPM_PACKAGES` and `NPM_PROXY` never flow through `BlobService` — their
+  bytes arrive on their own wire routes and go straight to `BlobStore` — so there is no media type to
+  sniff (a gzipped tar sniffs to nothing and would 400) and no metadata to require. The empty
+  media-type set is what makes the zero cap safe: `accepts()` rejects a stray JSON-API upload before
+  anything reads the cap. The real caps are `qits.artifacts.oci.max-layer-size` and
+  `qits.artifacts.npm.max-publish-size`, config knobs because they have to move with the wire
+  ceiling.
+- **Wire routes must not return DTOs.** The `dto/UploadResult` lesson is worse on a raw Vert.x
   route: behind a JAX-RS `Response` there is at least a provider chain for the build to see the type
   through, but nothing sees a type serialised only inside a Vert.x handler. Responses are built with
-  `JsonObject` and manifests are read as `JsonNode` precisely so no `@RegisterForReflection` is
-  needed and the failure mode is unavailable. The registry adds **zero** native-image configuration;
-  if it ever seems to need some, something reflective has crept in.
-- **Registry handlers carry `@ActivateRequestContext`/`@Transactional` on `OciRegistryService`.** A
-  raw Vert.x route has no CDI request context and no transaction. `GitHostRoutes` is no precedent —
-  it touches no database. Drop an annotation and the manifest routes fail with
-  `ContextNotActiveException` at runtime only.
+  `JsonObject` (or a Jackson `ObjectNode` written out as text) and inbound documents are read as
+  `JsonNode`, precisely so no `@RegisterForReflection` is needed and the failure mode is
+  unavailable. `registry` and `npm` together add **zero** native-image configuration; if either ever
+  seems to need some, something reflective has crept in.
+- **Wire handlers carry `@ActivateRequestContext`/`@Transactional` on `OciRegistryService` and
+  `NpmRegistryService`.** A raw Vert.x route has no CDI request context and no transaction.
+  `GitHostRoutes` is no precedent — it touches no database. Drop an annotation and those routes fail
+  with `ContextNotActiveException` at runtime only. The same fact has a test-side consequence worth
+  knowing: inside a `@QuarkusTest` a request context is *already* active, so two of these calls in a
+  row share one Hibernate session and a read after a bulk update can see the pre-update row. That is
+  a property of the test, not of the service — but it will look like a lost write.
+- **`NpmUpstream`'s `HttpClient` is an instance field, not a static one** — the same constraint
+  `CiPostReceiveNotifier` carries, and the reason the table above lists it. It is also this process'
+  only outbound TLS, which no test can exercise (no network); a deployment smokes it once by hand.
