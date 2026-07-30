@@ -95,9 +95,9 @@ The client's `baseHref` is a fourth spelling of the segment and lives in another
 the files; the `baseHref` is what makes `index.html` ask for them at the right url. A mismatch serves
 a page whose every asset 404s, and no test here would see it.
 
-Note also that bare `/artifacts` (no trailing slash) is a 404 — Quinoa mounts the SPA at
-`/artifacts/*`, which does not match the bare segment. `/artifacts/` works. This is upstream
-behaviour, not a local choice.
+Bare `/artifacts` (no trailing slash) is a 301 to `/artifacts/` — Quinoa mounts the SPA at
+`/artifacts/*`, which does not match the bare segment on its own, so `webui/WebUiRedirect` serves
+the missing spelling (GET/HEAD only, query preserved; a write to the bare segment answers 405).
 
 `/v2` is the exception to the segment rule and it is forced on us: docker and podman resolve an image
 reference against `<host>/v2/` and accept no path prefix. The gateway claims it as an *extra prefix*

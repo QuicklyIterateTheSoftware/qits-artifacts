@@ -1,0 +1,53 @@
+package eu.wohlben.qits.webui;
+
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.equalTo;
+
+import io.quarkus.test.junit.QuarkusTest;
+import org.junit.jupiter.api.Test;
+
+/**
+ * The bare segment redirects to the client; nothing else moves. Quinoa is off under {@code %test},
+ * which is exactly why this is testable here at all: the redirect is this service's own route, not
+ * Quinoa's, and it must answer whether or not a client is packaged.
+ */
+@QuarkusTest
+class WebUiRedirectTest {
+
+  @Test
+  void theBareSegmentRedirectsToTheClient() {
+    given()
+        .redirects()
+        .follow(false)
+        .when()
+        .get("/artifacts")
+        .then()
+        .statusCode(301)
+        .header("Location", equalTo("/artifacts/"));
+  }
+
+  @Test
+  void theQueryStringTravels() {
+    given()
+        .redirects()
+        .follow(false)
+        .when()
+        .get("/artifacts?repo=npm")
+        .then()
+        .statusCode(301)
+        .header("Location", equalTo("/artifacts/?repo=npm"));
+  }
+
+  @Test
+  void aWriteToTheBareSegmentIsMethodNotAllowed() {
+    // The route matches the path but names GET and HEAD, so Vert.x answers 405 — the machine
+    // client learns the truth instead of being bounced at HTML.
+    given().redirects().follow(false).when().post("/artifacts").then().statusCode(405);
+  }
+
+  @Test
+  void theRegistryRootIsUntouched() {
+    // /v2 is the OCI registry's root and must keep answering as itself, not bounce to the SPA.
+    given().redirects().follow(false).when().get("/v2/").then().statusCode(200);
+  }
+}
