@@ -196,33 +196,31 @@ routes it from the **artifacts** `proxy-hosts` entry (there is no `…_V2` key) 
 navigation from a background request, so an unlisted `/v2` would answer a 302 into the IdP that
 docker reads as "not a v2 registry".
 
-### Pushing with a token configured
+### No login, in either direction
 
 Reads are anonymous, always — image names are meant to be shared, which is also why `/v2/_catalog`
-stays unimplemented and the posture stays private-network rather than capability-URL. Writes are
-guarded by the same `qits.artifacts.token` the JSON API uses, presented as an HTTP Basic password
-(the username is ignored) because that is what a registry client can send.
+stays unimplemented and the posture stays private-network rather than capability-URL. **Writes are
+anonymous too**: the registry carries no credential of its own, and `qits.artifacts.token` guards
+the blob-store JSON API and nothing else (`RegistryOpenPushTest` pins that setting it does not
+drag `/v2` back behind a docker login).
 
-`GET /v2/` is unconditionally 200, so an anonymous `docker pull` works with no login at all. **What
-that costs depends on the client**, and the two answers were measured rather than reasoned about:
+That is a decision with two halves, one per direction:
 
-| Client | Push to a token-guarded registry |
-|---|---|
-| `docker` | **works** — `docker login <host>` once, then `docker push`. Tested on docker 29.6.2: the client retries a `401` with its stored credentials whatever the `/v2/` ping said, so a non-challenging ping costs it nothing. Without a login it fails cleanly with `no basic auth credentials`. |
-| `skopeo`, `podman` | **fails.** Both sit on `containers/image`, which picks the auth scheme from the ping: a 200 with no `WWW-Authenticate` is read as "no credentials needed", so `--creds` is never sent and the `401` on the first blob upload is fatal rather than retried. |
+- **Inside the deployment**, producers on qits-net are trusted — the platform posture everywhere —
+  and a tokenless registry is what lets an automated publisher (the CI/CD image-build story) push
+  with no credential store. Every client works: `docker push`, `skopeo copy`, `podman push`, with
+  no login step at all.
+- **From outside**, write protection is qits-gateway's: `/v2` is on its token-free allowlist for
+  **read methods only**, so an internet `docker push` is challenged for a session no registry
+  client can hold and dies at the front door. Re-allowlisting `/v2` writes there without restoring
+  a guard here would open push to the internet — the gateway's `PublicPathsTest` and the comment in
+  `RegistryRoutes.init` both hold that line.
 
-```
-docker login qits-host:8080 -u qits -p "$QITS_ARTIFACTS_TOKEN"
-docker push qits-host:8080/qits/alpine:latest
-```
-
-With a **blank** token — the container-network posture, where the registry is unreachable from
-outside the deployment — every client works, including `skopeo copy` and `podman push`.
-
-If skopeo or podman ever have to push to a *guarded* deployment, the fix is to make `GET /v2/`
-answer `401` + `WWW-Authenticate` when a token is configured. That is a real behaviour change and
-should be measured against anonymous `docker pull` first, not assumed: the reasoning that predicted
-today's split got both halves of it backwards.
+The registry once guarded writes with `qits.artifacts.token` as an HTTP Basic password. That
+bought a measured, awkward tradeoff — docker could push after a `docker login`, skopeo/podman
+could not (their shared `containers/image` reads the non-challenging `/v2/` ping as "no
+credentials needed") — and the guard's whole benefit dissolved once the platform settled on
+trusted-network producers and gateway-terminated external auth, so it is gone rather than dormant.
 
 ### Deliberately not implemented
 
@@ -337,7 +335,7 @@ app's `application.properties` overrides them.
 | Key | Default | What |
 |---|---|---|
 | `qits.artifacts.blobs-dir` | `~/.qits/data/artifacts/blobs` | content-addressed blob bytes |
-| `qits.artifacts.token` | blank (open) | the write guard |
+| `qits.artifacts.token` | blank (open) | the JSON API's write guard (`X-Artifacts-Token`); the registry is deliberately tokenless |
 | `qits.artifacts.startup-seed.enabled` | `true` | self-seed `ci-screenshots` + `ci-videos` |
 | `qits.repositories.data-dir` | `~/.qits/data/repositories` | where the git host finds `<repoId>/origin` |
 | `qits.ci.intake-url` | `http://localhost:8080/ci/api/events/post-receive` | post-receive delivery |
@@ -385,8 +383,8 @@ and only the host part is a deployment decision.
 - **Building images.** The registry stores and serves them; nothing here produces one. qits-ci step
   containers get no docker socket by design, so `docker build` inside a step fails today and keeps
   failing — consuming this registry works immediately, producing from within a step needs an
-  unprivileged builder story of its own. Until then a producer is a host with a docker daemon and
-  the push token.
+  unprivileged builder story of its own. Until then a producer is a host with a docker daemon; no
+  credential, since the registry is tokenless and pushes stay inside the deployment.
 - **Garbage collection.** The registry is append-only; untagged manifests and orphaned blobs
   accumulate. Acceptable at private-deployment scale, and the `DELETE` endpoints stay unimplemented
   so nothing depends on deletion semantics before they exist.

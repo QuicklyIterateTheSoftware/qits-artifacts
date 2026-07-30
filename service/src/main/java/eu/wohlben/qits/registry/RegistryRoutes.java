@@ -55,7 +55,6 @@ public class RegistryRoutes {
   private static final String DOCKER_CONTENT_DIGEST = "Docker-Content-Digest";
   private static final String DOCKER_UPLOAD_UUID = "Docker-Upload-Uuid";
 
-  @Inject RegistryAuthGuard auth;
   @Inject OciRegistryService registry;
   @Inject OciUploadSessions uploads;
   @Inject OciManifestParser manifestParser;
@@ -71,10 +70,25 @@ public class RegistryRoutes {
   Duration uploadIdleTimeout;
 
   void init(@Observes Router router) {
-    // 1. The guard first, so no route added later can be reached unguarded and every /v2 response
-    //    carries the API-version header. Both spellings: normalizedPath() keeps a trailing slash.
-    router.route(RegistryPaths.BASE).handler(auth::guard);
-    router.route(RegistryPaths.BASE + "/*").handler(auth::guard);
+    // 1. The API-version header first, from one place, so no route added later can forget it —
+    //    clients use it to decide they are talking to a v2 registry at all. Both spellings:
+    //    normalizedPath() keeps a trailing slash.
+    //
+    //    There is NO write guard here, and that is a decision, not an omission. The registry used
+    //    to demand qits.artifacts.token as an HTTP Basic password on writes (the RegistryAuthGuard
+    //    this handler replaced); it is gone because both directions it guarded resolved elsewhere:
+    //    on qits-net, producers are trusted (the platform's own posture, and what makes an
+    //    automated image publisher need no credential store), and from outside, qits-gateway keeps
+    //    /v2 write methods OFF its token-free allowlist — an internet docker push is challenged
+    //    for a session it cannot hold and dies there. That gateway rule is now this registry's
+    //    whole external write protection: re-allowlisting /v2 writes at the gateway without
+    //    restoring a guard here would open push to the internet, and the gateway's PublicPathsTest
+    //    says so in so many words. X-Artifacts-Token still guards the blob-store JSON API; setting
+    //    it no longer drags the registry back behind docker login (RegistryOpenPushTest pins
+    //    that), and the skopeo/podman-cannot-push-to-a-guarded-registry tradeoff dissolved with
+    //    the guard.
+    router.route(RegistryPaths.BASE).handler(RegistryRoutes::stampApiVersion);
+    router.route(RegistryPaths.BASE + "/*").handler(RegistryRoutes::stampApiVersion);
 
     // 2. The version probe. Docker sends "/v2/"; a curl check usually sends "/v2".
     router.get(RegistryPaths.BASE).handler(this::version);
@@ -134,7 +148,17 @@ public class RegistryRoutes {
     router.route(RegistryPaths.BASE + "/*").handler(this::notFound);
   }
 
-  /** {@code GET /v2/} — the version probe. See {@link RegistryAuthGuard} on why it is always 200. */
+  /**
+   * Stamps {@code Docker-Distribution-Api-Version} ahead of every {@code /v2} route — clients read
+   * it to decide they are talking to a v2 registry, so it is emitted from one place, error
+   * responses included.
+   */
+  private static void stampApiVersion(RoutingContext rc) {
+    rc.response().putHeader("Docker-Distribution-Api-Version", "registry/2.0");
+    rc.next();
+  }
+
+  /** {@code GET /v2/} — the version probe, unconditionally 200: anonymous pull needs no login. */
   private void version(RoutingContext rc) {
     rc.response()
         .putHeader(HttpHeaders.CONTENT_TYPE, "application/json; charset=utf-8")

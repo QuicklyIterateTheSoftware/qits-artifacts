@@ -9,12 +9,12 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 /**
  * The one static write secret, and the one place that decides a blank value means <b>open</b>.
  *
- * <p>Two mechanisms present it, because two kinds of client have to deliver it. The JSON API takes
- * it in an {@code X-Artifacts-Token} header ({@code ArtifactsTokenFilter}); the OCI registry takes
- * it as an HTTP Basic password ({@code RegistryAuthGuard}), because that is what {@code skopeo
- * --dest-creds} and {@code podman push --creds} can send and a custom header is not. What they must
- * never disagree on is <em>whether a guard exists at all</em> — a deployment that set the token and
- * found one surface still open would be a security bug, not a quirk.
+ * <p>One mechanism presents it: the JSON API's {@code X-Artifacts-Token} header
+ * ({@code ArtifactsTokenFilter}). The OCI registry used to be a second consumer (HTTP Basic
+ * password, the retired {@code RegistryAuthGuard}) and is now deliberately tokenless — producers
+ * on qits-net are trusted, external writes die on the gateway's session policy, and the
+ * skopeo/podman-cannot-authenticate tradeoff dissolved with the guard. Setting this token guards
+ * the JSON API and nothing else; {@code RegistryOpenPushTest} pins that it stays that way.
  */
 @ApplicationScoped
 public class ArtifactsToken {

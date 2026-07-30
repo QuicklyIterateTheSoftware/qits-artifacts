@@ -22,9 +22,11 @@ import java.util.Set;
  * never guarded — a blob must be usable directly as an {@code <img>}/{@code <video>} src.
  *
  * <p>This filter is JAX-RS, so it sees only what RESTEasy dispatches. It does <b>not</b> run on the
- * raw Vert.x routes — neither {@code /artifacts/git/*} nor the registry's {@code /v2/*}, which
- * carries its own guard in {@code RegistryAuthGuard}. The two share the secret and the blank-is-open
- * rule through {@link ArtifactsToken}, and nothing else.
+ * raw Vert.x routes — neither {@code /artifacts/git/*} nor the registry's {@code /v2/*}, and both
+ * are unguarded <b>on purpose</b>: the git host trades on capability-url repo ids, and the registry
+ * is deliberately tokenless (trusted producers on qits-net; external writes die on the gateway's
+ * session policy — see {@code RegistryRoutes.init}). Setting this token guards the JSON API and
+ * nothing else.
  */
 @Provider
 public class ArtifactsTokenFilter implements ContainerRequestFilter {

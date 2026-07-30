@@ -85,7 +85,7 @@ class RegistryTest {
   @Test
   void theVersionProbeIsAnsweredAnonymously() {
     // Every client pings this before anything else, and it stays 200 so an anonymous `docker pull`
-    // works with no login. See RegistryAuthGuard for what that costs on the push side.
+    // works with no login — and since the registry carries no write guard, so does a push.
     given()
         .when()
         .get("/v2/")
