@@ -30,6 +30,13 @@ public class WebUiRedirect {
         .method(HttpMethod.HEAD)
         .handler(
             rc -> {
+              // Vert.x path routes are trailing-slash tolerant: route("/artifacts") matches /artifacts/ too,
+              // and answering the slash form here would sit AHEAD of Quinoa and loop the
+              // redirect onto itself. Only the exact bare segment is this route's business.
+              if (!"/artifacts".equals(rc.request().path())) {
+                rc.next();
+                return;
+              }
               String query = rc.request().query();
               rc.response()
                   .setStatusCode(301)
