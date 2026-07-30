@@ -56,10 +56,11 @@ why the IT exists and why it drives a real `git clone`/`push` rather than assert
 
 Almost everything is served under the `/artifacts` gateway segment — `qits-gateway` routes verbatim
 by prefix, so an unprefixed route is normally unreachable, on `qits-net` as much as through the
-gateway. Four second-level segments, plus one root-level exception:
+gateway. Four second-level segments and the segment itself, plus one root-level exception:
 
 | Prefix | Machinery | Moves with |
 |---|---|---|
+| `/artifacts/` | the Angular SPA, built and served by Quinoa from the `src/main/webui` submodule | `quarkus.quinoa.ui-root-path` **and** the client's own `baseHref` |
 | `/artifacts/api/**` | JAX-RS | `quarkus.rest.path` |
 | `/artifacts/q/**` | Quarkus' non-application root (openapi, swagger-ui, health) | `quarkus.http.non-application-root-path` |
 | `/artifacts/git/**` | raw Vert.x routes in `GitHostRoutes` | **nothing** — the segment is a literal in the code |
@@ -70,6 +71,33 @@ gateway. Four second-level segments, plus one root-level exception:
 it sits inside the segment the gateway already routes here and needs no extra prefix on
 `QitsService.ARTIFACTS`. The first path segment after it is the `artifact_repository` row, the same
 first-segment rule the OCI registry uses.
+
+The SPA is the one that takes the *whole* segment, so it is the one that can swallow the others.
+Quinoa's SPA re-route is a catch-all at `/artifacts/*` registered near-last, so anything with a real
+route in front of it still wins — but a request matching **no** route is rerouted to `index.html` and
+answers `200 text/html`. `quarkus.quinoa.ignored-path-prefixes` is what stops that, and it is set
+explicitly (`/api,/q,/git,/npm,/v2`) rather than left to Quinoa's derivation, because the derivation
+reads `quarkus.rest.path` and `quarkus.http.non-application-root-path` and **nothing names `/git` or
+`/npm`**.
+Setting the key REPLACES the derivation rather than extending it, and its values are relative to
+`ui-root-path`, so `/api` and `/q` cannot be written as `${quarkus.rest.path}`: that line is a
+hand-kept copy of a derivation and has to be edited when either key moves.
+
+`/v2` is in that list even though **nothing is mounted at `/artifacts/v2`** — it is the one entry
+that ignores a path no route serves. The registry is at the host root, so a deployment that sends
+`/artifacts/v2` is misconfigured and has to find out: a 404 tells a registry client "not a registry
+here", while the SPA answers 200 `text/html` with no `Docker-Distribution-Api-Version` header. That
+assertion predates the SPA (`PackagedProcessIT.theRegistryIsMountedAtTheHostRootNotUnderTheArtifactsSegment`)
+and enabling SPA routing is what would otherwise have flipped it — it caught the change, which is
+the argument for leaving it spelled out absolutely.
+
+The client's `baseHref` is a fourth spelling of the segment and lives in another repo. Quinoa mounts
+the files; the `baseHref` is what makes `index.html` ask for them at the right url. A mismatch serves
+a page whose every asset 404s, and no test here would see it.
+
+Note also that bare `/artifacts` (no trailing slash) is a 404 — Quinoa mounts the SPA at
+`/artifacts/*`, which does not match the bare segment. `/artifacts/` works. This is upstream
+behaviour, not a local choice.
 
 `/v2` is the exception to the segment rule and it is forced on us: docker and podman resolve an image
 reference against `<host>/v2/` and accept no path prefix. The gateway claims it as an *extra prefix*
@@ -164,7 +192,12 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   and the application ends up talking to a different instance than the test configures.
 - `mvn verify -Dnative` runs those, then 12 more: `PackagedProcessIT` against the compiled binary.
   It is the only suite that starts a **process** rather than an in-JVM Quarkus, so it is where the
-  four route stacks are proved to coexist and where JGit is proved to have survived the compile.
+  route stacks are proved to coexist and where JGit is proved to have survived the compile.
+  It is also the **only** place the web UI can be tested at all: Quinoa logs "Quinoa is disabled by
+  default in tests" and registers neither the static resources nor the SPA re-route, so a
+  `@QuarkusTest` asserting anything about `/artifacts/` passes against a process that has no client
+  in it. Two of the twelve are that, and they are the guard on
+  `quarkus.quinoa.ignored-path-prefixes`.
   Its `@TestProfile` points the datasource, the blobs dir and the git data-dir under `target/`,
   passed to the launched binary as `-D` flags; it uses a **file** H2 of the same shape the
   deployment runs, not the unit suite's in-memory one, because the file/embedded shape is the thing

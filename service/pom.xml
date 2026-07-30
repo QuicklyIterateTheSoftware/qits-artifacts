@@ -18,14 +18,16 @@
          A DEPLOYABLE APP, not a library JAR. It was extracted as a library — "a consuming Quarkus
          application pulls it in and gets the routes" — because packaging it would have needed an
          auth variant, a webui and a main class. All three reasons have lapsed: authentication
-         terminates at qits-gateway and this module reads a header (see security/), the webui stays
-         in the monorepo, and Quarkus supplies the main class.
+         terminates at qits-gateway and this module reads a header (see security/), Quarkus supplies
+         the main class, and the webui is now this repo's own — src/main/webui is a submodule
+         (qits-spa-artifacts) that quarkus-quinoa builds and serves at /artifacts.
 
          See migration-deployables-plan.md in the superproject.
 
-         Deliberately absent vs. the monorepo's `service`: quarkus-quinoa, quarkus-undertow (the git
-         host is on Vert.x routes precisely to stay off the servlet stack), the MCP server tree, the
-         OTLP receiver, websockets-next, vertx-http-proxy, and every auth/* module. -->
+         Deliberately absent vs. the monorepo's `service`: quarkus-undertow (the git host is on
+         Vert.x routes precisely to stay off the servlet stack, and undertow's presence breaks
+         Quinoa's production static serving), the MCP server tree, the OTLP receiver,
+         websockets-next, vertx-http-proxy, and every auth/* module. -->
     <artifactId>qits-artifacts-service</artifactId>
     <name>qits-artifacts :: service</name>
     <packaging>quarkus</packaging>
@@ -83,6 +85,19 @@
                  ONLY; the git CLI remains the sole mutator of repositories. -->
             <groupId>org.eclipse.jgit</groupId>
             <artifactId>org.eclipse.jgit</artifactId>
+        </dependency>
+        <dependency>
+            <!-- The SPA. Quinoa runs the npm build in src/main/webui (the qits-spa-artifacts
+                 submodule) during augmentation and serves the result as static resources — see the
+                 quarkus.quinoa.* block in application.properties for the paths.
+
+                 It is why quarkus-undertow must stay out: Quinoa's production static serving goes
+                 through Quarkus' own static-resource route, which undertow's servlet stack takes
+                 over and then cannot find (the monorepo's
+                 docs/issues/2026-07-15_packaged-spa-not-served.md). The git host being on raw
+                 Vert.x routes rather than jgit.http.server is what keeps that dependency absent. -->
+            <groupId>io.quarkiverse.quinoa</groupId>
+            <artifactId>quarkus-quinoa</artifactId>
         </dependency>
         <dependency>
             <groupId>io.quarkus</groupId>

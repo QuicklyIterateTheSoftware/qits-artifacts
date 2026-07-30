@@ -20,13 +20,15 @@ see `migration-plan.md` §3.4 in the home repo.
 |---|---|
 | `artifacts/` | `eu.wohlben.qits.artifacts.*` — entity, persistence, dto, mapper, control, error. The blob store proper. No web, no JAX-RS. |
 | `service/` | `eu.wohlben.qits.artifacts.api` (the JAX-RS boundary), `eu.wohlben.qits.githost` (the Vert.x + JGit smart-HTTP host), `eu.wohlben.qits.registry` (the Vert.x OCI Distribution API) and `eu.wohlben.qits.npm` (the Vert.x npm registry and its upstream proxy). |
+| `service/src/main/webui/` | The `qits-spa-artifacts` submodule — an Angular SPA, built into the app by Quinoa and served at `/artifacts`. Not Java, and not a Maven module. |
 
 `artifacts/` is a library jar. **`service/` is the application** — it carries
 `<packaging>quarkus</packaging>` and produces a process, as a JVM fast-jar or as a native binary:
 
     ./mvnw verify
-    java -jar service/target/quarkus-app/quarkus-run.jar   # :8080 — blobs /artifacts/api/**, git /artifacts/git/**,
-                                                           #         npm /artifacts/npm/**, images /v2/**
+    java -jar service/target/quarkus-app/quarkus-run.jar   # :8080 — SPA /artifacts/, blobs /artifacts/api/**,
+                                                           #         git /artifacts/git/**, npm /artifacts/npm/**,
+                                                           #         images /v2/**
 
     ./mvnw verify -Dnative
     ./service/target/qits-artifacts                        # same routes, ~35ms to listening
@@ -47,7 +49,15 @@ the four route stacks are proved to coexist in one process.
 
 It was extracted as a library, on the reasoning that packaging it would need an auth variant, a
 webui and a main class. All three have lapsed: authentication terminates at `qits-gateway` and this
-service reads a header, the webui stays in the monorepo, and Quarkus supplies the main class.
+service reads a header, Quarkus supplies the main class, and the webui is now this repo's own —
+`service/src/main/webui` is the `qits-spa-artifacts` submodule, which `quarkus-quinoa` builds during
+augmentation and serves from the packaged artifact at `/artifacts`. A fresh clone therefore wants
+`git submodule update --init` before `./mvnw package`; without it Quinoa finds no `package.json`,
+disables itself with a warning, and the app ships with no client while the build stays green.
+
+The segment is spelled a THIRD time inside the client — the Angular `baseHref` in its `angular.json`
+is `/artifacts/` — because the browser resolves asset urls against the document, not against
+anything the server knows. Move `quarkus.quinoa.ui-root-path` and move that.
 
 Everything is served under the `/artifacts` gateway segment, because `qits-gateway` routes
 verbatim by prefix and rewrites nothing — there is no unprefixed form, on `qits-net` either.
@@ -97,8 +107,16 @@ an `<img>`/`<video>` src.
 
 `GitHostRoutes` mounts JGit's `UploadPack`/`ReceivePack` on plain Vert.x routes at `/artifacts/git/*` —
 deliberately **not** as a servlet, because `quarkus-undertow`'s presence breaks Quinoa's production
-static serving in the consuming app. JGit speaks the wire protocol and nothing else; the git CLI
-remains the only thing that mutates a repository.
+static serving — which used to mean "in the consuming app" and now means in this one, since the SPA
+above is served that way. JGit speaks the wire protocol and nothing else; the git CLI remains the
+only thing that mutates a repository.
+
+Those routes are also why `quarkus.quinoa.ignored-path-prefixes` is spelled out in
+`application.properties` rather than left to Quinoa's derivation: Quinoa derives its ignore list
+from `quarkus.rest.path` and `quarkus.http.non-application-root-path`, and no config key names
+`/artifacts/git` at all. The six routes below match ahead of Quinoa's SPA re-route on their own, but
+the paths *between* them — `/artifacts/git/<repoId>` with no suffix — match nothing, and without the
+ignore they would answer `200 text/html` where `git` needs a 404.
 
 JGit is **not** a Quarkus extension, so nothing tells the native compiler about it and the whole git
 host is the part of this service that a GraalVM build breaks silently. Three things had to be
@@ -149,6 +167,12 @@ The mount point is not a choice. Docker and podman resolve a reference against `
 accept no path prefix, so this cannot live under `quarkus.rest.path` the way the JSON API does — it
 is raw Vert.x at the host root, a literal in the code exactly as `/artifacts/git` is, and nothing in
 the JAX-RS configuration moves it. `RegistryTest` is the only thing that would notice if it drifted.
+
+The corollary is that `/artifacts/v2` must serve **nothing**, and since the SPA took the whole
+segment that now takes saying so: `/v2` is in `quarkus.quinoa.ignored-path-prefixes` for that alone.
+A deployment that prefixes the registry is misconfigured, and a 404 is how a registry client is told
+"not a registry here" — answered with the SPA it gets `200 text/html` and no
+`Docker-Distribution-Api-Version` header, and reports something that names neither cause nor fix.
 
 Storage is the blob store, unchanged: OCI addresses every layer, config and manifest as
 `sha256:<hex>`, which *is* `BlobStore`'s model, so layers dedupe globally with everything else. Two
