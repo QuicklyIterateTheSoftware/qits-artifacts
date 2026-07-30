@@ -130,7 +130,7 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 
 ## Tests
 
-- `mvn verify` runs 114 tests (45 in `artifacts/`, 69 in `service/`) in about 40s. Nothing here
+- `mvn verify` runs 117 tests (47 in `artifacts/`, 70 in `service/`) in about 40s. Nothing here
   needs docker — and that is the constraint that shapes the registry suite: `docker`, `podman` and
   `skopeo` may not be assumed present, so `registry/OciClient` + `registry/TinyImage` synthesise a
   real image in memory and drive a full push/pull over the JDK `HttpClient`. It uses that rather than

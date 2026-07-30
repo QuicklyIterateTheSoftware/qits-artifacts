@@ -10,9 +10,10 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
 /**
- * Startup gate that self-seeds the two default CI repository types ({@code ci-screenshots}, {@code
- * ci-videos}) so a fresh deployment has them out of the box (the user-chosen provisioning model;
- * the {@code PUT} lifecycle endpoint still exists for any others). Mirrors {@code StartupSelfSeed}:
+ * Startup gate that self-seeds the default repository rows — the two CI types ({@code
+ * ci-screenshots}, {@code ci-videos}) and the platform image repository ({@code qits}) — so a fresh
+ * deployment has them out of the box (the user-chosen provisioning model; the {@code PUT} lifecycle
+ * endpoint still exists for any others). Mirrors {@code StartupSelfSeed}:
  * lives in {@code service} so it fires only when the web app boots (never the cli), and runs
  * additively via the idempotent {@link ArtifactsRepositorySeeder#ensureDefaults()}.
  *

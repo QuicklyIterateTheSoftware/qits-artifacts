@@ -52,6 +52,11 @@ public class OciRegistryService {
    * /artifacts/api/repositories/<name>} carrying {@code {"type":"oci-images"}} — the same endpoint,
    * the same token guard and the same immutable-type rule as every other repository. A typo
    * therefore fails loudly instead of quietly minting a namespace.
+   *
+   * <p>The one exception to "an operator creates it" is {@code qits}, the repository the platform's
+   * own publish convention uses: {@link ArtifactsRepositorySeeder} seeds that row at startup, so a
+   * fresh deployment accepts {@code qits/<application>:<sha>} with no manual step. Every other
+   * namespace still has to be asked for.
    */
   @ActivateRequestContext
   public OciImageName requireOciRepository(String name) {

@@ -3,7 +3,7 @@ package eu.wohlben.qits;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
-import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.hasItems;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -94,13 +94,15 @@ class PackagedProcessIT {
   @Test
   void theBlobStoreBootsItsOwnSchemaAndServesBytes() {
     // Reaching a repository row at all means Flyway migrated this process' own H2 file, the
-    // startup seed wrote the two CI types through Panache, and Jackson serialised them back.
+    // startup seed wrote its rows through Panache, and Jackson serialised them back. `qits` is in
+    // the set because a packaged process is the only thing here that runs the seed for real: it is
+    // what lets a fresh deployment take a `docker push` with no manual ensure call.
     given()
         .when()
         .get("/artifacts/api/repositories")
         .then()
         .statusCode(200)
-        .body("repositories.name", hasItem("ci-screenshots"));
+        .body("repositories.name", hasItems("ci-screenshots", "ci-videos", "qits"));
 
     byte[] png = png(120, 80);
     String id =
@@ -250,7 +252,11 @@ class PackagedProcessIT {
     assertEquals(pushedSha, originSha, "push should have advanced the origin's branch ref");
   }
 
-  /** Idempotent, like the endpoint itself — the registry never creates a repository implicitly. */
+  /**
+   * Idempotent, like the endpoint itself — the registry never creates a repository implicitly. The
+   * startup seed has already written this exact row in a packaged process; the call stays so the
+   * registry cases state their own precondition instead of resting on another test's subject.
+   */
   private void ensureOciRepository() {
     given()
         .contentType("application/json")

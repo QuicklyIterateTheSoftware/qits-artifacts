@@ -160,15 +160,19 @@ Repositories are **not** created implicitly. The first segment of an image name 
 `oci-images`-typed row in `artifact_repository`, created with the ordinary ensure endpoint:
 
 ```
-curl -X PUT http://<host>/artifacts/api/repositories/qits \
+curl -X PUT http://<host>/artifacts/api/repositories/<name> \
   -H 'Content-Type: application/json' -H "X-Artifacts-Token: $QITS_ARTIFACTS_TOKEN" \
   -d '{"type":"oci-images"}'
 ```
 
-Then `qits/alpine:latest` works, and `qits/build-images/ci-base:latest` is repository `qits`, image
-`build-images/ci-base`. A push to an unknown first segment is `404 NAME_UNKNOWN` with a message
-naming this command; a single-segment reference (`docker push <host>/alpine`) is `400 NAME_INVALID`,
-because it has no repository/image split at all.
+**`qits` needs none of that** — the startup seed ensures that row alongside the two CI types, so a
+fresh deployment accepts the platform's own convention (`qits/<application>:<sha>`, what a pipeline's
+publish step pushes) with zero manual steps. The curl above is for **additional** repositories.
+
+So `qits/alpine:latest` works out of the box, and `qits/build-images/ci-base:latest` is repository
+`qits`, image `build-images/ci-base`. A push to an unknown first segment is `404 NAME_UNKNOWN` with a
+message naming this command; a single-segment reference (`docker push <host>/alpine`) is `400
+NAME_INVALID`, because it has no repository/image split at all.
 
 ### Reaching it from a client
 
@@ -336,7 +340,7 @@ app's `application.properties` overrides them.
 |---|---|---|
 | `qits.artifacts.blobs-dir` | `~/.qits/data/artifacts/blobs` | content-addressed blob bytes |
 | `qits.artifacts.token` | blank (open) | the JSON API's write guard (`X-Artifacts-Token`); the registry is deliberately tokenless |
-| `qits.artifacts.startup-seed.enabled` | `true` | self-seed `ci-screenshots` + `ci-videos` |
+| `qits.artifacts.startup-seed.enabled` | `true` | self-seed `ci-screenshots` + `ci-videos` + the `qits` image repository |
 | `qits.repositories.data-dir` | `~/.qits/data/repositories` | where the git host finds `<repoId>/origin` |
 | `qits.ci.intake-url` | `http://localhost:8080/ci/api/events/post-receive` | post-receive delivery |
 | `qits.ci.token` | blank | `X-CI-Token` on those events |
