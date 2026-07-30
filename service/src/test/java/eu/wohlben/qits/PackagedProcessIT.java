@@ -31,10 +31,15 @@ import org.junit.jupiter.api.Test;
  * gap in any of them leaves the JVM suite green and fails only in the binary, at runtime.
  *
  * <p>Deliberately <b>one</b> class spanning both packages rather than one per context, because the
- * thing under test is the single process: {@code /artifacts/api/**} is JAX-RS, {@code /artifacts/q/**}
- * is Quarkus' non-application root and {@code /artifacts/git/**} is raw Vert.x, and what needs
- * proving is that all three resolve in the same binary. Splitting it by package would split the
- * subject.
+ * thing under test is the single process: {@code /artifacts/} is Quinoa's static SPA, {@code
+ * /artifacts/api/**} is JAX-RS, {@code /artifacts/q/**} is Quarkus' non-application root and {@code
+ * /artifacts/git/**} is raw Vert.x, and what needs proving is that all four resolve in the same
+ * binary. Splitting it by package would split the subject.
+ *
+ * <p>The SPA is here rather than in the {@code @QuarkusTest} suite because it <b>cannot</b> be
+ * there: Quinoa logs "Quinoa is disabled by default in tests" and registers neither the static
+ * resources nor the SPA re-route, so a unit test asserting any of this would pass against a process
+ * that has no web UI in it at all. This is the only suite that sees the real thing.
  *
  * <p>JGit is the reason this exists. It is not a Quarkus extension, so nothing registers its
  * {@code ServiceLoader} providers or its {@code JGitText} resource bundle for native-image on its
@@ -82,6 +87,48 @@ class PackagedProcessIT {
 
   @TestHTTPResource("/")
   URL root;
+
+  @Test
+  void theSpaIsServedAtTheSegmentWithAMatchingBaseHref() {
+    // Quinoa builds src/main/webui (the qits-spa-artifacts submodule) during augmentation and the
+    // files ship inside the artifact. The base href is the client's half of the same coupling:
+    // Quinoa mounts the files at quarkus.quinoa.ui-root-path, but only the baseHref baked in by
+    // `ng build` makes the browser ask for them there. Asserting both together is what makes a
+    // one-sided move fail here instead of in a browser.
+    given()
+        .when()
+        .get("/artifacts/")
+        .then()
+        .statusCode(200)
+        .contentType(containsString("text/html"))
+        .body(containsString("<base href=\"/artifacts/\">"));
+  }
+
+  @Test
+  void aDeepLinkFallsBackToTheSpaButTheOtherStacksAreNotSwallowed() {
+    // quarkus.quinoa.enable-spa-routing puts a catch-all at /artifacts/* near the end of the route
+    // order: a client route has no file behind it and must reach index.html, or every reload and
+    // every pasted link 404s.
+    given()
+        .when()
+        .get("/artifacts/some/client/route")
+        .then()
+        .statusCode(200)
+        .body(containsString("<base href=\"/artifacts/\">"));
+
+    // The other half, and the reason quarkus.quinoa.ignored-path-prefixes is spelled out rather
+    // than left to Quinoa's derivation. That derivation reads quarkus.rest.path and
+    // quarkus.http.non-application-root-path — so /api and /q would be covered — but NOTHING names
+    // /artifacts/git, which GitHostRoutes carries as a literal. The git host's six routes match
+    // ahead of the catch-all on their own; what does not is the base BETWEEN them, which is
+    // precisely the url qits-ci and qits-workspace-daemon hold as a contract. Un-ignored it answers
+    // 200 text/html, and a git client told 200 HTML reports anything but "no such repository".
+    given().when().get("/artifacts/git/" + UUID.randomUUID()).then().statusCode(404);
+
+    // Setting the key REPLACED the derivation, so the two it used to supply are re-asserted here.
+    given().when().get("/artifacts/api/repositories").then().statusCode(200);
+    given().when().get("/artifacts/q/health/ready").then().statusCode(200);
+  }
 
   @Test
   void frameworkSurfaceIsServedUnderTheQSegment() {

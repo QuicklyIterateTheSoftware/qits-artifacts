@@ -97,8 +97,19 @@ COPY . .
 # a whole-reactor build a compile error in one of those would block deploying this service, and build
 # time would grow with the published surface instead of with the app. The image build should depend
 # on exactly what the image contains.
+# The two `package-manager-install` flags are how the Angular client gets built HERE. Quinoa shells
+# out to npm and a Mandrel builder image has no node, so without them this stage fails the moment the
+# webui submodule is present in the context. They are on the command line rather than in
+# application.properties on purpose: a developer machine already has node and should keep using its
+# own, and only this stage has to be told. The version is pinned so the image is reproducible rather
+# than built against "whatever nodejs.org calls current".
+#
+# With the submodule NOT initialised in the build context, Quinoa finds no package.json, disables
+# itself with a warning, and this stage stays green while shipping no client.
 RUN ./mvnw -B -ntp -pl service -am package -Dnative -DskipTests \
-      -Dquarkus.native.native-image-xmx=4g
+      -Dquarkus.native.native-image-xmx=4g \
+      -Dquarkus.quinoa.package-manager-install=true \
+      -Dquarkus.quinoa.package-manager-install.node-version=22.22.0
 
 # --- runtime --------------------------------------------------------------------------------------
 FROM registry.access.redhat.com/ubi9/ubi-minimal:9.6
