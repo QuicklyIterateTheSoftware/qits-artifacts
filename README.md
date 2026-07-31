@@ -146,6 +146,46 @@ one segment to both:
 This base is a **cross-repo contract**: qits-ci fetches pipeline config from it and
 qits-workspace-daemon's `Provisioner` clones from it, both against the literal `/artifacts/git`.
 
+### The default branch's seatbelt
+
+`ProtectedRefHook` is a JGit `PreReceiveHook` that refuses a direct **update or delete** of a
+repository's default branch, so that releasing is something the platform does — through
+qits-workspaces' `POST /workspaces/api/workspaces/{id}/integrate` — rather than something a person
+remembers to do. It is a hook in Java rather than a `hooks/pre-receive` script because this host
+**runs no git**: JGit is driven in-process, so a script in the bare's `hooks/` would never execute.
+
+- The protected ref is the bare's own `HEAD` (`repo.getFullBranch()`), which is per-repo with no
+  table and no cross-service read. Every other ref is untouched — workspace branches are force-pushed
+  and deleted constantly and this must be invisible to them.
+- **Creates are allowed.** An empty repository has no default branch to protect, so the first-run
+  seeding push needs nothing.
+- Two bypasses, both carried as **push options**, because options ride inside the pack protocol and
+  therefore behave identically through all three doors this host is reachable through — a header
+  cannot, since qits-gateway strips the whole `X-Qits-` prefix unconditionally:
+  - `-o qits.release` — the integrate flow's own push. **Fast-forward only**, which is what keeps
+    that push a compare-and-swap.
+  - `-o qits.token=<value>` — "push anyway", including non-fast-forward and delete, **iff** the
+    value equals `qits.repositories.git.push-token`. That property has **no default: unset matches
+    nothing, and a configured-empty value matches nothing either.** With protection on and no token
+    configured there is no direct push to the default branch at all; a deployment that wants the
+    dev-loop escape configures one.
+- Every accepted bypass and every refusal is logged at INFO, the token value never echoed, so "how
+  much direct-to-main pushing is still happening" stays a question with an answer.
+- Refusals name the integrate endpoint and say a matching token is what overrides them. They never
+  echo a configured value — only whether this host has one, which is the part the pusher cannot
+  otherwise know.
+
+It ships **inert** (`protect-default-branch=false`) and that is load-bearing: this service is the git
+host that serves its own redeploy, so a protection bug landing enabled could refuse the very push
+that fixes it. A deployment turns it on by env; a single repository opts out with
+`[qits] protectDefaultBranch = false` in its own bare config, which needs no table (this service owns
+none) and travels with the volume.
+
+Push options need `setAllowPushOptions(true)` on **both** `ReceivePack` instances — the one in
+`service(...)` that receives them and the one in `infoRefs(...)` that advertises the capability. A
+client only sends `-o` if it was offered, so missing the advertisement produces the confusing failure
+where the option is silently never seen and every bypass is refused.
+
 After a successful push, `CiPostReceiveNotifier` POSTs `{repoId, branch, oldSha, newSha}` per
 updated branch ref to `qits.ci.intake-url`. That was already an HTTP call inside the monolith, which
 is exactly why the artifacts→ci seam survived the split untouched: only the url moves when
@@ -505,6 +545,8 @@ app's `application.properties` overrides them.
 | `qits.artifacts.npm.proxy.upstream` | `https://registry.npmjs.org` | what an `npm-proxy` repository caches |
 | `qits.artifacts.npm.proxy.packument-ttl` | `PT5M` | how long a cached packument serves before revalidation |
 | `qits.repositories.git.max-pack-size` | `64M` | the git host's `BodyHandler` limit |
+| `qits.repositories.git.protect-default-branch` | `false` | refuse a direct update/delete of a repo's default branch — see "The default branch's seatbelt" |
+| `qits.repositories.git.push-token` | **unset** | the value `-o qits.token=<value>` must equal; unset and empty both match nothing |
 | `quarkus.http.limits.max-body-size` | `1088M` | **global**; above the largest upload cap |
 
 The last one is a global ceiling, but not the single hard gate this section used to claim. Quarkus

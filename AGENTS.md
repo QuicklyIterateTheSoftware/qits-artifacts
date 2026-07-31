@@ -172,7 +172,7 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 
 ## Tests
 
-- `mvn verify` runs 173 tests (65 in `artifacts/`, 108 in `service/`) in about a minute. Nothing here
+- `mvn verify` runs 196 tests (65 in `artifacts/`, 131 in `service/`) in about a minute. Nothing here
   needs docker — and that is the constraint that shapes the registry suite: `docker`, `podman` and
   `skopeo` may not be assumed present, so `registry/OciClient` + `registry/TinyImage` synthesise a
   real image in memory and drive a full push/pull over the JDK `HttpClient`. It uses that rather than
@@ -190,7 +190,7 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   than by touching its fields, and the reason is worth knowing before writing another one: Quarkus
   instantiates a `QuarkusTestProfile` in **two** classloaders, so a static singleton exists twice
   and the application ends up talking to a different instance than the test configures.
-- `mvn verify -Dnative` runs those, then 12 more: `PackagedProcessIT` against the compiled binary.
+- `mvn verify -Dnative` runs those, then 16 more: `PackagedProcessIT` against the compiled binary.
   It is the only suite that starts a **process** rather than an in-JVM Quarkus, so it is where the
   route stacks are proved to coexist and where JGit is proved to have survived the compile.
   It is also the **only** place the web UI can be tested at all: Quinoa logs "Quinoa is disabled by
@@ -216,6 +216,15 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   `RegistryTest`, because that suite drives a client written from the same misreading. **The fixes are
   guarded by unit tests, not by this IT** — it is opt-in and needs Go, so anything it proves must also
   be provable by `mvn verify` alone or it is not actually guarded.
+- The git host's protection cases are **three** `@QuarkusTest` classes, not one, and the split is
+  forced: `qits.repositories.git.push-token` configured / configured-empty / unset are three process
+  configurations, and a `@TestProfile` is per class. `GitHostTest` runs under the SHIPPED config
+  (protection off, token unset) and turns protection on per repository through the bare's own
+  `[qits] protectDefaultBranch`; `GitHostPushTokenTest` and `GitHostEmptyPushTokenTest` carry the
+  other two. `GitHostFixture` is the shared git CLI driver — static, because those classes cannot
+  usefully share a base class. Note that SmallRye reads a configured-empty value as *absent* for an
+  `Optional<String>`, which is why the hook must treat unset and empty identically rather than
+  distinguishing them.
 - `GitHostTest.seedOrigin()` shells `git init` + `git clone --bare` into
   `target/githost-test-repos/<uuid>/origin`. Tests that need the name-addressed scheme register the
   alias on `FakeRepositoryNameResolver`, which is a plain `@ApplicationScoped` bean in test sources
@@ -296,6 +305,20 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   knowing: inside a `@QuarkusTest` a request context is *already* active, so two of these calls in a
   row share one Hibernate session and a read after a bulk update can see the pre-update row. That is
   a property of the test, not of the service — but it will look like a lost write.
+- **Push options need `setAllowPushOptions(true)` on BOTH `ReceivePack` instances.** The one in
+  `GitHostRoutes.service(...)` receives the options; the one in `infoRefs(...)` *advertises the
+  capability*, and a client only sends `-o` if it was offered. Setting it on one and not the other
+  compiles, passes anything that does not drive a real client, and produces the confusing failure
+  where every option is silently never seen — so `ProtectedRefHook`'s bypasses would all refuse. The
+  advertisement is asserted directly (`theReceivePackAdvertisementOffersPushOptions`, and again in
+  the native IT) precisely because it has no other symptom.
+- **`ProtectedRefHook` ships inert and must stay that way in this repo.** `mvn verify` proves the
+  matrix, but the shipped value of `qits.repositories.git.protect-default-branch` is what decides
+  whether this service can still receive its own redeploy — qits-artifacts is the git host that
+  serves the push that updates qits-artifacts. `PackagedProcessIT`'s
+  `theShippedDefaultsLeaveTheDefaultBranchUnprotected` asserts it against the packaged binary with
+  no overrides; flipping the default
+  here rather than in a deployment's env would be the one change that can strand this repo.
 - **`NpmUpstream`'s `HttpClient` is an instance field, not a static one** — the same constraint
   `CiPostReceiveNotifier` carries, and the reason the table above lists it. It is also this process'
   only outbound TLS, which no test can exercise (no network); a deployment smokes it once by hand.

@@ -351,6 +351,80 @@ class PackagedProcessIT {
     assertEquals(pushedSha, originSha, "push should have advanced the origin's branch ref");
   }
 
+  @Test
+  void theShippedDefaultsLeaveTheDefaultBranchUnprotected() throws Exception {
+    // The trap this feature is shaped around, asserted against the artifact that actually ships:
+    // qits-artifacts is the git host that serves its own redeploy, so a protection default of TRUE
+    // in the packaged binary could refuse the very push that fixes it. Nothing here overrides
+    // qits.repositories.git.protect-default-branch — this is the shipped value, and the roughest
+    // push there is must still go through untouched.
+    String repoId = seedOrigin();
+    Path origin = TargetDirState.ROOT.resolve("repositories").resolve(repoId).resolve("origin");
+    Path clone = Files.createTempDirectory("qits-artifacts-it-inert");
+    Files.delete(clone);
+    runGit(null, "git", "clone", "-q", gitBase + "/" + repoId, clone.toString());
+
+    runGit(clone, "git", "-c", "user.email=q@l", "-c", "user.name=q", "commit", "-q", "--amend",
+        "-m", "rewritten");
+    String rewritten = runGit(clone, "git", "rev-parse", "HEAD").trim();
+    runGit(clone, "git", "push", "--force", "origin", "main");
+
+    assertEquals(
+        rewritten,
+        runGit(origin, "git", "rev-parse", "refs/heads/main").trim(),
+        "the shipped default must leave a force push to the default branch exactly as it was");
+  }
+
+  @Test
+  void theProtectedRefGuardAndItsPushOptionsSurviveTheCompile() throws Exception {
+    // Everything JGit-adjacent in this feature, in the binary — which is the gate here, because
+    // this host has regressed natively before with a blanket 404 and a green JVM suite. Three
+    // things can only be proved by a real client against a real process:
+    //   * the capability is ADVERTISED, without which git never sends an option at all;
+    //   * the pre-receive hook runs, reading the bare's own config through JGit's Config;
+    //   * the options are parsed off the wire and reach the hook.
+    String repoId = seedOrigin();
+    Path origin = TargetDirState.ROOT.resolve("repositories").resolve(repoId).resolve("origin");
+    // Protection is off in the shipped defaults (asserted above), so the repository opts IN through
+    // its own bare config — which is also the per-repo override, proved natively for free.
+    runGit(origin, "git", "config", "qits.protectDefaultBranch", "true");
+
+    given()
+        .when()
+        .get("/artifacts/git/" + repoId + "/info/refs?service=git-receive-pack")
+        .then()
+        .statusCode(200)
+        .body(containsString("push-options"));
+
+    Path clone = Files.createTempDirectory("qits-artifacts-it-protected");
+    Files.delete(clone);
+    runGit(null, "git", "clone", "-q", gitBase + "/" + repoId, clone.toString());
+    String before = runGit(origin, "git", "rev-parse", "refs/heads/main").trim();
+
+    Files.writeString(clone.resolve("direct.txt"), "by hand\n");
+    runGit(clone, "git", "add", "direct.txt");
+    runGit(clone, "git", "-c", "user.email=q@l", "-c", "user.name=q", "commit", "-q", "-m", "d");
+
+    String refused = runGitExpectingFailure(clone, "git", "push", "origin", "main");
+    assertTrue(refused.contains("protected ref refs/heads/main"), refused);
+    assertTrue(refused.contains("/workspaces/api/workspaces/{id}/integrate"), refused);
+    assertEquals(
+        before,
+        runGit(origin, "git", "rev-parse", "refs/heads/main").trim(),
+        "a refused push must leave the ref where it was");
+
+    // No push token is configured in this process, and unset matches nothing — the default-locked
+    // half of settled decision 3, proved against the shipped defaults rather than assumed.
+    String refusedToken =
+        runGitExpectingFailure(clone, "git", "push", "-o", "qits.token=guess", "origin", "main");
+    assertTrue(refusedToken.contains("no push token configured"), refusedToken);
+
+    // And the sanctioned door, which the integrate flow will use: fast-forward, accepted.
+    String released = runGit(clone, "git", "rev-parse", "HEAD").trim();
+    runGit(clone, "git", "push", "-o", "qits.release", "origin", "main");
+    assertEquals(released, runGit(origin, "git", "rev-parse", "refs/heads/main").trim());
+  }
+
   /**
    * Idempotent, like the endpoint itself — the registry never creates a repository implicitly. The
    * startup seed has already written this exact row in a packaged process; the call stays so the
@@ -377,7 +451,9 @@ class PackagedProcessIT {
     Files.createDirectories(origin.getParent());
 
     Path seed = Files.createTempDirectory("qits-artifacts-it-seed");
-    runGit(null, "git", "init", "-q", seed.toString());
+    // The branch is pinned rather than left to the host's init.defaultBranch: the protected ref is
+    // the bare's own HEAD, and the protection cases below have to know its name.
+    runGit(null, "git", "init", "-q", "-b", "main", seed.toString());
     Files.writeString(seed.resolve("README.md"), "seed\n");
     runGit(seed, "git", "add", "README.md");
     runGit(seed, "git", "-c", "user.email=qits@local", "-c", "user.name=qits", "commit", "-q", "-m",
@@ -396,6 +472,25 @@ class PackagedProcessIT {
     String out = new String(p.getInputStream().readAllBytes());
     if (p.waitFor() != 0) {
       throw new RuntimeException("git " + String.join(" ", command) + " failed:\n" + out);
+    }
+    return out;
+  }
+
+  /**
+   * A refused push is the subject of the protection cases, so its output is a value rather than an
+   * exception: the message the pusher reads is exactly what is being asserted.
+   */
+  private String runGitExpectingFailure(Path cwd, String... command) throws Exception {
+    ProcessBuilder pb = new ProcessBuilder(command);
+    if (cwd != null) {
+      pb.directory(cwd.toFile());
+    }
+    pb.redirectErrorStream(true);
+    Process p = pb.start();
+    String out = new String(p.getInputStream().readAllBytes());
+    if (p.waitFor() == 0) {
+      throw new AssertionError(
+          "git " + String.join(" ", command) + " unexpectedly succeeded:\n" + out);
     }
     return out;
   }
