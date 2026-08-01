@@ -13,11 +13,17 @@ import org.junit.jupiter.api.Test;
 /**
  * A mirror namespace on the {@code /v2} wire: what it answers, and what it refuses.
  *
- * <p>Nothing is fetched yet — the miss path is workstream BX — so every read here misses. That is
- * exactly what makes the suite worth having now: the <b>shape</b> of a mirror namespace is settled
- * by this workstream, and BX changes what a miss does, not what a miss is. A puller that gets a 404
- * saying this registry holds no cached copy is being told the truth; one that got {@code
- * NAME_UNKNOWN} would go looking for a namespace that is right there.
+ * <p>This suite runs under the <b>shipped default upstream posture and the suite's closed port</b>
+ * — {@code qits.artifacts.oci.mirror.endpoint-override} points at {@code localhost:1}, so every
+ * upstream is registered, resolvable and unreachable. That is a real deployment state, not a
+ * contrivance: it is what a platform with no internet looks like, and it is the state in which the
+ * <b>resolution</b> rules are visible on their own, uncoloured by anything a fetch returned. The
+ * fetching itself is {@code RegistryMirrorFetchTest}'s subject, against an in-process stub.
+ *
+ * <p>So a cold miss here is a {@code 502} that names the upstream it could not reach — never a 404,
+ * which would tell a puller the image does not exist when the truth is that nobody could be asked.
+ * The 404 that survives is the one case where it is the whole truth: a namespace whose upstream row
+ * was deleted while its cache stayed.
  *
  * <p>Paths are spelled absolutely, as everywhere under {@code /v2}: the segment is a literal in the
  * code and no configuration moves it.
@@ -49,28 +55,47 @@ class RegistryMirrorTest {
   }
 
   @Test
-  void aManifestMissInAMirrorNamespaceSaysTheMirrorHasNoCopyRatherThanThatTheNameIsUnknown() {
+  void aColdManifestMissAgainstAnUnreachableUpstreamNamesTheUpstreamRatherThanDenyingTheImage() {
     given()
         .when()
         .get("/v2/quay/quarkus/ubi9-quarkus-mandrel-builder-image/manifests/jdk-25")
         .then()
-        .statusCode(404)
-        .body("errors[0].code", equalTo("MANIFEST_UNKNOWN"))
-        .body("errors[0].message", containsString("no cached copy"))
+        .statusCode(502)
+        .body("errors[0].message", containsString("quay.io is unreachable"))
+        .body("errors[0].message", containsString("this manifest is not cached"))
         .body("errors[0].detail.namespace", equalTo("quay"))
         .body("errors[0].detail.upstream", equalTo("quay.io"));
   }
 
   @Test
-  void aBlobMissInAMirrorNamespaceSaysTheSame() {
+  void aColdBlobMissSaysTheSame() {
     http()
         .when()
         .get("/v2/quay/quarkus/ubi9-quarkus-mandrel-builder-image/blobs/" + ABSENT_DIGEST)
         .then()
-        .statusCode(404)
-        .body("errors[0].code", equalTo("BLOB_UNKNOWN"))
-        .body("errors[0].message", containsString("no cached copy"))
+        .statusCode(502)
+        .body("errors[0].message", containsString("this blob is not cached"))
         .body("errors[0].detail.upstream", equalTo("quay.io"));
+  }
+
+  @Test
+  void aMissInANamespaceWhoseUpstreamWasDeletedIsA404SayingNothingCanBeFetchedIntoIt() {
+    // Delete removes the upstream row and nothing else (the append-only posture): the namespace
+    // stays, everything cached under it keeps serving, and only new misses change meaning. This is
+    // the one mirror miss that is still a 404, because here it IS the whole truth — there is no
+    // registry left to ask.
+    register("orphaned.example", "orphaned");
+    given().when().delete("/artifacts/api/mirror-upstreams/orphaned.example").then().statusCode(204);
+
+    given()
+        .when()
+        .get("/v2/orphaned/some/image/manifests/latest")
+        .then()
+        .statusCode(404)
+        .body("errors[0].code", equalTo("MANIFEST_UNKNOWN"))
+        .body("errors[0].message", containsString("no cached copy"))
+        .body("errors[0].message", containsString("no upstream is registered"))
+        .body("errors[0].detail.namespace", equalTo("orphaned"));
   }
 
   @Test
@@ -98,17 +123,15 @@ class RegistryMirrorTest {
   }
 
   @Test
-  void aSingleComponentImageUnderHubIsTheLibraryOneAndBothSpellingsMissTogether() {
-    // The docker daemon's own expansion. It matters here because the two spellings must share one
-    // cache entry — otherwise the first `docker pull <host>/hub/alpine` and the first
-    // `<host>/hub/library/alpine` would each pay their own upstream fetch and store the same bytes
-    // under two names.
+  void aSingleComponentImageUnderHubResolvesIntoTheHubNamespace() {
+    // The docker daemon's own expansion of a bare name. That all its spellings share ONE cache
+    // entry — and therefore one upstream fetch — is proved in RegistryMirrorFetchTest, where there
+    // is something to fetch; what is visible here is that the namespace resolved at all.
     given()
         .when()
         .get("/v2/hub/alpine/manifests/latest")
         .then()
-        .statusCode(404)
-        .body("errors[0].code", equalTo("MANIFEST_UNKNOWN"))
+        .statusCode(502)
         .body("errors[0].detail.namespace", equalTo("hub"))
         .body("errors[0].detail.upstream", equalTo("docker.io"));
   }
@@ -121,8 +144,7 @@ class RegistryMirrorTest {
         .when()
         .get("/v2/library/alpine/manifests/latest")
         .then()
-        .statusCode(404)
-        .body("errors[0].code", equalTo("MANIFEST_UNKNOWN"))
+        .statusCode(502)
         .body("errors[0].detail.namespace", equalTo("hub"));
   }
 

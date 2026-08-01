@@ -2,6 +2,7 @@ package eu.wohlben.qits.artifacts.control;
 
 import eu.wohlben.qits.artifacts.entity.ArtifactRepository;
 import eu.wohlben.qits.artifacts.entity.OciManifest;
+import eu.wohlben.qits.artifacts.entity.OciMirrorTagCheck;
 import eu.wohlben.qits.artifacts.entity.OciMirrorUpstream;
 import eu.wohlben.qits.artifacts.entity.OciTag;
 import eu.wohlben.qits.artifacts.entity.RepositoryType;
@@ -9,6 +10,7 @@ import eu.wohlben.qits.artifacts.error.OciCode;
 import eu.wohlben.qits.artifacts.error.OciException;
 import eu.wohlben.qits.artifacts.persistence.ArtifactRepositoryRepository;
 import eu.wohlben.qits.artifacts.persistence.OciManifestRepository;
+import eu.wohlben.qits.artifacts.persistence.OciMirrorTagCheckRepository;
 import eu.wohlben.qits.artifacts.persistence.OciTagRepository;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.context.control.ActivateRequestContext;
@@ -40,6 +42,7 @@ public class OciRegistryService {
   @Inject ArtifactRepositoryRepository repositories;
   @Inject OciManifestRepository manifests;
   @Inject OciTagRepository tags;
+  @Inject OciMirrorTagCheckRepository tagChecks;
   @Inject BlobStore blobStore;
   @Inject OciMirrorUpstreams mirrors;
 
@@ -253,5 +256,46 @@ public class OciRegistryService {
   @ActivateRequestContext
   public List<String> listTags(OciImageName name, String after, int limit) {
     return tags.listTagNames(name.repository(), name.image(), after, limit);
+  }
+
+  // --- the mirror's tag freshness ---------------------------------------------------------------
+
+  /**
+   * When this mirrored tag was last checked against its upstream, or empty if it never was.
+   *
+   * <p>Only the mirror writes these rows, but nothing here enforces that: the miss path asks only
+   * about tags in a namespace it already resolved as {@code OCI_MIRROR}, and a second type check
+   * would be a second place for the two to disagree.
+   */
+  @ActivateRequestContext
+  public Optional<Instant> mirrorTagCheckedAt(OciImageName name, String tag) {
+    return tagChecks
+        .findOne(name.repository(), name.image(), tag)
+        .map(check -> check.checkedAt);
+  }
+
+  /**
+   * Records that this tag has just been agreed with its upstream — by a {@code HEAD} that found the
+   * digest unchanged, or by a fetch that stored new bytes.
+   *
+   * <p>Deliberately <b>not</b> called when the upstream could not be reached. A failed check that
+   * moved this timestamp would suppress the next attempt for a whole TTL, which is the opposite of
+   * what serving stale is for: stale bytes go out now, and the next request still tries.
+   */
+  @ActivateRequestContext
+  @Transactional
+  public void recordMirrorTagCheck(OciImageName name, String tag, Instant checkedAt) {
+    OciMirrorTagCheck check =
+        tagChecks
+            .findOne(name.repository(), name.image(), tag)
+            .orElseGet(OciMirrorTagCheck::new);
+    boolean fresh = check.tag == null;
+    check.repository = name.repository();
+    check.imageName = name.image();
+    check.tag = tag;
+    check.checkedAt = checkedAt;
+    if (fresh) {
+      tagChecks.persist(check);
+    }
   }
 }

@@ -49,7 +49,9 @@ Everything that had to be declared, and the symptom each one produces if it is d
 | `CiPostReceiveNotifier` | the `HttpClient` is an instance field, not static | build fails: an `HttpClientFacade` in the image heap |
 | `npm/NpmUpstream` | the `HttpClient` is an instance field, not static | same as above — an `HttpClientFacade` frozen into the image heap |
 | `artifacts/control/CdHttpDeploymentPins` | the `HttpClient` is an instance field, not static | same as above; this is the third outbound client and the rule has not changed |
+| `registry/MirrorUpstream` | the `HttpClient` is an instance field, not static — and so is `MirrorBearerTokens`' `ObjectMapper`, which is reachable from one | same as above; the fourth outbound client, and the rule still has not changed |
 | artifacts' `microprofile-config.properties` | H2 url with no `AUTO_SERVER` | the binary dies at boot on `ClassNotFoundException: org.h2.server.TcpServer` |
+| `registry/MirrorUpstream`'s config | `endpoint-override` injected as `Optional<String>`, not `String` | the binary dies at boot on `Failed to load config value of type java.lang.String` — SmallRye reads a **configured-empty** value as absent, and that key ships blank. `defaultValue = ""` does not help. Invisible to `mvn verify`, where every test sets a real value |
 
 Only the first is a build-time failure. The rest are green builds that fail in production, which is
 why the IT exists and why it drives a real `git clone`/`push` rather than asserting a status code.
@@ -221,9 +223,11 @@ do not renumber it, and do not treat `V1__init.sql` as a squash baseline. Never 
 
 The OCI mirror owns two (V7): `oci_mirror_upstream`, whose slug is a foreign key into
 `artifact_repository` because every upstream is paired with the `oci-mirror` row its namespace
-resolves to, and `oci_mirror_tag_check`, which nothing writes yet — the miss path (workstream BX)
-does. **A plan reserves no migration number**: three workstreams were widening this lineage at once,
-and the rule they share is "take the next free V at land time, and re-enumerate
+resolves to, and `oci_mirror_tag_check`, which the miss path writes — one row per mirrored tag,
+moved both by a fetch and by a `HEAD` that found the digest unchanged, and deliberately **not**
+moved when the upstream could not be reached (a failed check that touched it would suppress the
+next attempt for a whole TTL). **A plan reserves no migration number**: three workstreams were
+widening this lineage at once, and the rule they share is "take the next free V at land time, and re-enumerate
 `ck_artifact_repository_type` from the `RepositoryType` enum as it stands in the tree"
 (proxy-pulling-normal-images.md §4). `OciMirrorMigrationTest` pins that by looping over
 `values()` — it owns a private file-H2 under `target/` and runs Flyway over the real directory,
@@ -347,7 +351,7 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 
 ## Tests
 
-- `mvn verify` runs 358 tests (152 in `artifacts/`, 18 in `git-storage/`, 188 in `service/`) in about
+- `mvn verify` runs 375 tests (152 in `artifacts/`, 18 in `git-storage/`, 205 in `service/`) in about
   a minute. Nothing here
   needs docker — and that is the constraint that shapes the registry suite: `docker`, `podman` and
   `skopeo` may not be assumed present, so `registry/OciClient` + `registry/TinyImage` synthesise a
@@ -366,6 +370,29 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   than by touching its fields, and the reason is worth knowing before writing another one: Quarkus
   instantiates a `QuarkusTestProfile` in **two** classloaders, so a static singleton exists twice
   and the application ends up talking to a different instance than the test configures.
+- **The OCI mirror suite is that shape again with one extra hazard, and the hazard is why the
+  suite's default upstream is a closed port.** `registry/StubOciRegistry` is the in-process registry
+  the miss path is a mirror *of*, reached through `qits.artifacts.oci.mirror.endpoint-override`.
+  Unlike npm's single configured upstream, the mirror's upstreams are **prefilled rows naming real
+  public registries** — quay.io, Docker Hub, Red Hat — so without that key pointed somewhere safe
+  any test touching `/v2/quay/…` would dial the internet and pass or fail for reasons unrelated to
+  this code. `src/test/resources/application.properties` points it at `http://localhost:1`; a suite
+  that wants the stub opts in by profile. Two further rules that each cost real time to rediscover:
+  - **Every claim this cache makes is a claim about upstream request counts**, so assert counters,
+    not bytes. A test that only checked the content came back passes identically against a proxy
+    that caches nothing.
+  - **Fixture content must be unique per RUN, not merely per test.** `clean-at-start` wipes the
+    tables once per run, but nothing ever wipes `target/artifacts-svc-test-blobs`, and blobs dedupe
+    globally and content-addressed. Reuse an earlier run's image content and its layer is already on
+    disk — a blob-store hit, so the fetch count comes out one short with nothing in the failure to
+    say why. Both mirror suites carry a `RUN` salt for exactly this, and it is the one thing to check
+    first if a count is off by one.
+- **`endpoint-override` redirects every upstream, which is why the derivation needs its own test.**
+  An upstream's address is derived from its domain (`MirrorEndpoints`: `https://<domain>`, with
+  `docker.io` → `registry-1.docker.io` as the one well-known hop) and there is deliberately no
+  per-domain endpoint config. With every upstream pointed at one stub, the wire suites would pass
+  just as well if the derivation were a single hardcoded host — so `MirrorEndpointsTest` is a plain
+  JUnit test over the three prefilled domains, and it is what makes "table-driven" a measurement.
 - `mvn verify -Dnative` runs those, then 20 more against the compiled binary: `PackagedProcessIT`
   (18) and `ProtectedGitHostIT` (2). They are two classes because they are two process
   configurations — `PackagedProcessIT` asserts the SHIPPED defaults leave the default branch
@@ -516,6 +543,27 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   compiles, passes anything that does not push to a mirror, and quietly lets a client write into a
   cache of somebody else's registry. The precedence inside `resolveForPull` is load-bearing too: an
   existing repository always wins its segment, so `/v2/qits/…` can never be shadowed by the remap.
+- **The mirror miss path deliberately does NOT call `requireReferencesExist`.** A pulled index binds
+  with none of its children present, because pull order is the reverse of push order — the index
+  first, children by digest afterwards, each its own miss. Applying the push path's rule here would
+  make every multi-arch pull fail on the first request, and un-lazying it would pay an upstream for
+  architectures nobody asked for (a multi-arch pull counts once per architecture *fetched*). A mirror
+  index referencing a child with no local row is the **normal** state, and BW's census was made to
+  tolerate it on purpose.
+- **`recordMirrorTagCheck` must never be called on a failed check.** Serving stale is a decision to
+  hand out old bytes *now* while still trying next time; touching `checked_at` on an unreachable
+  upstream would turn one outage into a whole TTL of silence, and would look exactly like a working
+  cache.
+- **The mirror verifies digests and the push path's `finalizeUpload` does not discard on mismatch —
+  the two are different on purpose.** A push comes from inside qits-net, so wrong bytes are promoted
+  under their own true digest and cost nothing. An upstream is not trusted, so a stream that does not
+  hash to the digest requested is deleted from the staging area and refused with `502`. The temp file
+  is the caller's to remove: `BlobStore` hands out a staging path and never deletes one.
+- **A mirror error is a 502, not a 404 and never a 500, and which one is not cosmetic.** `502` means
+  "the upstream could not be asked" and `404` means "the upstream was asked and has no such thing".
+  Collapsing them sends whoever is debugging a failed build to the wrong registry — the single most
+  expensive wrong answer this service can give, since after the `FROM` rewrite it sits under every
+  build.
 - **Wire routes must not return DTOs.** The `dto/UploadResult` lesson is worse on a raw Vert.x
   route: behind a JAX-RS `Response` there is at least a provider chain for the build to see the type
   through, but nothing sees a type serialised only inside a Vert.x handler. Responses are built with

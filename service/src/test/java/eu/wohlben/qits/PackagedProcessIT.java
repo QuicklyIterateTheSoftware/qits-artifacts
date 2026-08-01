@@ -91,6 +91,11 @@ class PackagedProcessIT {
       // build machine resolves to whatever the resolver feels like, or hangs. A closed port makes
       // the fail-closed path deterministic while still driving a real HttpClient inside the binary.
       overrides.put("qits.artifacts.gc.oci.cd-base-url", "http://localhost:1/cd/api");
+      // And the same for the mirror's three upstreams, where the shipped defaults name real public
+      // registries: this key redirects every one of them, so a closed port is what keeps an IT from
+      // dialling quay.io or Docker Hub. It still drives the binary's outbound HttpClient for real,
+      // which is the only reason the miss path can be observed here at all.
+      overrides.put("qits.artifacts.oci.mirror.endpoint-override", "http://localhost:1");
       return overrides;
     }
   }
@@ -515,7 +520,7 @@ class PackagedProcessIT {
   }
 
   @Test
-  void theMirrorNamespacesAreSeededByARealBootAndMissHonestly() {
+  void theMirrorNamespacesAreSeededByARealBootAndTheMissPathSurvivesTheCompile() {
     // The startup seed only ever fires in a packaged or dev process — never under TEST — so this is
     // the one place the three prefilled upstreams are observed arriving on their own, from a
     // migration and a boot rather than from a test's setup.
@@ -528,16 +533,21 @@ class PackagedProcessIT {
         .body("upstreams.find { it.domain == 'quay.io' }.slug", equalTo("quay"))
         .body("upstreams.find { it.domain == 'quay.io' }.cachedImages", equalTo(0));
 
-    // And what a pull through one answers today: an honest 404 rather than NAME_UNKNOWN. The miss
-    // path (workstream BX) changes what happens here; the namespace, the message's subject and the
-    // 405 below are this workstream's and are already the shape a client sees.
+    // And what a pull through one does: it FETCHES. The upstream is pointed at a closed port here,
+    // so what is observable is the miss path running to its honest end — a 502 naming the upstream
+    // it could not reach, rather than a 500 or a hang. That is a small assertion carrying a large
+    // one: the mirror's outbound HttpClient is the fourth in this process, it is built inside the
+    // binary rather than frozen into the image at build time, and nothing on the path from a /v2
+    // route to an upstream request needed reflection the builder was not told about. A green
+    // `mvn verify` proves none of that — every unit test configures a reachable stub, and this key
+    // ships BLANK, which is the shape that once failed the boot outright.
     given()
         .when()
         .get("/v2/hub/library/alpine/manifests/latest")
         .then()
-        .statusCode(404)
-        .body("errors[0].code", equalTo("MANIFEST_UNKNOWN"))
-        .body("errors[0].message", containsString("no cached copy"));
+        .statusCode(502)
+        .body("errors[0].message", containsString("docker.io is unreachable"))
+        .body("errors[0].detail.namespace", equalTo("hub"));
 
     given()
         .when()

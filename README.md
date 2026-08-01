@@ -281,10 +281,67 @@ Four rules are worth knowing before pulling through one:
   asks for bare Hub names. An existing repository always wins its segment, so `/v2/qits/…` never
   reaches the remap; the consequence is that a Hub organisation sharing a name with a local
   repository is shadowed, which is the correct precedence here.
-- **Nothing is fetched yet.** This release ships the namespaces; the miss path — fetch, verify while
-  streaming, promote, serve — is the next workstream. Until it lands, a miss in a mirror namespace is
-  a `404` whose message says this registry holds no cached copy, which is the truth rather than the
-  `NAME_UNKNOWN` a puller would otherwise read as a broken namespace.
+- **A miss fetches.** That is the cache: a `GET` that resolves into a mirror namespace and finds
+  nothing cached fetches from the upstream the row names, verifies the digest while the bytes
+  stream, promotes and serves. See below for what it costs and what it does when the upstream is
+  not there.
+
+#### What a miss does
+
+| asked for | not cached | cached |
+|---|---|---|
+| manifest by **digest** | one upstream `GET`, digest verified, kept **forever** | served; never revalidated |
+| **blob** | one upstream `GET`, digest verified **while streaming**, kept forever | served |
+| manifest by **tag**, within `tag-ttl` | — | served, **zero** upstream traffic |
+| manifest by **tag**, expired | one `GET` | one `HEAD`; unchanged digest is free, a moved one costs one `GET` |
+
+Digest-addressed content is immutable, so it is cached forever and revalidated never. A tag is the
+one mirrored thing that moves — `jdk-25` and `9.6` change under toolchain and security updates — so
+it carries a TTL and is revalidated by `HEAD`, which returns `Docker-Content-Digest` and which
+Docker Hub does not count against its anonymous pull limit. That is what keeps builds current with
+**zero curation** and at no measurable cost.
+
+**Children are fetched lazily.** A pulled multi-arch index binds the moment it arrives, with no
+child present: pull order is the reverse of push order, so the push path's "everything it references
+must already exist" rule is deliberately not applied to a mirror bind. Each child arrives as its own
+miss when a client asks for it by digest, so an architecture nobody pulls is never paid for — and
+since a multi-arch pull counts once per architecture *fetched*, lazy is the rate-limit-correct order
+as well as the cheap one.
+
+**Offline, the cache is strictly additive.** Manifests-by-digest and blobs serve forever with no
+upstream contact. An expired tag whose upstream is unreachable **serves stale** — so once a base
+image has been pulled once, every later build succeeds with the internet down. Only a never-cached
+reference can fail, and the answer says which of the two things went wrong:
+
+- upstream unreachable, nothing cached → **`502`**, naming the upstream. Not a `404`: nothing here
+  knows whether the image exists, and "no such manifest" would send a puller to debug the wrong
+  registry.
+- upstream answered and has no such reference → **`404`**, naming the registry that was asked.
+- the upstream row was **deleted** while its cache stayed → **`404`** saying no upstream is
+  registered, so nothing can be fetched into the namespace. What is already cached keeps serving.
+
+Never a `500`: a network miss is not this service failing.
+
+Four behaviour keys, and no key naming an upstream — that is what the table is for:
+
+| key | default | what it bounds |
+|---|---|---|
+| `qits.artifacts.oci.mirror.tag-ttl` | `PT1H` | how long a cached tag is served without asking |
+| `qits.artifacts.oci.mirror.manifest-timeout` | `PT30S` | one manifest `GET`/`HEAD`, including the token hop |
+| `qits.artifacts.oci.mirror.blob-timeout` | `PT10M` | one blob transfer |
+| `qits.artifacts.oci.mirror.endpoint-override` | *(blank)* | dial every upstream here instead of at its domain — the test seam; blank in every deployment |
+
+Every upstream wait carries one of those timeouts and there are no retries. This is the platform's
+first hard runtime dependency on the public internet **inside a request**, and after the `FROM`
+rewrite it sits under every service build, so a hung upstream must never pin a worker thread. Layer
+size is capped by the existing `qits.artifacts.oci.max-layer-size` (1G), which is the first knob to
+check if an upstream layer ever exceeds it.
+
+Upstreams that challenge for a token get the anonymous bearer dance — a `401` carrying a
+`WWW-Authenticate: Bearer` realm is answered with a plain token `GET` and the request is retried,
+once. Docker Hub demands this even for public images; quay.io and Red Hat mostly do not, so the
+client sends every request bare first and only pays the hop when challenged. Tokens are cached in
+memory per scope, which is per repository — a twelve-layer pull costs **one** token request.
 
 Managing upstreams is four routes under the JSON API, writes token-guarded like every other write
 here:
@@ -1035,6 +1092,10 @@ app's `application.properties` overrides them.
 | `qits.artifacts.oci.max-manifest-size` | `4M` | manifests are buffered whole to be digested and parsed |
 | `qits.artifacts.oci.upload-session-ttl` | `PT30M` | in-memory upload sessions; lost on restart, by design |
 | `qits.artifacts.oci.upload-idle-timeout` | `PT1M` | wait for the *next* chunk, not for the whole upload |
+| `qits.artifacts.oci.mirror.tag-ttl` | `PT1H` | how long a mirrored tag serves before a `HEAD` revalidation |
+| `qits.artifacts.oci.mirror.manifest-timeout` | `PT30S` | the bound on one upstream manifest request |
+| `qits.artifacts.oci.mirror.blob-timeout` | `PT10M` | the bound on one upstream blob transfer |
+| `qits.artifacts.oci.mirror.endpoint-override` | blank | dial every upstream here rather than at its own domain — the suite's stub seam, blank in a deployment |
 | `qits.artifacts.npm.max-publish-size` | `32M` | the largest npm tarball, in either direction — see below |
 | `qits.artifacts.npm.proxy.upstream` | `https://registry.npmjs.org` | what an `npm-proxy` repository caches |
 | `qits.artifacts.npm.proxy.packument-ttl` | `PT5M` | how long a cached packument serves before revalidation |

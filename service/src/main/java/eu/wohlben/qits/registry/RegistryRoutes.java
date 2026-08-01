@@ -45,10 +45,14 @@ import org.jboss.logging.Logger;
  *
  * <p><b>Two kinds of namespace answer on these routes.</b> A hosted {@code oci-images} repository is
  * the original path, unchanged. A registered mirror namespace ({@code oci-mirror}) serves cached
- * upstream content from the same rows through the same handlers — the difference is in two places
+ * upstream content from the same rows through the same handlers — the difference is in three places
  * only: a read resolves through {@code OciRegistryService.resolveForPull}, which consults the
- * upstream table, and every write refuses by type with {@code 405}. Nothing here fetches: a mirror
- * miss is an honest 404 saying so until workstream BX lands the miss path.
+ * upstream table; a read that finds nothing goes through {@link MirrorUpstream}, which fetches it,
+ * verifies it and binds it; and every write refuses by type with {@code 405}.
+ *
+ * <p>Those two mirror lines are the <b>whole</b> of the miss path's footprint on this file, and that
+ * is the point: a hit — every pull of anything already cached, and every pull of every hosted
+ * repository — runs the code that was here before, with no upstream contact and no new way to fail.
  *
  * <p>No handler here calls {@code rc.fail()}. Quarkus installs {@code QuarkusErrorHandler} as the
  * router's failure handler and it answers in a shape no registry client can read, so every handler
@@ -63,6 +67,7 @@ public class RegistryRoutes {
   private static final String DOCKER_UPLOAD_UUID = "Docker-Upload-Uuid";
 
   @Inject OciRegistryService registry;
+  @Inject MirrorUpstream mirror;
   @Inject OciUploadSessions uploads;
   @Inject OciManifestParser manifestParser;
   @Inject BlobStore blobStore;
@@ -182,11 +187,17 @@ public class RegistryRoutes {
 
   // --- blobs ------------------------------------------------------------------------------------
 
-  /** {@code GET|HEAD /v2/<name>/blobs/<digest>} — the pull path. */
+  /** {@code GET|HEAD /v2/<name>/blobs/<digest>} — the pull path, and a mirror's fetch path. */
   private void serveBlob(RoutingContext rc, boolean withBody) {
     OciRegistryService.PullTarget target = registry.resolveForPull(rc.pathParam("name"));
     String wireDigest = rc.pathParam("digest");
     String hex = OciDigest.requireHex(wireDigest);
+
+    if (target.mirror()) {
+      // The miss path. A no-op on a hit and when no upstream is registered, so the lines below are
+      // unchanged for every hosted repository and for every cached byte.
+      mirror.ensureBlob(target, hex);
+    }
 
     Path path;
     long size;
@@ -460,9 +471,12 @@ public class RegistryRoutes {
     String reference = rc.pathParam("ref");
     requireWellFormedReference(reference);
 
+    // The one branch a mirror namespace takes here: resolveManifest becomes a resolve-or-fetch,
+    // with the TTL, the HEAD revalidation and the serve-stale rule inside it.
     OciRegistryService.StoredManifest manifest =
-        registry
-            .resolveManifest(target.name(), reference)
+        (target.mirror()
+                ? mirror.resolveManifest(target, reference)
+                : registry.resolveManifest(target.name(), reference))
             .orElseThrow(
                 () ->
                     notCached(
@@ -582,13 +596,12 @@ public class RegistryRoutes {
    * The 404 a miss gets, phrased for the namespace it missed in.
    *
    * <p>In a hosted repository the answer is unchanged: the image does not have that manifest or that
-   * blob. In a <b>mirror</b> namespace the same status carries a different fact — the namespace is
-   * real, the reference may well exist upstream, and this registry simply holds no copy of it. Until
-   * the miss path lands (workstream BX) that is the whole truth about a mirror miss, and saying it
-   * is what keeps a puller from reading a 404 as "your mirror is misconfigured".
-   *
-   * <p>The shape is deliberately the one BX inherits: a mirror miss is already the single place a
-   * fetch will be attempted from, so BX changes what happens here, not where.
+   * blob. In a <b>mirror</b> namespace it now means something much narrower than it did, because
+   * the miss path answers everything else itself: an upstream that has no such reference throws its
+   * own 404 naming the registry it asked, and an unreachable one throws a 502. What is left here is
+   * the namespace whose <b>upstream row was deleted</b> while its cache stayed — the append-only
+   * posture, where what is cached keeps serving and what is not can no longer be fetched. Saying
+   * that in so many words is what keeps a puller from reading the 404 as a broken mirror.
    */
   private static OciException notCached(
       OciRegistryService.PullTarget target,
@@ -609,7 +622,7 @@ public class RegistryRoutes {
         mirrorMessage
             + (target.upstreamDomain() == null
                 ? "; no upstream is registered for this namespace, so nothing can be fetched into it"
-                : ", and it does not fetch from " + target.upstreamDomain() + " yet"),
+                : ", and " + target.upstreamDomain() + " did not supply one"),
         mirrorDetail);
   }
 
