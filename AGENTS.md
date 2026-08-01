@@ -123,9 +123,21 @@ Two top-level packages, deliberately kept apart:
 - `eu.wohlben.qits.artifacts.*` — the blob store. `artifacts/` holds `entity`, `persistence`, `dto`,
   `mapper`, `control`, `error`; `service/` holds only `api`. Entities are Panache active-record with
   public fields; mappers are MapStruct `@Mapper(componentModel = "jakarta")`.
-- `eu.wohlben.qits.githost` — the git host, `service/` only. It is **not** folded into `artifacts`:
-  it shares no code, no table and no datasource with the blob store, and keeping the package
-  separate keeps a future second split cheap.
+- `eu.wohlben.qits.githost` — the git host. Mostly `service/`, plus `eu.wohlben.qits.githost.storage`
+  in the `git-storage` module. It is **not** folded into `artifacts`: it shares no code with the blob
+  store, and keeping the package separate keeps a future second split cheap. It now shares the
+  datasource and the Flyway lineage (see "Schema changes"), which is the one part of that sentence
+  that changed.
+  - `githost.storage` (module `git-storage`) is the DFS storage **engine** and its two declared
+    ports. Its only compile dependency is JGit.
+  - `githost.persistence` (module `service`) is where those ports are **implemented**, plus the git
+    host's entities. It is a separate package name from `githost.storage` on purpose: putting the
+    adapters in the same package as the ports makes a split package across two jars, which Quarkus'
+    `SplitPackageProcessor` warns about on every build and which buys nothing — nothing here needs
+    package-private access.
+  - The adapters can only live in `service`. `git-storage` may not depend on
+    `qits-artifacts-artifacts` and `artifacts` may not depend on `git-storage` — they are different
+    contexts — and `service` is the one module that already depends on both.
 - `eu.wohlben.qits.registry` and `eu.wohlben.qits.npm` — the two protocol wire stacks, `service/`
   only. Unlike the git host these *do* share the blob store, so the split is by layer rather than by
   context: every byte and every row goes through `artifacts/control` (`OciRegistryService`,
@@ -155,7 +167,34 @@ named datasource. This lineage is the original one from the monorepo, carried ov
 do not renumber it, and do not treat `V1__init.sql` as a squash baseline. Never touch the monorepo's
 `db/migration`; that is a different database.
 
-The git host owns no tables at all.
+The git host owns **three** tables — `git_pack`, `git_pack_file` (V4) and `git_repository_protection`
+(V5) — in this same lineage, on this same datasource. It used to own none, and this file said so
+flatly; the sentence was amended rather than left standing when the second storage backend landed
+(`git-host-storage-unification-plan.md`, decision ⚖5). The alternative was a second named datasource
+with its own H2 file and its own Flyway config, for three tables that produce three rows per push
+against a 746 MB database. Nothing here is a foreign key into another context, and the rule above it
+is unchanged: the git host addresses the world by repo-id **string**.
+
+Their entities live in `service`, under `eu.wohlben.qits.githost.persistence` — not in `artifacts/`.
+`service/src/main/resources/application.properties` names that package in
+`quarkus.hibernate-orm.artifacts.packages`, which **replaces** the value the artifacts jar ships
+rather than extending it, so `eu.wohlben.qits.artifacts.entity` is spelled there too. It is spelled
+in `service` and not in the jar's `microprofile-config.properties` because that package is not on
+`artifacts/`'s classpath at all.
+
+### We do not garbage collect git
+
+Not "we have not got round to it" — a recorded decision with a number beside it
+(`git-host-storage-unification-plan.md`, ⚖2). `BlobStore` has no delete, so a repack does not reclaim
+space, it **duplicates**: `DfsGarbageCollector` writes the new pack, the packs it replaced lose their
+catalog rows, and their bytes stay forever. Measured on the platform's largest real repository, one
+run took it from **7.8 MB to 15 MB** — against 8.4 MB for the bare it replaced.
+
+The accepted cost instead is roughly three blobs and three rows per push: about **75 blobs per active
+repository per year** at the measured rate, against a blob store already past 5 GiB. It is written
+down because the one thing that must never happen is someone running a repack to save space. The
+posture is repeated in `V4__git_pack_catalog.sql`, in `GitPack`'s javadoc and in
+`git-storage/README.md`, and `GarbageCollectionTest` asserts the amplification rather than hiding it.
 
 ## Authentication
 

@@ -19,10 +19,13 @@ see `migration-plan.md` §3.4 in the home repo.
 | Module | What |
 |---|---|
 | `artifacts/` | `eu.wohlben.qits.artifacts.*` — entity, persistence, dto, mapper, control, error. The blob store proper. No web, no JAX-RS. |
-| `service/` | `eu.wohlben.qits.artifacts.api` (the JAX-RS boundary), `eu.wohlben.qits.githost` (the Vert.x + JGit smart-HTTP host), `eu.wohlben.qits.registry` (the Vert.x OCI Distribution API) and `eu.wohlben.qits.npm` (the Vert.x npm registry and its upstream proxy). |
+| `git-storage/` | `eu.wohlben.qits.githost.storage` — a JGit `DfsRepository` whose packs, pack indexes and refs are blobs, plus the two ports it declares and does not implement (`PackBlobStore`, `PackCatalog`). One compile dependency: JGit. |
+| `service/` | `eu.wohlben.qits.artifacts.api` (the JAX-RS boundary), `eu.wohlben.qits.githost` (the Vert.x + JGit smart-HTTP host), `eu.wohlben.qits.githost.persistence` (the two adapters and the git host's entities), `eu.wohlben.qits.registry` (the Vert.x OCI Distribution API) and `eu.wohlben.qits.npm` (the Vert.x npm registry and its upstream proxy). |
 | `service/src/main/webui/` | The `qits-spa-artifacts` submodule — an Angular SPA, built into the app by Quinoa and served at `/artifacts`. Not Java, and not a Maven module. |
 
-`artifacts/` is a library jar. **`service/` is the application** — it carries
+`artifacts/` and `git-storage/` are library jars and depend on nothing of each other's — they are
+different contexts, which is why `git-storage` declares ports and `service` implements them.
+**`service/` is the application** — it carries
 `<packaging>quarkus</packaging>` and produces a process, as a JVM fast-jar or as a native binary:
 
     ./mvnw verify

@@ -66,13 +66,37 @@ public class BlobStore {
    * in memory here either.
    */
   public IncrementalStage stageIncremental() {
-    Path tmp = tempDir().resolve(UUID.randomUUID().toString());
     try {
-      Files.createDirectories(tmp.getParent());
-      return new IncrementalStage(tmp);
+      return new IncrementalStage(newStagingFile());
     } catch (IOException e) {
       throw new InternalServerErrorException("Could not create artifacts temp dir", e);
     }
+  }
+
+  /**
+   * A fresh, unused path in this store's temp area, for a writer that {@link IncrementalStage}
+   * cannot serve — one that has to <b>read back</b> what it has written.
+   *
+   * <p>{@code IncrementalStage} is write-only: it wraps an {@code OutputStream} over a running
+   * {@link MessageDigest} and offers no way to read a byte again. JGit's pack parser does exactly
+   * that (a {@code DfsOutputStream} declares {@code read(long, ByteBuffer)}), so the git host's
+   * blob adapter opens its own read-write channel over this path, hashes the finished file, and
+   * hands it to {@link #promote}.
+   *
+   * <p>The path is in <b>this store's</b> temp area rather than {@code java.io.tmpdir}, and that is
+   * the reason this method exists at all rather than the caller picking a directory: {@link
+   * #promote} finishes with an {@code ATOMIC_MOVE}, which only holds within one filesystem. The
+   * caller owns the file — nothing here creates or deletes it — so a caller that never promotes
+   * must delete it.
+   */
+  public Path newStagingFile() {
+    Path tmp = tempDir().resolve(UUID.randomUUID().toString());
+    try {
+      Files.createDirectories(tmp.getParent());
+    } catch (IOException e) {
+      throw new InternalServerErrorException("Could not create artifacts temp dir", e);
+    }
+    return tmp;
   }
 
   /**
