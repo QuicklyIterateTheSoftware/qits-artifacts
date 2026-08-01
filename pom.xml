@@ -41,8 +41,12 @@
     <name>qits-artifacts</name>
 
     <modules>
-        <!-- Listed first: `service` depends on it. -->
+        <!-- Both libraries before the app: `service` depends on `artifacts` today and on
+             `git-storage` once the git host is wired to it. The two libraries do NOT depend on each
+             other — they are different contexts — which is why `git-storage` declares its own ports
+             and leaves the adapters to `service` (see git-storage/README.md). -->
         <module>artifacts</module>
+        <module>git-storage</module>
         <module>service</module>
     </modules>
 
@@ -107,10 +111,15 @@
                 <artifactId>quarkus-quinoa</artifactId>
                 <version>${quinoa.version}</version>
             </dependency>
-            <!-- The reactor's own module, so `service` depends on it version-less. -->
+            <!-- The reactor's own modules, so `service` depends on them version-less. -->
             <dependency>
                 <groupId>${project.groupId}</groupId>
                 <artifactId>qits-artifacts-artifacts</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-artifacts-git-storage</artifactId>
                 <version>${project.version}</version>
             </dependency>
         </dependencies>
