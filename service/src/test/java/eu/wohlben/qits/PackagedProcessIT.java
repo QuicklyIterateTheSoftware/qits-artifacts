@@ -6,7 +6,9 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.hasItems;
+import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -460,6 +462,36 @@ class PackagedProcessIT {
 
     given().when().get("/artifacts/api/repositories/no-such-repo/images").then().statusCode(404);
     given().when().get("/artifacts/api/repositories/npm/images").then().statusCode(400);
+  }
+
+  @Test
+  void theGcPlanSurvivesTheCompileAndReportsAnHonestEmptyState() {
+    // Four more Jackson-serialised records, so the same trap as the browse shapes — and one thing a
+    // JVM test cannot show: this process has really walked its own blob directory to decide what
+    // nothing references. The store here holds blobs pushed by the cases above, so the row-less
+    // figures are a real reading rather than a zero that would pass either way.
+    //
+    // No strategies ship, so every type must say so. That is the state the user reviews before any
+    // collection is switched on, and a report that lost its reasons in the binary would look like a
+    // store with nothing to collect.
+    given()
+        .when()
+        .get("/artifacts/api/gc/plan")
+        .then()
+        .statusCode(200)
+        .body("dryRun", equalTo(true))
+        .body("graceWindow", equalTo("P7D"))
+        .body("types", hasSize(5))
+        .body("types.find { it.type == 'oci-images' }.note", containsString("no strategy registered"))
+        .body("types.find { it.type == 'oci-images' }.strategy", nullValue())
+        .body("types.find { it.type == 'npm-packages' }.reclaimableBytes", equalTo(0))
+        .body("sweep.blobCount", equalTo(0))
+        .body("sweep.blobIds", hasSize(0))
+        .body("untouchable.blobCount", greaterThanOrEqualTo(0))
+        .body("untouchable.reason", containsString("LOSES its last row"));
+
+    // The absence of an execute surface, asserted against the binary: this feature deletes nothing.
+    given().when().post("/artifacts/api/gc/plan").then().statusCode(405);
   }
 
   /**

@@ -39,8 +39,10 @@ public class ArtifactsTokenFilter implements ContainerRequestFilter {
    * The JAX-RS base-relative prefixes this filter claims. A resource served outside them is
    * <b>unguarded</b>, so this set is extended when one is added rather than assumed to cover it.
    * {@code store} holds only the read-only store summary today and is listed so that stays a choice.
+   * {@code gc} holds only the dry-run plan, and is listed for a sharper reason: the day anything
+   * under it writes, it deletes bytes, and inheriting the guard beats remembering it.
    */
-  private static final Set<String> GUARDED_PREFIXES = Set.of("repositories", "store");
+  private static final Set<String> GUARDED_PREFIXES = Set.of("repositories", "store", "gc");
 
   @Inject ArtifactsToken token;
 
