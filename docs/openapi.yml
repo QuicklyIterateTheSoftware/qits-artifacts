@@ -2,6 +2,12 @@
 # Run `./mvnw -pl service test -Dtest=OpenApiSchemaExportTest` to regenerate.
 ---
 openapi: 3.1.0
+components:
+  securitySchemes:
+    SecurityScheme:
+      type: openIdConnect
+      openIdConnectUrl: http://qits-idp:8080/idp/.well-known/openid-configuration
+      description: Authentication
 info:
   title: qits-artifacts API
   version: 1.0.0-SNAPSHOT

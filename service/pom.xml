@@ -84,6 +84,17 @@
             <artifactId>quarkus-security</artifactId>
         </dependency>
         <dependency>
+            <!-- Bearer validation for machine tokens from qits-idp: signature against its JWKS,
+                 issuer, expiry and audience. qits-auth-core deliberately does NOT carry this — it
+                 reads the validated result and leaves the extension to the service.
+
+                 The tenant follows the rollout gate (see the quarkus.oidc block in
+                 application.properties), so with the gate off nothing here dials anything and the
+                 service boots with no idp on the network. -->
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-oidc</artifactId>
+        </dependency>
+        <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-rest-jackson</artifactId>
         </dependency>
