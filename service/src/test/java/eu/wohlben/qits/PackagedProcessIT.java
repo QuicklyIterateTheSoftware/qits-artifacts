@@ -87,6 +87,10 @@ class PackagedProcessIT {
       // No CI intake in this repo; the notifier is fire-and-forget, so a closed port is the honest
       // posture here exactly as it is in the unit suite.
       overrides.put("qits.ci.intake-url", "http://localhost:1/post-receive");
+      // No qits-cd here either, and the shipped default names it by its qits-net alias — which on a
+      // build machine resolves to whatever the resolver feels like, or hangs. A closed port makes
+      // the fail-closed path deterministic while still driving a real HttpClient inside the binary.
+      overrides.put("qits.artifacts.gc.oci.cd-base-url", "http://localhost:1/cd/api");
       return overrides;
     }
   }
@@ -471,9 +475,10 @@ class PackagedProcessIT {
     // nothing references. The store here holds blobs pushed by the cases above, so the row-less
     // figures are a real reading rather than a zero that would pass either way.
     //
-    // No strategies ship, so every type must say so. That is the state the user reviews before any
-    // collection is switched on, and a report that lost its reasons in the binary would look like a
-    // store with nothing to collect.
+    // Four of the five types have no strategy and must say so. The fifth, oci-images, must name the
+    // one that does — and, with no qits-cd to answer, must report the refusal rather than a plan.
+    // That fail-closed path only exists in the binary if the JDK HttpClient survived the compile, so
+    // this is the one assertion here that a JVM test cannot make on its behalf.
     given()
         .when()
         .get("/artifacts/api/gc/plan")
@@ -482,8 +487,13 @@ class PackagedProcessIT {
         .body("dryRun", equalTo(true))
         .body("graceWindow", equalTo("P7D"))
         .body("types", hasSize(5))
-        .body("types.find { it.type == 'oci-images' }.note", containsString("no strategy registered"))
-        .body("types.find { it.type == 'oci-images' }.strategy", nullValue())
+        .body("types.find { it.type == 'oci-images' }.strategy", equalTo("OciImageGcStrategy"))
+        .body("types.find { it.type == 'oci-images' }.error", containsString("qits-cd"))
+        .body("types.find { it.type == 'oci-images' }.dead", hasSize(0))
+        .body(
+            "types.find { it.type == 'npm-packages' }.note",
+            containsString("no strategy registered"))
+        .body("types.find { it.type == 'npm-packages' }.strategy", nullValue())
         .body("types.find { it.type == 'npm-packages' }.reclaimableBytes", equalTo(0))
         .body("sweep.blobCount", equalTo(0))
         .body("sweep.blobIds", hasSize(0))

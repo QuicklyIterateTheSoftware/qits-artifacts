@@ -25,8 +25,11 @@ import org.junit.jupiter.api.Test;
  * <em>same</em> type still names it, it never had an identity at all, or its file is too young.
  *
  * <p>The strategies here are fakes constructed in the test rather than beans, and that is
- * deliberate: with none registered — the shipped state — the report has to be honest about it, and a
- * discoverable test strategy would take that case away.
+ * deliberate: the reconciliation is what these cases are about, and a real strategy would answer
+ * with its own policy instead of the shape a case needs. Registering one as a bean would also take
+ * away the "nobody collects this type" case, which four of the five types are still in. The one
+ * registered bean — {@code OciImageGcStrategy} — is exercised on its own rules in {@code
+ * OciImageGcStrategyTest} and appears here only in the first case, as the report's shape.
  */
 @QuarkusTest
 class GcPlanTest extends GcFixture {
@@ -34,19 +37,29 @@ class GcPlanTest extends GcFixture {
   @Inject GcPlanner planner;
 
   @Test
-  void withNoStrategyRegisteredEveryTypeSaysSoAndNothingWouldBeSwept() throws Exception {
-    // The shipped state, and the one a reviewer sees first. "No plan" and "nothing to collect" are
-    // different facts, so every type is listed with the reason rather than omitted.
+  void theOnlyRegisteredStrategyIsOcisAndTheFourOtherTypesSaySoRatherThanGoMissing() throws Exception {
+    // The report a reviewer sees first. "No plan", "nothing to collect" and "refused to plan" are
+    // three different facts, so every type is listed with its own reason rather than omitted — and
+    // oci-images demonstrates the third: this suite has no qits-cd, its pin fetch is refused at a
+    // closed port, and a keep-set that cannot be established reclaims nothing.
     Store store = seed();
 
-    assertEquals(List.of(), planner.registered(), "this repository ships zero strategies");
+    assertEquals(
+        List.of("OciImageGcStrategy"),
+        planner.registered().stream().map(s -> s.getClass().getSimpleName()).toList());
     GcPlanReport report = planner.plan();
 
     assertTrue(report.dryRun());
     assertEquals(RepositoryType.values().length, report.types().size());
     for (GcTypePlan type : report.types()) {
-      assertNull(type.strategy());
-      assertEquals("no strategy registered for " + type.type().wireName(), type.note());
+      if (type.type() == RepositoryType.OCI_IMAGES) {
+        assertEquals("OciImageGcStrategy", type.strategy());
+        assertNull(type.note());
+        assertNotNull(type.error(), "no qits-cd here, so the type must abort rather than plan");
+      } else {
+        assertNull(type.strategy());
+        assertEquals("no strategy registered for " + type.type().wireName(), type.note());
+      }
       assertEquals(0, type.blobsSweepable());
       assertEquals(0L, type.reclaimableBytes());
     }

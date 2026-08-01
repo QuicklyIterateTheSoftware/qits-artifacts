@@ -787,6 +787,30 @@ is the substrate's job. A strategy that cannot establish its keep-set safely **t
 reports the type as failed and treats every blob the census attributes to it as live, so an
 unreachable dependency reclaims nothing instead of guessing.
 
+### `oci-images`, the one strategy that exists
+
+`OciImageGcStrategy` implements the row the table above gives it. Five rules, each named in the
+report beside the identity it saved:
+
+| Kept because | Spelled |
+|---|---|
+| it is a release | a tag shaped like a calver version (`2026.801.85448`). There is no `-main.g<sha>` suffix in docker — the sha tag *is* the prerelease coordinate and a release adds a version tag beside it |
+| a container is running it | the sha of an **ACTIVE** qits-cd deployment; a restart pulls that reference again |
+| a rollback would pull it | the **previous distinct** sha per application — the newest row under the ACTIVE one whose sha differs. A redeploy of the same sha is not a previous version |
+| the next deploy will pull it | the newest sha tag per image, by `oci_tag.updated_at`. This is the whole safety net for an image cd has never deployed |
+| nobody modelled it | belt and braces: a tag that is neither a calver version nor a build sha is kept and reported as unclassified. Only build coordinates are ever condemned |
+
+Then every manifest row **no kept tag reaches** dies, index children included — which is what
+collects the store's 73 untagged manifests, left behind when a tag re-push moved the tag row.
+
+**It reads qits-cd, at plan time, every time.** That is the only outbound dependency this service
+has on another one, it is deliberate (`artifacts-gc-plan.md` ⚖4), and it is why `plan()` is allowed
+to throw: a cached pin list is a plan on stale facts, and a plan on stale facts deletes an image a
+container is about to restart from. `CdDeploymentPins` is the port; it fetches transport and no
+policy, listing environments and then each environment's deployments, and the keep-set is the union
+over **all** environments rather than one configured id — over-keeping is safe here and under-keeping
+ends in `IMAGE_MISSING`. Any failure aborts that type with nothing planned.
+
 ### What the plan says
 
 ```jsonc
@@ -795,8 +819,15 @@ unreachable dependency reclaims nothing instead of guessing.
   "dryRun": true,                       // always, today
   "graceWindow": "P7D",
   "types": [                            // all five, always — including the ones nobody collects
-    { "type": "oci-images", "strategy": null,
-      "note": "no strategy registered for oci-images", "error": null,
+    { "type": "oci-images", "strategy": "OciImageGcStrategy",
+      "note": null, "error": null,
+      "dead": [{ "repository": "qits", "identity": "qits-ci:3ff84c05…",
+                 "rule": "build sha: no qits-cd deployment pins it and it is not this image's newest build" }],
+      "kept": [{ "repository": "qits", "identity": "qits-stt:2026.801.85448",
+                 "rule": "calver release tag — releases are never eligible" }],
+      "blobsReleased": 0, "blobsSweepable": 0, "reclaimableBytes": 0 },
+    { "type": "npm-packages", "strategy": null,
+      "note": "no strategy registered for npm-packages", "error": null,
       "dead": [], "kept": [],
       "blobsReleased": 0, "blobsSweepable": 0, "reclaimableBytes": 0 }
   ],
@@ -809,8 +840,8 @@ unreachable dependency reclaims nothing instead of guessing.
 Three details a reader trips over otherwise:
 
 - **A type with no strategy says so.** "Nothing to collect" and "nobody is collecting" are different
-  answers, and only one of them is fine. With none registered — the shipped state — the whole report
-  is zeros with five reasons.
+  answers, and only one of them is fine. One type is collected today (`oci-images`); the other four
+  report their reason rather than going missing.
 - **`sweep` is not the sum of the per-type figures.** A blob dies once, and two types releasing the
   same content free it once. The per-type numbers answer "what does this rule buy on its own"; the
   sweep answers "what would a run free tonight".
@@ -831,11 +862,17 @@ consuming application implements:
 |---|---|---|
 | `RepositoryNameResolver` | no | `/artifacts/git/:projectId/:repoName` is 404; `/artifacts/git/:repoId` — the older scheme and the daemon's own fallback — still serves |
 
-That is the only one. In the monorepo `GitHostRoutes` injected
+That is the only one an application implements. In the monorepo `GitHostRoutes` injected
 `domain.repository.persistence.RepositoryNameRepository` directly; that alias table belongs to the
 projects/repositories context, and this repo holds no foreign key into another context's schema.
 The inline `QuarkusTransaction.requiringNew()` around the lookup moved into the port's contract —
 the resolver is called on a Vert.x worker thread with no request context bound.
+
+`CdDeploymentPins` is a second port and the exception that proves the shape, so it is named here
+rather than left to be discovered: it is declared **and** implemented inside this repo, over HTTP,
+and it is the one place this service dials another (`qits-cd`, for the `oci-images` keep-set — see
+"Garbage collection"). Absent is not a supported configuration there, which is the other difference:
+an unanswerable pin list aborts that type's plan instead of falling back.
 
 ## Config
 
@@ -846,6 +883,8 @@ app's `application.properties` overrides them.
 |---|---|---|
 | `qits.artifacts.blobs-dir` | `~/.qits/data/artifacts/blobs` | content-addressed blob bytes |
 | `qits.artifacts.gc.blob-grace-period` | `P7D` | how long a blob file must sit untouched before the sweep may unlink it — see "Garbage collection" |
+| `qits.artifacts.gc.oci.cd-base-url` | `http://qits-cd:8080/cd/api` | where the `oci-images` strategy reads its keep-set — the **only** service this one dials. Unreachable is fail-closed: that type reclaims nothing |
+| `qits.artifacts.gc.oci.cd-timeout` | `PT10S` | per-request timeout on that fetch |
 | `qits.artifacts.token` | blank (open) | the JSON API's write guard (`X-Artifacts-Token`); the registry is deliberately tokenless |
 | `qits.artifacts.startup-seed.enabled` | `true` | self-seed `ci-screenshots` + `ci-videos` + the `qits` image repository + the two npm roots (`npm`, `npmjs`) |
 | `qits.repositories.data-dir` | `~/.qits/data/repositories` | where the `file` git backend finds `<repoId>/origin` |

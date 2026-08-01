@@ -48,6 +48,7 @@ Everything that had to be declared, and the symptom each one produces if it is d
 | `dto/UploadResult` | `@RegisterForReflection` | every upload 500s: the type is behind a `Response` return, so nothing registers it |
 | `CiPostReceiveNotifier` | the `HttpClient` is an instance field, not static | build fails: an `HttpClientFacade` in the image heap |
 | `npm/NpmUpstream` | the `HttpClient` is an instance field, not static | same as above — an `HttpClientFacade` frozen into the image heap |
+| `artifacts/control/CdHttpDeploymentPins` | the `HttpClient` is an instance field, not static | same as above; this is the third outbound client and the rule has not changed |
 | artifacts' `microprofile-config.properties` | H2 url with no `AUTO_SERVER` | the binary dies at boot on `ClassNotFoundException: org.h2.server.TcpServer` |
 
 Only the first is a build-time failure. The rest are green builds that fail in production, which is
@@ -198,6 +199,15 @@ supported configuration with a documented behaviour — see the table in the REA
 `RepositoryNameResolver` is the only one, and it is optional because the id-addressed git scheme
 predates the name-addressed one and remains the daemon's fallback.
 
+**`CdDeploymentPins` is the one exception, and it breaks the rule in both halves on purpose.** It is
+a port this repo also implements (`CdHttpDeploymentPins`, a plain GET on qits-net), and absent is
+*not* a supported configuration: it throws, which fails the `oci-images` GC plan closed. Both halves
+were decided rather than drifted into (`artifacts-gc-plan.md` ⚖4). The keep-set is "which image shas
+would a restart pull", qits-cd is the only thing that knows, and the alternative — a driver
+assembling that list and handing it in — puts a safety-critical input outside the service that acts
+on it, where the two drift and the drift deletes a running image. It is fetched at plan time every
+time and never cached: a cached pin list is a plan on stale facts.
+
 Never add a JPA relation to another context's entity, and never a foreign key. Blobs address the
 world by **string metadata**; the git host addresses it by **repo id string**. Both are in a
 different database from whatever they name.
@@ -262,6 +272,22 @@ anyway. Pack GC is its own later workstream and needs the DFS migration first.
   reuse the other's policy is the wrong change. Two beans claiming one type is reported as a
   collision, never merged.
 
+One strategy exists: `OciImageGcStrategy` (`oci-images`). Three things about it cost time otherwise.
+
+- **It is `@Singleton`, not `@ApplicationScoped`, and the reason is the report.** `GcPlanner` names a
+  strategy by `getClass().getSimpleName()`, and a normal-scoped bean answers that through its client
+  proxy — the report would read `OciImageGcStrategy_ClientProxy`. `@Singleton` is a pseudo-scope, so
+  there is no proxy and still one instance. `GcPlanTest` asserts the name; every future strategy has
+  the same choice to make.
+- **It reads the census for nothing.** The census carries blobs, not identities, so the rules are
+  computed from `oci_tag` / `oci_manifest` rows and `OciManifestFootprints` directly. The two blob
+  sets it returns are in the census's vocabulary, which is what the substrate reconciles over — and
+  a test asserts `blobsRetained` equals the census's own OCI live set when nothing dies.
+- **Its `plan()` performs an HTTP call**, which the seam's javadoc anticipates. See "Adding a
+  dependency on another context" above; the suites point `qits.artifacts.gc.oci.cd-base-url` at a
+  closed port, so both `GcPlanTest` and `GcPlanControllerTest` assert the fail-closed path rather
+  than avoiding it.
+
 `BlobStore.delete` is package-private for the same reason `promote` is the one write funnel: the
 constraints (grace window off the file mtime, the pre-unlink guard inside the write lock `promote`
 also takes, `BlobDiskIndex` invalidation) only hold if there is one way in. Adding a second caller,
@@ -282,7 +308,7 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 
 ## Tests
 
-- `mvn verify` runs 295 tests (104 in `artifacts/`, 18 in `git-storage/`, 173 in `service/`) in about
+- `mvn verify` runs 305 tests (113 in `artifacts/`, 18 in `git-storage/`, 174 in `service/`) in about
   a minute. Nothing here
   needs docker — and that is the constraint that shapes the registry suite: `docker`, `podman` and
   `skopeo` may not be assumed present, so `registry/OciClient` + `registry/TinyImage` synthesise a
