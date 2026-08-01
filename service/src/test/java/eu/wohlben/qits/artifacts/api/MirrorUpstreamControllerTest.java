@@ -15,8 +15,8 @@ import org.junit.jupiter.api.Test;
  *
  * <p>Paths are spelled absolutely, like every suite here: this resource lives under {@code
  * quarkus.rest.path}, and the {@code mirror-upstreams} segment is also the literal
- * {@code ArtifactsTokenFilter} matches on, so the two have to agree and nothing else would notice
- * if they drifted.
+ * {@code AdminWriteGuard} matches on, so the two have to agree and nothing else would notice if
+ * they drifted.
  */
 @QuarkusTest
 class MirrorUpstreamControllerTest {

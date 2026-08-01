@@ -87,18 +87,20 @@ public class RegistryRoutes {
     //    normalizedPath() keeps a trailing slash.
     //
     //    There is NO write guard here, and that is a decision, not an omission. The registry used
-    //    to demand qits.artifacts.token as an HTTP Basic password on writes (the RegistryAuthGuard
-    //    this handler replaced); it is gone because both directions it guarded resolved elsewhere:
+    //    to demand a static token as an HTTP Basic password on writes (the RegistryAuthGuard this
+    //    handler replaced); it is gone because both directions it guarded resolved elsewhere:
     //    on qits-net, producers are trusted (the platform's own posture, and what makes an
     //    automated image publisher need no credential store), and from outside, qits-gateway keeps
     //    /v2 write methods OFF its token-free allowlist — an internet docker push is challenged
     //    for a session it cannot hold and dies there. That gateway rule is now this registry's
     //    whole external write protection: re-allowlisting /v2 writes at the gateway without
     //    restoring a guard here would open push to the internet, and the gateway's PublicPathsTest
-    //    says so in so many words. X-Artifacts-Token still guards the blob-store JSON API; setting
-    //    it no longer drags the registry back behind docker login (RegistryOpenPushTest pins
-    //    that), and the skopeo/podman-cannot-push-to-a-guarded-registry tradeoff dissolved with
-    //    the guard.
+    //    says so in so many words.
+    //
+    //    These are also raw Vert.x routes, so the JAX-RS AdminWriteGuard never sees them: turning
+    //    the machine-token gate on guards the JSON admin API and leaves /v2 exactly as it is
+    //    (qits-idp phase 1, and RegistryOpenPushTest pins it). A docker client speaks no bearer
+    //    from qits-idp, which is why guarding this surface is its own decision and not this one.
     router.route(RegistryPaths.BASE).handler(RegistryRoutes::stampApiVersion);
     router.route(RegistryPaths.BASE + "/*").handler(RegistryRoutes::stampApiVersion);
 

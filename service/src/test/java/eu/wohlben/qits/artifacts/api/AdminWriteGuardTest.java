@@ -2,33 +2,31 @@ package eu.wohlben.qits.artifacts.api;
 
 import static io.restassured.RestAssured.given;
 
+import eu.wohlben.qits.MachineTokens;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.http.ContentType;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 /**
- * Verifies the static-token write guard when a token is configured (the deployed posture). Writes
- * (PUT/POST) require {@code X-Artifacts-Token}; reads (serves) stay open so a blob is usable as an
- * {@code <img>} src.
+ * The JSON admin API with the machine-token gate ON — the posture a deployment with qits-idp runs.
+ * Writes (PUT/POST/DELETE) need a bearer minted for qits-artifacts; reads stay open so a blob is
+ * usable directly as an {@code <img>} src.
+ *
+ * <p>The gate-OFF posture is what every other suite here runs under, so "unchanged when the gate is
+ * off" is asserted by all of them at once rather than by one test.
  */
 @QuarkusTest
-@TestProfile(ArtifactsTokenGuardTest.WithToken.class)
-class ArtifactsTokenGuardTest {
+@TestProfile(MachineTokens.Enforced.class)
+class AdminWriteGuardTest {
 
-  static final String TOKEN = "s3cr3t-token";
-
-  public static class WithToken implements QuarkusTestProfile {
-    @Override
-    public Map<String, String> getConfigOverrides() {
-      return Map.of("qits.artifacts.token", TOKEN);
-    }
+  private static String bearer(String token) {
+    return "Bearer " + token;
   }
 
   @Test
-  void writeIsRejectedWithoutTheToken() {
+  void aWriteWithoutATokenIs401() {
     given()
         .contentType(ContentType.JSON)
         .body(Map.of("type", "ci-screenshots"))
@@ -39,9 +37,12 @@ class ArtifactsTokenGuardTest {
   }
 
   @Test
-  void writeIsRejectedWithAWrongToken() {
+  void aWriteWithATokenForAnotherServiceIsRejected() {
+    // Signed by the same issuer and perfectly valid — just not addressed to us. quarkus-oidc
+    // refuses it on quarkus.oidc.token.audience before MachineAuth's own audience check is even
+    // reached, so this is a 401 rather than the 403 an already-authenticated caller would get.
     given()
-        .header("X-Artifacts-Token", "nope")
+        .header("Authorization", bearer(MachineTokens.forAnotherService()))
         .contentType(ContentType.JSON)
         .body(Map.of("type", "ci-screenshots"))
         .when()
@@ -51,9 +52,25 @@ class ArtifactsTokenGuardTest {
   }
 
   @Test
-  void writeSucceedsWithTheTokenAndServeStaysOpen() {
+  void aUserHeaderIsNotAMachineToken() {
+    // The gateway's forward-auth identity names a person; this API is machine-only, and a browser
+    // session must not reach a write just because it reached the service.
     given()
-        .header("X-Artifacts-Token", TOKEN)
+        .header("X-Qits-User", "alice")
+        .contentType(ContentType.JSON)
+        .body(Map.of("type", "ci-screenshots"))
+        .when()
+        .put("/artifacts/api/repositories/guarded")
+        .then()
+        .statusCode(401);
+  }
+
+  @Test
+  void aWriteWithOurTokenSucceedsAndReadsStayOpen() {
+    String token = bearer(MachineTokens.forThisService());
+
+    given()
+        .header("Authorization", token)
         .contentType(ContentType.JSON)
         .body(Map.of("type", "ci-screenshots"))
         .when()
@@ -63,7 +80,7 @@ class ArtifactsTokenGuardTest {
 
     String id =
         given()
-            .header("X-Artifacts-Token", TOKEN)
+            .header("Authorization", token)
             .contentType("image/png")
             .headers(ArtifactsTestMedia.screenshotHeaders("main", "checkout", 100, 50))
             .body(ArtifactsTestMedia.png(100, 50, 11))
@@ -74,7 +91,6 @@ class ArtifactsTokenGuardTest {
             .extract()
             .path("id");
 
-    // Serve is a read — no token required.
     given()
         .when()
         .get("/artifacts/api/repositories/guarded/blobs/" + id)
@@ -84,11 +100,10 @@ class ArtifactsTokenGuardTest {
   }
 
   @Test
-  void registeringAMirrorUpstreamIsGuardedAndListingThemIsNot() {
+  void everyGuardedPrefixIsCoveredAndItsReadsAreNot() {
     // The prefix set is extended by hand, never inherited — a resource served outside it ships
-    // unguarded. This route decides which public registry the service dials on a miss, so an
-    // unguarded PUT here would be handing out an outbound fetch; the read stays open like every
-    // other read.
+    // unguarded. mirror-upstreams decides which public registry this service dials on a miss, so an
+    // unguarded PUT here would be handing out an outbound fetch.
     given()
         .contentType(ContentType.JSON)
         .body(Map.of("slug", "quay"))
@@ -98,7 +113,7 @@ class ArtifactsTokenGuardTest {
         .statusCode(401);
 
     given()
-        .header("X-Artifacts-Token", TOKEN)
+        .header("Authorization", bearer(MachineTokens.forThisService()))
         .contentType(ContentType.JSON)
         .body(Map.of("slug", "quay"))
         .when()
@@ -107,10 +122,12 @@ class ArtifactsTokenGuardTest {
         .statusCode(200);
 
     given().when().get("/artifacts/api/mirror-upstreams").then().statusCode(200);
+    given().when().get("/artifacts/api/store/summary").then().statusCode(200);
+    given().when().get("/artifacts/api/gc/plan").then().statusCode(200);
 
     given().when().delete("/artifacts/api/mirror-upstreams/quay.io").then().statusCode(401);
     given()
-        .header("X-Artifacts-Token", TOKEN)
+        .header("Authorization", bearer(MachineTokens.forThisService()))
         .when()
         .delete("/artifacts/api/mirror-upstreams/quay.io")
         .then()
@@ -118,7 +135,7 @@ class ArtifactsTokenGuardTest {
   }
 
   @Test
-  void uploadIsRejectedWithoutTheToken() {
+  void anUploadWithoutATokenIs401() {
     given()
         .contentType("image/png")
         .headers(ArtifactsTestMedia.screenshotHeaders("main", "checkout", 100, 50))

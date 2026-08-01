@@ -480,13 +480,13 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 
 ## What not to "fix"
 
-- `ArtifactsTokenFilter` matches on `getUriInfo().getPath()` against a **set** of prefixes —
+- `AdminWriteGuard` matches on `getUriInfo().getPath()` against a **set** of prefixes —
   `repositories`, `store`, `gc` and `mirror-upstreams` — relative to the JAX-RS base, so it holds
   whatever `quarkus.rest.path` is. It was `artifacts` until the resource `@Path`s dropped that segment (the gateway segment
   carries it now). **A resource added outside those prefixes is unguarded** — extend the set, do not
   assume it is covered. `store` holds only the read-only store summary today and is listed so that
-  stays a choice rather than an accident. It guards writes only, by design, and is a no-op when
-  `qits.artifacts.token` is blank.
+  stays a choice rather than an accident. It guards writes only, by design, and is a no-op while the
+  rollout gate `qits.auth.machine.required` is off.
 - `service` ships `quarkus.http.limits.max-body-size=1088M`, which is a **global** ceiling — every
   route in the process, not just the upload. Tracked as an open tradeoff in
   `docs/issues/2026-07-19_artifacts-global-max-body-size-widens-public-ingest-dos.md`, which now

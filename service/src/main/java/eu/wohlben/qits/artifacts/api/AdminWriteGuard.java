@@ -1,0 +1,74 @@
+package eu.wohlben.qits.artifacts.api;
+
+import eu.wohlben.qits.auth.MachineAuth;
+import jakarta.inject.Inject;
+import jakarta.ws.rs.container.ContainerRequestContext;
+import jakarta.ws.rs.container.ContainerRequestFilter;
+import jakarta.ws.rs.ext.Provider;
+import java.util.Set;
+
+/**
+ * Guards the artifacts <b>write</b> surface — the JSON admin API under {@code /artifacts/api} — with
+ * a machine token from qits-idp. This is a pure system API (docs/epics/qits-artifacts/); its callers
+ * are CI processes and platform services, never a browser session.
+ *
+ * <p>{@link MachineAuth#require()} is the whole check, and {@code qits.auth.machine.audience} is
+ * {@code qits-artifacts}, so it reads as "a validated bearer minted for this service". No claim is
+ * inspected: nothing under this API belongs to one project, and a token that reaches here at all was
+ * issued to a client qits-idp trusts with the blob store.
+ *
+ * <p><b>The rollout gate decides whether it does anything.</b> With {@code
+ * qits.auth.machine.required} off — the shipped default — every call returns at once and the write
+ * surface is open exactly as it was before qits-idp existed. That is the same posture the retired
+ * {@code X-Artifacts-Token} filter had with a blank secret, and it is why this can ship before the
+ * idp is deployed. Reads (GET) are never guarded either way — a blob must stay usable directly as an
+ * {@code <img>}/{@code <video>} src.
+ *
+ * <p>This filter is JAX-RS, so it sees only what RESTEasy dispatches. It does <b>not</b> run on the
+ * raw Vert.x routes — neither {@code /artifacts/git/*} nor the registry's {@code /v2/*} nor the npm
+ * paths — and all of them stay unguarded <b>on purpose</b> in phase 1: the git host trades on
+ * capability-url repo ids and its own {@code ProtectedRefHook}, and the registry is deliberately
+ * tokenless (trusted producers on qits-net; external writes die on the gateway's session policy —
+ * see {@code RegistryRoutes.init}). Turning the gate on guards the JSON API and nothing else;
+ * {@code RegistryOpenPushTest} pins that.
+ */
+@Provider
+public class AdminWriteGuard implements ContainerRequestFilter {
+
+  private static final Set<String> WRITE_METHODS = Set.of("POST", "PUT", "DELETE", "PATCH");
+
+  /**
+   * The JAX-RS base-relative prefixes this filter claims. A resource served outside them is
+   * <b>unguarded</b>, so this set is extended when one is added rather than assumed to cover it.
+   * {@code store} holds only the read-only store summary today and is listed so that stays a choice.
+   * {@code gc} holds only the dry-run plan, and is listed for a sharper reason: the day anything
+   * under it writes, it deletes bytes, and inheriting the guard beats remembering it.
+   * {@code mirror-upstreams} is the first entry here that was added <em>with</em> its writes rather
+   * than ahead of them: registering an upstream is what decides which public registry this service
+   * dials on a miss, so shipping that route unguarded would be handing out an outbound fetch.
+   */
+  private static final Set<String> GUARDED_PREFIXES =
+      Set.of("repositories", "store", "gc", "mirror-upstreams");
+
+  @Inject MachineAuth machineAuth;
+
+  @Override
+  public void filter(ContainerRequestContext requestContext) {
+    // getPath() is relative to the JAX-RS base (quarkus.rest.path, /artifacts/api); normalize any
+    // leading slash. A write to /artifacts/api/repositories/... lands here as "repositories/...".
+    // The prefix is "repositories" and not "artifacts" because the segment carries that now — the
+    // resource @Paths dropped it.
+    String path = requestContext.getUriInfo().getPath();
+    if (path.startsWith("/")) {
+      path = path.substring(1);
+    }
+    String guardedPath = path;
+    if (GUARDED_PREFIXES.stream().noneMatch(guardedPath::startsWith)
+        || !WRITE_METHODS.contains(requestContext.getMethod())) {
+      return;
+    }
+    // Throws UnauthorizedException (401) with no machine token, ForbiddenException (403) with one
+    // addressed elsewhere. Quarkus REST maps both, so there is nothing to abortWith here.
+    machineAuth.require();
+  }
+}

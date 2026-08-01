@@ -102,9 +102,10 @@ A **repository** here is a named bucket of artifacts — the Maven/npm sense of 
 `domain.repository`. The resource keeps that name; the `artifacts` the path used to repeat is gone,
 because the segment already says it.
 
-Writes are guarded by a single static token (`X-Artifacts-Token`, config `qits.artifacts.token`;
-blank in dev/test disables the guard). Reads are never guarded — a blob must be usable directly as
-an `<img>`/`<video>` src.
+Writes require a machine token from qits-idp — a bearer with `aud=qits-artifacts`, checked by
+`AdminWriteGuard`. The check sits behind the platform-wide rollout gate `qits.auth.machine.required`,
+which is off by default: off, the write surface is open exactly as it was before qits-idp existed.
+Reads are never guarded — a blob must be usable directly as an `<img>`/`<video>` src.
 
 ## The git host
 
@@ -237,7 +238,7 @@ Repositories are **not** created implicitly. The first segment of an image name 
 
 ```
 curl -X PUT http://<host>/artifacts/api/repositories/<name> \
-  -H 'Content-Type: application/json' -H "X-Artifacts-Token: $QITS_ARTIFACTS_TOKEN" \
+  -H 'Content-Type: application/json' -H "Authorization: Bearer $QITS_ARTIFACTS_MACHINE_TOKEN" \
   -d '{"type":"oci-images"}'
 ```
 
@@ -399,9 +400,9 @@ docker reads as "not a v2 registry".
 
 Reads are anonymous, always — image names are meant to be shared, which is also why `/v2/_catalog`
 stays unimplemented and the posture stays private-network rather than capability-URL. **Writes are
-anonymous too**: the registry carries no credential of its own, and `qits.artifacts.token` guards
-the blob-store JSON API and nothing else (`RegistryOpenPushTest` pins that setting it does not
-drag `/v2` back behind a docker login).
+anonymous too**: the registry carries no credential of its own, and the machine-token gate guards
+the blob-store JSON admin API and nothing else (`RegistryOpenPushTest` pins that turning it on does
+not drag `/v2` back behind a docker login).
 
 That is a decision with two halves, one per direction:
 
@@ -415,7 +416,7 @@ That is a decision with two halves, one per direction:
   a guard here would open push to the internet — the gateway's `PublicPathsTest` and the comment in
   `RegistryRoutes.init` both hold that line.
 
-The registry once guarded writes with `qits.artifacts.token` as an HTTP Basic password. That
+The registry once guarded writes with a static token as an HTTP Basic password. That
 bought a measured, awkward tradeoff — docker could push after a `docker login`, skopeo/podman
 could not (their shared `containers/image` reads the non-challenging `/v2/` ping as "no
 credentials needed") — and the guard's whole benefit dissolved once the platform settled on
@@ -1082,7 +1083,8 @@ app's `application.properties` overrides them.
 | `qits.artifacts.gc.blob-grace-period` | `P7D` | how long a blob file must sit untouched before the sweep may unlink it — see "Garbage collection" |
 | `qits.artifacts.gc.oci.cd-base-url` | `http://qits-cd:8080/cd/api` | where the `oci-images` strategy reads its keep-set — the **only** service this one dials. Unreachable is fail-closed: that type reclaims nothing |
 | `qits.artifacts.gc.oci.cd-timeout` | `PT10S` | per-request timeout on that fetch |
-| `qits.artifacts.token` | blank (open) | the JSON API's write guard (`X-Artifacts-Token`); the registry is deliberately tokenless |
+| `qits.auth.machine.required` | `false` | the machine-token rollout gate. Off, the JSON admin write surface is open — network trust. On, its writes need a bearer with `aud=qits-artifacts` |
+| `qits.auth.machine.audience` | `qits-artifacts` | this service's own id, and the `aud` its tokens must carry |
 | `qits.artifacts.startup-seed.enabled` | `true` | self-seed `ci-screenshots` + `ci-videos` + the `qits` image repository + the two npm roots (`npm`, `npmjs`) |
 | `qits.repositories.data-dir` | `~/.qits/data/repositories` | where the `file` git backend finds `<repoId>/origin` |
 | `qits.repositories.git.storage` | `file` | which git storage backend serves repositories — `file` (bare origins on the volume) or `dfs` (packs and refs as blobs in this service's own store). Runtime; an unknown value fails the boot |
