@@ -379,116 +379,6 @@ class PackagedProcessIT {
   }
 
   @Test
-  void theProtectedRefGuardAndItsPushOptionsSurviveTheCompile() throws Exception {
-    // Everything JGit-adjacent in this feature, in the binary — which is the gate here, because
-    // this host has regressed natively before with a blanket 404 and a green JVM suite. Three
-    // things can only be proved by a real client against a real process:
-    //   * the capability is ADVERTISED, without which git never sends an option at all;
-    //   * the pre-receive hook runs, reading the bare's own config through JGit's Config;
-    //   * the options are parsed off the wire and reach the hook.
-    String repoId = seedOrigin();
-    Path origin = TargetDirState.ROOT.resolve("repositories").resolve(repoId).resolve("origin");
-    // Protection is off in the shipped defaults (asserted above), so the repository opts IN through
-    // its own bare config — which is also the per-repo override, proved natively for free.
-    runGit(origin, "git", "config", "qits.protectDefaultBranch", "true");
-
-    given()
-        .when()
-        .get("/artifacts/git/" + repoId + "/info/refs?service=git-receive-pack")
-        .then()
-        .statusCode(200)
-        .body(containsString("push-options"));
-
-    Path clone = Files.createTempDirectory("qits-artifacts-it-protected");
-    Files.delete(clone);
-    runGit(null, "git", "clone", "-q", gitBase + "/" + repoId, clone.toString());
-    String before = runGit(origin, "git", "rev-parse", "refs/heads/main").trim();
-
-    Files.writeString(clone.resolve("direct.txt"), "by hand\n");
-    runGit(clone, "git", "add", "direct.txt");
-    runGit(clone, "git", "-c", "user.email=q@l", "-c", "user.name=q", "commit", "-q", "-m", "d");
-
-    String refused = runGitExpectingFailure(clone, "git", "push", "origin", "main");
-    assertTrue(refused.contains("protected ref refs/heads/main"), refused);
-    assertTrue(refused.contains("/workspaces/api/workspaces/{id}/integrate"), refused);
-    assertEquals(
-        before,
-        runGit(origin, "git", "rev-parse", "refs/heads/main").trim(),
-        "a refused push must leave the ref where it was");
-
-    // No push token is configured in this process, and unset matches nothing — the default-locked
-    // half of settled decision 3, proved against the shipped defaults rather than assumed.
-    String refusedToken =
-        runGitExpectingFailure(clone, "git", "push", "-o", "qits.token=guess", "origin", "main");
-    assertTrue(refusedToken.contains("no push token configured"), refusedToken);
-
-    // And the sanctioned door, which the integrate flow will use: fast-forward, accepted.
-    String released = runGit(clone, "git", "rev-parse", "HEAD").trim();
-    runGit(clone, "git", "push", "-o", "qits.release", "origin", "main");
-    assertEquals(released, runGit(origin, "git", "rev-parse", "refs/heads/main").trim());
-  }
-
-  @Test
-  void aReleasePushCarriesItsTagThroughTheBinary() throws Exception {
-    // The release flow's whole push, in the binary: one `git push` with two refspecs — the branch
-    // through the protected-ref door and an annotated tag beside it. JGit-adjacent and therefore
-    // native-gated, because ReceivePack's ref advertisement, its capability negotiation and its
-    // batch ref update are all machinery the JVM suite proves nothing about.
-    String repoId = seedOrigin();
-    Path origin = TargetDirState.ROOT.resolve("repositories").resolve(repoId).resolve("origin");
-    runGit(origin, "git", "config", "qits.protectDefaultBranch", "true");
-
-    // `atomic` is the capability qits-workspaces' push depends on to keep a tag from outliving a
-    // refused release, and a client only sends it if it was offered here.
-    given()
-        .when()
-        .get("/artifacts/git/" + repoId + "/info/refs?service=git-receive-pack")
-        .then()
-        .statusCode(200)
-        .body(containsString("atomic"));
-
-    Path clone = Files.createTempDirectory("qits-artifacts-it-tag");
-    Files.delete(clone);
-    runGit(null, "git", "clone", "-q", gitBase + "/" + repoId, clone.toString());
-
-    Files.writeString(clone.resolve("VERSION"), "2026.801.63140\n");
-    runGit(clone, "git", "add", "VERSION");
-    runGit(clone, "git", "-c", "user.email=q@l", "-c", "user.name=q", "commit", "-q", "-m", "rel");
-    String released = runGit(clone, "git", "rev-parse", "HEAD").trim();
-
-    // tag -a, capture the object, tag -d: the tag has to travel as an object in the push, because
-    // the release flow builds it in a worktree that shares the served bare's ref store.
-    runGit(clone, "git", "-c", "user.email=q@l", "-c", "user.name=q", "tag", "-a", "v2026.801.63140",
-        "-m", "release");
-    String tagObject = runGit(clone, "git", "rev-parse", "v2026.801.63140").trim();
-    runGit(clone, "git", "tag", "-d", "v2026.801.63140");
-
-    runGit(clone, "git", "push", "--atomic", "-o", "qits.release", "origin",
-        "HEAD:refs/heads/main", tagObject + ":refs/tags/v2026.801.63140");
-
-    assertEquals(released, runGit(origin, "git", "rev-parse", "refs/heads/main").trim());
-    assertEquals(
-        tagObject,
-        runGit(origin, "git", "rev-parse", "refs/tags/v2026.801.63140").trim(),
-        "the tag must land in the same push as the branch");
-    assertEquals(
-        "tag",
-        runGit(origin, "git", "cat-file", "-t", tagObject).trim(),
-        "the ref names the tag OBJECT — peeling is the consumer's job");
-
-    // And the uniqueness guarantee the release flow leans on: a second release stamped the same
-    // version builds a different tag object, and the ref cannot be created twice.
-    runGit(clone, "git", "-c", "user.email=q@l", "-c", "user.name=q", "tag", "-a",
-        "v2026.801.63140", "-m", "second release, same version");
-    String second = runGit(clone, "git", "rev-parse", "v2026.801.63140").trim();
-    runGit(clone, "git", "tag", "-d", "v2026.801.63140");
-    String duplicate =
-        runGitExpectingFailure(clone, "git", "push", "origin", second + ":refs/tags/v2026.801.63140");
-    assertTrue(duplicate.contains("already exists"), duplicate);
-    assertEquals(tagObject, runGit(origin, "git", "rev-parse", "refs/tags/v2026.801.63140").trim());
-  }
-
-  @Test
   void theBrowseEndpointsSurviveTheCompileOverContentPushedThroughTheWire() {
     // Six new response shapes, every one of them a Jackson-serialised record — which is the
     // dto/UploadResult trap restated: a bound type reaches the native build only through the
@@ -589,10 +479,13 @@ class PackagedProcessIT {
 
   /**
    * Seeds a bare origin at {@code <data-dir>/<repoId>/origin} with the git CLI, the same way {@code
-   * GitHostTest} does — the served repository has to be a real on-disk bare, and this repo builds
-   * one rather than shipping a fixture (see AGENTS.md, the clone-alone rule).
+   * GitHostSuite} does on the file backend — the served repository has to be a real on-disk bare,
+   * and this repo builds one rather than shipping a fixture (see AGENTS.md, the clone-alone rule).
+   *
+   * <p>Static and package-private because {@link ProtectedGitHostIT} launches the same binary under
+   * a different configuration and seeds the same way.
    */
-  private String seedOrigin() throws Exception {
+  static String seedOrigin() throws Exception {
     String repoId = UUID.randomUUID().toString();
     Path origin = TargetDirState.ROOT.resolve("repositories").resolve(repoId).resolve("origin");
     Files.createDirectories(origin.getParent());
@@ -609,7 +502,7 @@ class PackagedProcessIT {
     return repoId;
   }
 
-  private String runGit(Path cwd, String... command) throws Exception {
+  static String runGit(Path cwd, String... command) throws Exception {
     ProcessBuilder pb = new ProcessBuilder(command);
     if (cwd != null) {
       pb.directory(cwd.toFile());
@@ -627,7 +520,7 @@ class PackagedProcessIT {
    * A refused push is the subject of the protection cases, so its output is a value rather than an
    * exception: the message the pusher reads is exactly what is being asserted.
    */
-  private String runGitExpectingFailure(Path cwd, String... command) throws Exception {
+  static String runGitExpectingFailure(Path cwd, String... command) throws Exception {
     ProcessBuilder pb = new ProcessBuilder(command);
     if (cwd != null) {
       pb.directory(cwd.toFile());

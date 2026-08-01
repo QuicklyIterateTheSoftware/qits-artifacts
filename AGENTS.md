@@ -11,8 +11,8 @@ port, and the config surface. This file is the working conventions on top of it.
 not a tradeoff to weigh, it is the thing this repo exists to avoid.
 
 That is why: the poms duplicate versions instead of inheriting them, no pom declares a `eu.wohlben:*`
-dependency, and `GitHostTest` builds its own bare origin with the git CLI instead of using the
-monorepo's antrun-derived `fixtures/testing-repo.git`.
+dependency, and `GitHostSuite` provisions its own origin through the git host's storage backend
+instead of using the monorepo's antrun-derived `fixtures/testing-repo.git`.
 
 **`service/` compiles to a GraalVM native image**, the same rule qits-workspace-daemon and
 qits-gateway carry, and it extends the clone-alone rule rather than qualifying it: `.sdkmanrc` names
@@ -43,6 +43,7 @@ Everything that had to be declared, and the symptom each one produces if it is d
 | Where | What | Symptom without it |
 |---|---|---|
 | `application.properties` | `--initialize-at-run-time` for `jgit.util.FileUtils`, `jgit.lib.internal.WorkQueue`, `jgit.internal.storage.file.WindowCache` | build fails: a seeded `Random`, a started `JGit-WorkQueue` thread in the image heap |
+| `application.properties` | `--initialize-at-run-time` for `jgit.internal.storage.dfs.DfsBlockCache` | **nothing yet** — measured, see below |
 | `githost/JGitReflection` | `values()` on every enum `Config.getEnum` reads | **every** git route 404s — `FileRepositoryBuilder.build` throws `NoSuchMethodException` and `open()` returns null |
 | `dto/UploadResult` | `@RegisterForReflection` | every upload 500s: the type is behind a `Response` return, so nothing registers it |
 | `CiPostReceiveNotifier` | the `HttpClient` is an instance field, not static | build fails: an `HttpClientFacade` in the image heap |
@@ -51,6 +52,13 @@ Everything that had to be declared, and the symptom each one produces if it is d
 
 Only the first is a build-time failure. The rest are green builds that fail in production, which is
 why the IT exists and why it drives a real `git clone`/`push` rather than asserting a status code.
+
+`DfsBlockCache` is the one entry here that is **precautionary rather than earned**, and it is
+labelled so rather than quietly padding the list: the image builds green with and without it —
+measured, both ways — so nothing observed has needed it. It is the direct analogue of `WindowCache`
+above (a large static cache on the object-read path, one line below it in the same library) and it
+is the only DFS class in that shape, so it is cheaper to declare than to rediscover. Drop it if a
+later measurement shows it is dead weight; do not assume it earned its place.
 
 ## Paths
 
@@ -149,6 +157,40 @@ Two top-level packages, deliberately kept apart:
 subtypes) rather than the monorepo's `domain/error/*`. It always did — this is one of the few
 places where the duplicate-now register in `migration-plan.md` §5 was already satisfied at import.
 
+## The git host's two storage backends
+
+`qits.repositories.git.storage` picks one, at **runtime**, and it ships `file`:
+
+| Value | Where a repository lives | Opened by |
+|---|---|---|
+| `file` (default) | a bare origin at `<qits.repositories.data-dir>/<repoId>/origin`, on the volume qits-projects and qits-workspaces also mount | `FileGitRepositoryProvider` |
+| `dfs` | a JGit `DfsRepository` whose packs, pack indexes and refs are blobs in this service's own store, listed by `git_pack`/`git_pack_file` | `DfsGitRepositoryProvider` |
+
+`GitHostRoutes.open` is the **whole** seam — one method. `infoRefs` and `service` take a
+`Repository` and cannot tell the two apart, which is why the second backend needed no change above
+that line. `GitRepositoryBackend` does the selection with the `Instance<T>` pattern
+`RepositoryNameResolver` already uses, and an unknown value **fails the boot**: a typo that silently
+kept the old backend would look exactly like a successful cutover until someone went looking for the
+data.
+
+Three things about the DFS backend that are not obvious and cost time to rediscover:
+
+- **The git CLI cannot open one.** No directory to point `--git-dir` at, no worktree to add, no
+  config file to write. Every operation is the wire protocol or in-process JGit — which is the point,
+  not a limitation: receive-pack becomes the only writer, so no ref moves without firing
+  `post-receive`.
+- **`getConfig()` does not persist.** That is why `[qits] protectDefaultBranch` became a row, and why
+  the row is the override for **both** backends. One question with two answer sources eventually gets
+  two answers, and the disagreement would surface as a push refused on one engine and accepted on the
+  other.
+- **Existence is answered by the ref database, not by a table.** A repository that has been created
+  has a reftable in the catalog; one that has not reads empty and is a 404, the same answer a missing
+  directory gets on the file backend. There is deliberately no `git_repository` row to keep in step.
+
+Both backends stay for at least one full release cycle after the rollout. The git host serves the
+push that redeploys the git host, so rollback has to be a config flip and a restart — which it is,
+because no bare is ever deleted.
+
 ## Adding a dependency on another context
 
 Don't. Declare a port in the package that needs it, inject it as `Instance<T>`, and make absent a
@@ -211,7 +253,8 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 
 ## Tests
 
-- `mvn verify` runs 235 tests (89 in `artifacts/`, 146 in `service/`) in about a minute. Nothing here
+- `mvn verify` runs 277 tests (89 in `artifacts/`, 18 in `git-storage/`, 170 in `service/`) in about
+  a minute. Nothing here
   needs docker — and that is the constraint that shapes the registry suite: `docker`, `podman` and
   `skopeo` may not be assumed present, so `registry/OciClient` + `registry/TinyImage` synthesise a
   real image in memory and drive a full push/pull over the JDK `HttpClient`. It uses that rather than
@@ -229,13 +272,20 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   than by touching its fields, and the reason is worth knowing before writing another one: Quarkus
   instantiates a `QuarkusTestProfile` in **two** classloaders, so a static singleton exists twice
   and the application ends up talking to a different instance than the test configures.
-- `mvn verify -Dnative` runs those, then 18 more: `PackagedProcessIT` against the compiled binary.
+- `mvn verify -Dnative` runs those, then 18 more against the compiled binary: `PackagedProcessIT`
+  (16) and `ProtectedGitHostIT` (2). They are two classes because they are two process
+  configurations — `PackagedProcessIT` asserts the SHIPPED defaults leave the default branch
+  unprotected, and the seatbelt cases need it on — and `@TestProfile` is per class. The protection
+  cases used to turn it on per repository with one `git config` on the served bare; the override is
+  a row now, and a packaged process owns its H2 exclusively with `clean-at-start`, so no test
+  outside it can write that row. There is no HTTP verb for it (workstream AT's), which is why the
+  platform switch is what these two flip.
   It is the only suite that starts a **process** rather than an in-JVM Quarkus, so it is where the
   route stacks are proved to coexist and where JGit is proved to have survived the compile.
   It is also the **only** place the web UI can be tested at all: Quinoa logs "Quinoa is disabled by
   default in tests" and registers neither the static resources nor the SPA re-route, so a
   `@QuarkusTest` asserting anything about `/artifacts/` passes against a process that has no client
-  in it. Two of the twelve are that, and they are the guard on
+  in it. Two of them are that, and they are the guard on
   `quarkus.quinoa.ignored-path-prefixes`.
   Its `@TestProfile` points the datasource, the blobs dir and the git data-dir under `target/`,
   passed to the launched binary as `-D` flags; it uses a **file** H2 of the same shape the
@@ -255,19 +305,29 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   `RegistryTest`, because that suite drives a client written from the same misreading. **The fixes are
   guarded by unit tests, not by this IT** — it is opt-in and needs Go, so anything it proves must also
   be provable by `mvn verify` alone or it is not actually guarded.
-- The git host's protection cases are **three** `@QuarkusTest` classes, not one, and the split is
-  forced: `qits.repositories.git.push-token` configured / configured-empty / unset are three process
-  configurations, and a `@TestProfile` is per class. `GitHostTest` runs under the SHIPPED config
-  (protection off, token unset) and turns protection on per repository through the bare's own
-  `[qits] protectDefaultBranch`; `GitHostPushTokenTest` and `GitHostEmptyPushTokenTest` carry the
-  other two. `GitHostFixture` is the shared git CLI driver — static, because those classes cannot
-  usefully share a base class. Note that SmallRye reads a configured-empty value as *absent* for an
-  `Optional<String>`, which is why the hook must treat unset and empty identically rather than
-  distinguishing them.
-- **Tag pushes are measured, not assumed** (`GitHostTest`, the "tags" block, and one native case).
+- The git host's protection cases are **four** `@QuarkusTest` classes, not one, and the split is
+  forced: `qits.repositories.git.push-token` configured / configured-empty / unset and
+  `qits.repositories.git.storage` file / dfs are process configurations, and a `@TestProfile` is per
+  class. `GitHostTest` runs under the SHIPPED config (protection off, token unset, file backend);
+  `GitHostDfsTest` is the same suite with one config value changed; `GitHostPushTokenTest` and
+  `GitHostEmptyPushTokenTest` carry the token cases. `GitHostFixture` is the shared git CLI driver —
+  static, because the token classes cannot usefully share a base class. Note that SmallRye reads a
+  configured-empty value as *absent* for an `Optional<String>`, which is why the hook must treat
+  unset and empty identically rather than distinguishing them.
+- **`GitHostSuite` reads no directory, and that constraint is what makes it run on both backends.**
+  A repository is provisioned through the selected `GitRepositoryProvider` and every fact about it is
+  then asked over the wire — `git ls-remote`, not `git rev-parse` in the served bare. The old suite
+  read the bare on disk, which cannot be translated at all: a `DfsRepository` has no directory for
+  the git CLI to open, by design. Two consequences worth knowing before extending it: protection is
+  turned on through `RepositoryProtectionStore`, not by writing a repository's config; and an
+  annotated tag is proved annotated by the `<ref>^{}` line in the advertisement rather than by
+  `cat-file -t`. `ls-remote` **filters that peeled line out** when the pattern is the exact ref name,
+  because it matches patterns against ref names and `<ref>^{}` is not one — the fixture globs.
+- **Tag pushes are measured, not assumed** (`GitHostSuite`, the "tags" block, run against both
+  backends, and one native case).
   Four answers other repos build on:
   - An annotated tag push is **accepted** with protection on and no push option. `ProtectedRefHook`
-    guards one ref name — the bare's `HEAD` — so a tag is just another ref to it.
+    guards one ref name — the repository's `HEAD` — so a tag is just another ref to it.
   - One `git push` with `HEAD:refs/heads/main` **and** `<tagobj>:refs/tags/<v>` arrives as **one**
     receive-pack: one pre-receive, one post-receive, one set of push options. Asserted by counting
     the POSTs under `GIT_CURL_VERBOSE`, which is the only way to tell it from two pushes.

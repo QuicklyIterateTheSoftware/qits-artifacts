@@ -157,9 +157,9 @@ qits-workspaces' `POST /workspaces/api/workspaces/{id}/integrate` — rather tha
 remembers to do. It is a hook in Java rather than a `hooks/pre-receive` script because this host
 **runs no git**: JGit is driven in-process, so a script in the bare's `hooks/` would never execute.
 
-- The protected ref is the bare's own `HEAD` (`repo.getFullBranch()`), which is per-repo with no
-  table and no cross-service read. Every other ref is untouched — workspace branches are force-pushed
-  and deleted constantly and this must be invisible to them.
+- The protected ref is the repository's own `HEAD` (`repo.getFullBranch()`), which is per-repo with
+  nothing to keep in step and no cross-service read. Every other ref is untouched — workspace
+  branches are force-pushed and deleted constantly and this must be invisible to them.
 - **Creates are allowed.** An empty repository has no default branch to protect, so the first-run
   seeding push needs nothing.
 - Two bypasses, both carried as **push options**, because options ride inside the pack protocol and
@@ -180,9 +180,15 @@ remembers to do. It is a hook in Java rather than a `hooks/pre-receive` script b
 
 It ships **inert** (`protect-default-branch=false`) and that is load-bearing: this service is the git
 host that serves its own redeploy, so a protection bug landing enabled could refuse the very push
-that fixes it. A deployment turns it on by env; a single repository opts out with
-`[qits] protectDefaultBranch = false` in its own bare config, which needs no table (this service owns
-none) and travels with the volume.
+that fixes it. A deployment turns it on by env; a single repository opts in or out through a row in
+`git_repository_protection` (`RepositoryProtectionStore`), and no row means the platform-wide setting
+decides.
+
+That override used to be `[qits] protectDefaultBranch` in the bare's own config. It became a row
+because a DFS-backed repository has no config file — `DfsRepository.getConfig()` is in-memory and its
+save is a no-op — so the old read would have answered the platform default for every repository, with
+no symptom anywhere. The row is the override for **both** backends: one question with two answer
+sources eventually gets two answers.
 
 Push options need `setAllowPushOptions(true)` on **both** `ReceivePack` instances — the one in
 `service(...)` that receives them and the one in `infoRefs(...)` that advertises the capability. A
@@ -686,7 +692,8 @@ app's `application.properties` overrides them.
 | `qits.artifacts.blobs-dir` | `~/.qits/data/artifacts/blobs` | content-addressed blob bytes |
 | `qits.artifacts.token` | blank (open) | the JSON API's write guard (`X-Artifacts-Token`); the registry is deliberately tokenless |
 | `qits.artifacts.startup-seed.enabled` | `true` | self-seed `ci-screenshots` + `ci-videos` + the `qits` image repository + the two npm roots (`npm`, `npmjs`) |
-| `qits.repositories.data-dir` | `~/.qits/data/repositories` | where the git host finds `<repoId>/origin` |
+| `qits.repositories.data-dir` | `~/.qits/data/repositories` | where the `file` git backend finds `<repoId>/origin` |
+| `qits.repositories.git.storage` | `file` | which git storage backend serves repositories — `file` (bare origins on the volume) or `dfs` (packs and refs as blobs in this service's own store). Runtime; an unknown value fails the boot |
 | `qits.ci.intake-url` | `http://localhost:8080/ci/api/events/post-receive` | post-receive delivery |
 | `qits.ci.token` | blank | `X-CI-Token` on those events |
 | `qits.artifacts.oci.max-layer-size` | `1G` | the registry's per-layer cap, enforced while streaming |
