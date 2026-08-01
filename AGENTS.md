@@ -172,7 +172,7 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 
 ## Tests
 
-- `mvn verify` runs 196 tests (65 in `artifacts/`, 131 in `service/`) in about a minute. Nothing here
+- `mvn verify` runs 216 tests (78 in `artifacts/`, 138 in `service/`) in about a minute. Nothing here
   needs docker — and that is the constraint that shapes the registry suite: `docker`, `podman` and
   `skopeo` may not be assumed present, so `registry/OciClient` + `registry/TinyImage` synthesise a
   real image in memory and drive a full push/pull over the JDK `HttpClient`. It uses that rather than
@@ -190,7 +190,7 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   than by touching its fields, and the reason is worth knowing before writing another one: Quarkus
   instantiates a `QuarkusTestProfile` in **two** classloaders, so a static singleton exists twice
   and the application ends up talking to a different instance than the test configures.
-- `mvn verify -Dnative` runs those, then 16 more: `PackagedProcessIT` against the compiled binary.
+- `mvn verify -Dnative` runs those, then 17 more: `PackagedProcessIT` against the compiled binary.
   It is the only suite that starts a **process** rather than an in-JVM Quarkus, so it is where the
   route stacks are proved to coexist and where JGit is proved to have survived the compile.
   It is also the **only** place the web UI can be tested at all: Quinoa logs "Quinoa is disabled by
@@ -225,6 +225,21 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   usefully share a base class. Note that SmallRye reads a configured-empty value as *absent* for an
   `Optional<String>`, which is why the hook must treat unset and empty identically rather than
   distinguishing them.
+- **Tag pushes are measured, not assumed** (`GitHostTest`, the "tags" block, and one native case).
+  Four answers other repos build on:
+  - An annotated tag push is **accepted** with protection on and no push option. `ProtectedRefHook`
+    guards one ref name — the bare's `HEAD` — so a tag is just another ref to it.
+  - One `git push` with `HEAD:refs/heads/main` **and** `<tagobj>:refs/tags/<v>` arrives as **one**
+    receive-pack: one pre-receive, one post-receive, one set of push options. Asserted by counting
+    the POSTs under `GIT_CURL_VERBOSE`, which is the only way to tell it from two pushes.
+  - **`--atomic` works**, which JGit's file-backed ref store does not suggest: the advertisement
+    offers `atomic` and a branch the hook refuses takes the tag down with it. Without the flag the
+    tag lands anyway and outlives a release that never happened.
+  - A non-forced push over an **existing** tag ref is refused (`already exists`) — the version
+    uniqueness guarantee. The refusal is the git CLI's, off the advertisement: this host allows the
+    move under `--force`, because JGit's `receive.denyNonFastForwards` default is off. So a release
+    push must never pass `--force`, and it should pass `--atomic` — otherwise a duplicate version
+    rejects the tag while its merge commit lands on main.
 - `GitHostTest.seedOrigin()` shells `git init` + `git clone --bare` into
   `target/githost-test-repos/<uuid>/origin`. Tests that need the name-addressed scheme register the
   alias on `FakeRepositoryNameResolver`, which is a plain `@ApplicationScoped` bean in test sources

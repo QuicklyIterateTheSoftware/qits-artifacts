@@ -425,6 +425,66 @@ class PackagedProcessIT {
     assertEquals(released, runGit(origin, "git", "rev-parse", "refs/heads/main").trim());
   }
 
+  @Test
+  void aReleasePushCarriesItsTagThroughTheBinary() throws Exception {
+    // The release flow's whole push, in the binary: one `git push` with two refspecs — the branch
+    // through the protected-ref door and an annotated tag beside it. JGit-adjacent and therefore
+    // native-gated, because ReceivePack's ref advertisement, its capability negotiation and its
+    // batch ref update are all machinery the JVM suite proves nothing about.
+    String repoId = seedOrigin();
+    Path origin = TargetDirState.ROOT.resolve("repositories").resolve(repoId).resolve("origin");
+    runGit(origin, "git", "config", "qits.protectDefaultBranch", "true");
+
+    // `atomic` is the capability qits-workspaces' push depends on to keep a tag from outliving a
+    // refused release, and a client only sends it if it was offered here.
+    given()
+        .when()
+        .get("/artifacts/git/" + repoId + "/info/refs?service=git-receive-pack")
+        .then()
+        .statusCode(200)
+        .body(containsString("atomic"));
+
+    Path clone = Files.createTempDirectory("qits-artifacts-it-tag");
+    Files.delete(clone);
+    runGit(null, "git", "clone", "-q", gitBase + "/" + repoId, clone.toString());
+
+    Files.writeString(clone.resolve("VERSION"), "2026.801.63140\n");
+    runGit(clone, "git", "add", "VERSION");
+    runGit(clone, "git", "-c", "user.email=q@l", "-c", "user.name=q", "commit", "-q", "-m", "rel");
+    String released = runGit(clone, "git", "rev-parse", "HEAD").trim();
+
+    // tag -a, capture the object, tag -d: the tag has to travel as an object in the push, because
+    // the release flow builds it in a worktree that shares the served bare's ref store.
+    runGit(clone, "git", "-c", "user.email=q@l", "-c", "user.name=q", "tag", "-a", "v2026.801.63140",
+        "-m", "release");
+    String tagObject = runGit(clone, "git", "rev-parse", "v2026.801.63140").trim();
+    runGit(clone, "git", "tag", "-d", "v2026.801.63140");
+
+    runGit(clone, "git", "push", "--atomic", "-o", "qits.release", "origin",
+        "HEAD:refs/heads/main", tagObject + ":refs/tags/v2026.801.63140");
+
+    assertEquals(released, runGit(origin, "git", "rev-parse", "refs/heads/main").trim());
+    assertEquals(
+        tagObject,
+        runGit(origin, "git", "rev-parse", "refs/tags/v2026.801.63140").trim(),
+        "the tag must land in the same push as the branch");
+    assertEquals(
+        "tag",
+        runGit(origin, "git", "cat-file", "-t", tagObject).trim(),
+        "the ref names the tag OBJECT — peeling is the consumer's job");
+
+    // And the uniqueness guarantee the release flow leans on: a second release stamped the same
+    // version builds a different tag object, and the ref cannot be created twice.
+    runGit(clone, "git", "-c", "user.email=q@l", "-c", "user.name=q", "tag", "-a",
+        "v2026.801.63140", "-m", "second release, same version");
+    String second = runGit(clone, "git", "rev-parse", "v2026.801.63140").trim();
+    runGit(clone, "git", "tag", "-d", "v2026.801.63140");
+    String duplicate =
+        runGitExpectingFailure(clone, "git", "push", "origin", second + ":refs/tags/v2026.801.63140");
+    assertTrue(duplicate.contains("already exists"), duplicate);
+    assertEquals(tagObject, runGit(origin, "git", "rev-parse", "refs/tags/v2026.801.63140").trim());
+  }
+
   /**
    * Idempotent, like the endpoint itself — the registry never creates a repository implicitly. The
    * startup seed has already written this exact row in a packaged process; the call stays so the
