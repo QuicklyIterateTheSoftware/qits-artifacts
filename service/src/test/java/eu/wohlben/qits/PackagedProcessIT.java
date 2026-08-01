@@ -462,7 +462,8 @@ class PackagedProcessIT {
         .body("ociPerImageSumBytes", greaterThanOrEqualTo(0))
         .body("orphanBytes", greaterThanOrEqualTo(0))
         .body("npmProxyTarballBytes", greaterThanOrEqualTo(0))
-        .body("npmProxyPackumentBytes", greaterThanOrEqualTo(0));
+        .body("npmProxyPackumentBytes", greaterThanOrEqualTo(0))
+        .body("ociMirrorBytes", greaterThanOrEqualTo(0));
 
     given().when().get("/artifacts/api/repositories/no-such-repo/images").then().statusCode(404);
     given().when().get("/artifacts/api/repositories/npm/images").then().statusCode(400);
@@ -475,7 +476,7 @@ class PackagedProcessIT {
     // nothing references. The store here holds blobs pushed by the cases above, so the row-less
     // figures are a real reading rather than a zero that would pass either way.
     //
-    // Three of the five types have no strategy and must say so. oci-images must name the one that
+    // Three of the six types have no strategy and must say so. oci-images must name the one that
     // does — and, with no qits-cd to answer, must report the refusal rather than a plan. That
     // fail-closed path only exists in the binary if the JDK HttpClient survived the compile, so this
     // is the one assertion here that a JVM test cannot make on its behalf. npm-packages is the
@@ -489,7 +490,7 @@ class PackagedProcessIT {
         .statusCode(200)
         .body("dryRun", equalTo(true))
         .body("graceWindow", equalTo("P7D"))
-        .body("types", hasSize(5))
+        .body("types", hasSize(6))
         .body("types.find { it.type == 'oci-images' }.strategy", equalTo("OciImageGcStrategy"))
         .body("types.find { it.type == 'oci-images' }.error", containsString("qits-cd"))
         .body("types.find { it.type == 'oci-images' }.dead", hasSize(0))
@@ -501,6 +502,9 @@ class PackagedProcessIT {
         .body(
             "types.find { it.type == 'npm-proxy' }.note", containsString("no strategy registered"))
         .body("types.find { it.type == 'npm-proxy' }.strategy", nullValue())
+        .body("types.find { it.type == 'oci-mirror' }.strategy", equalTo("OciMirrorGcStrategy"))
+        .body("types.find { it.type == 'oci-mirror' }.note", nullValue())
+        .body("types.find { it.type == 'oci-mirror' }.dead", hasSize(0))
         .body("sweep.blobCount", equalTo(0))
         .body("sweep.blobIds", hasSize(0))
         .body("untouchable.blobCount", greaterThanOrEqualTo(0))
@@ -508,6 +512,39 @@ class PackagedProcessIT {
 
     // The absence of an execute surface, asserted against the binary: this feature deletes nothing.
     given().when().post("/artifacts/api/gc/plan").then().statusCode(405);
+  }
+
+  @Test
+  void theMirrorNamespacesAreSeededByARealBootAndMissHonestly() {
+    // The startup seed only ever fires in a packaged or dev process — never under TEST — so this is
+    // the one place the three prefilled upstreams are observed arriving on their own, from a
+    // migration and a boot rather than from a test's setup.
+    given()
+        .when()
+        .get("/artifacts/api/mirror-upstreams")
+        .then()
+        .statusCode(200)
+        .body("upstreams.domain", hasItems("docker.io", "quay.io", "registry.access.redhat.com"))
+        .body("upstreams.find { it.domain == 'quay.io' }.slug", equalTo("quay"))
+        .body("upstreams.find { it.domain == 'quay.io' }.cachedImages", equalTo(0));
+
+    // And what a pull through one answers today: an honest 404 rather than NAME_UNKNOWN. The miss
+    // path (workstream BX) changes what happens here; the namespace, the message's subject and the
+    // 405 below are this workstream's and are already the shape a client sees.
+    given()
+        .when()
+        .get("/v2/hub/library/alpine/manifests/latest")
+        .then()
+        .statusCode(404)
+        .body("errors[0].code", equalTo("MANIFEST_UNKNOWN"))
+        .body("errors[0].message", containsString("no cached copy"));
+
+    given()
+        .when()
+        .post("/v2/quay/anything/blobs/uploads/")
+        .then()
+        .statusCode(405)
+        .body("errors[0].detail.type", equalTo("oci-mirror"));
   }
 
   /**

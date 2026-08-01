@@ -47,18 +47,24 @@ class GcPlanControllerTest {
         .body("dryRun", is(true))
         .body("generatedAt", notNullValue())
         .body("graceWindow", is("P7D"))
-        .body("types", hasSize(5))
+        .body("types", hasSize(6))
         .body(
             "types.type",
             org.hamcrest.Matchers.containsInAnyOrder(
-                "ci-screenshots", "ci-videos", "oci-images", "npm-packages", "npm-proxy"))
+                "ci-screenshots",
+                "ci-videos",
+                "oci-images",
+                "npm-packages",
+                "npm-proxy",
+                "oci-mirror"))
         .body("types.find { it.type == 'oci-images' }.strategy", is("OciImageGcStrategy"))
         .body("types.find { it.type == 'npm-packages' }.strategy", is("NpmPackagesGcStrategy"))
+        .body("types.find { it.type == 'oci-mirror' }.strategy", is("OciMirrorGcStrategy"))
         .body(
-            "types.findAll { !(it.type in ['oci-images', 'npm-packages']) }.note",
+            "types.findAll { !(it.type in ['oci-images', 'npm-packages', 'oci-mirror']) }.note",
             everyItem(org.hamcrest.Matchers.startsWith("no strategy registered")))
         .body(
-            "types.findAll { !(it.type in ['oci-images', 'npm-packages']) }.strategy",
+            "types.findAll { !(it.type in ['oci-images', 'npm-packages', 'oci-mirror']) }.strategy",
             everyItem(nullValue()))
         .body("types.reclaimableBytes", everyItem(is(0)));
   }
@@ -96,6 +102,23 @@ class GcPlanControllerTest {
         .body(
             "types.find { it.type == 'npm-proxy' }.note",
             is("no strategy registered for npm-proxy"));
+  }
+
+  @Test
+  void theMirrorClaimsItsTypeToSayItKeepsEverythingOnPurpose() {
+    // The contrast with npm-proxy one line above is the whole point of both. "No strategy
+    // registered" is a decision nobody has taken; a strategy reporting nothing dead is a decision
+    // that was taken and can be argued with — append-only until access tracking exists (⚖2). A
+    // report cannot distinguish the two unless the second one claims its type.
+    given()
+        .when()
+        .get("/artifacts/api/gc/plan")
+        .then()
+        .statusCode(200)
+        .body("types.find { it.type == 'oci-mirror' }.note", nullValue())
+        .body("types.find { it.type == 'oci-mirror' }.error", nullValue())
+        .body("types.find { it.type == 'oci-mirror' }.dead", hasSize(0))
+        .body("types.find { it.type == 'oci-mirror' }.blobsSweepable", is(0));
   }
 
   @Test

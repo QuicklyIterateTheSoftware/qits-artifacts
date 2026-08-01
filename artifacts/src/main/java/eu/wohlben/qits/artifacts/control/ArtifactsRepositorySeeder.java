@@ -7,8 +7,10 @@ import jakarta.inject.Inject;
 
 /**
  * Idempotently ensures the default repository rows exist: the two CI types ({@code ci-screenshots},
- * {@code ci-videos}), the platform image repository ({@code qits}, type {@code oci-images}) and the
- * two npm roots ({@code npm} hosted, {@code npmjs} proxy). Invoked by the service-side startup gate
+ * {@code ci-videos}), the platform image repository ({@code qits}, type {@code oci-images}), the
+ * two npm roots ({@code npm} hosted, {@code npmjs} proxy) and the three OCI mirror namespaces
+ * ({@code hub}, {@code quay}, {@code redhat}, each paired with its upstream row). Invoked by the
+ * service-side startup gate
  * ({@code ArtifactsStartupSeed}); also usable directly (e.g. the standalone deployable's own boot).
  * Purely additive — re-running is a no-op via {@link ArtifactRepositoryService#ensure}.
  */
@@ -44,6 +46,8 @@ public class ArtifactsRepositorySeeder {
 
   @Inject ArtifactRepositoryService repositoryService;
 
+  @Inject OciMirrorUpstreams mirrorUpstreams;
+
   @ActivateRequestContext
   public void ensureDefaults() {
     repositoryService.ensure(CI_SCREENSHOTS, RepositoryType.CI_SCREENSHOTS);
@@ -51,5 +55,11 @@ public class ArtifactsRepositorySeeder {
     repositoryService.ensure(IMAGES, RepositoryType.OCI_IMAGES);
     repositoryService.ensure(NPM, RepositoryType.NPM_PACKAGES);
     repositoryService.ensure(NPM_PROXY, RepositoryType.NPM_PROXY);
+    // The mirror namespaces (hub, quay, redhat) and the upstream row each of them fronts. Written
+    // as a PAIR by OciMirrorUpstreams, which is why they are not five more lines above: a
+    // repository row with no upstream is a namespace nothing can be fetched into, and an upstream
+    // row with no repository is a namespace nothing resolves to. The migration prefills both; this
+    // re-ensures them, so a deployment that lost one gets it back on the next boot.
+    mirrorUpstreams.ensureDefaults();
   }
 }

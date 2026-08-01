@@ -22,7 +22,20 @@ public class OciException extends ArtifactsException {
   }
 
   public OciException(OciCode code, String message, Map<String, Object> detail) {
-    super(code.status(), message);
+    this(code, code.status(), message, detail);
+  }
+
+  /**
+   * The same envelope under a status the code does not imply.
+   *
+   * <p>{@code UNSUPPORTED} is a 404 for a route this registry does not serve and a <b>405</b> for an
+   * operation it declines — a push to a mirror namespace, a client {@code DELETE}. {@code
+   * RegistryErrors} already accepts an explicit status for the second case when it writes the
+   * response itself; this is the same thing for the cases that are thrown from a service instead,
+   * so the status is chosen where the refusal is understood rather than at the edge.
+   */
+  public OciException(OciCode code, int status, String message, Map<String, Object> detail) {
+    super(status, message);
     this.code = code;
     this.detail = detail == null ? Map.of() : Map.copyOf(detail);
   }

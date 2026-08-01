@@ -77,13 +77,17 @@ public class ArtifactExplorerService {
   }
 
   /**
-   * The images of an {@code oci-images} repository.
+   * The images of an OCI repository, hosted or mirror.
+   *
+   * <p>Both types answer from {@code oci_manifest}, which is what makes this one query rather than
+   * two — the same shape the npm listing has over its two types, and the reason a mirror namespace is
+   * browsable the moment something has been pulled through it.
    *
    * @throws NotFoundException there is no such repository
    * @throws BadRequestException it is not an image repository
    */
   public List<ImageSummary> listImages(String repository) {
-    requireType(repository, RepositoryType.OCI_IMAGES);
+    requireOci(repository);
     List<ImageSummary> images = new ArrayList<>();
     for (String image : manifests.listImageNames(repository)) {
       images.add(
@@ -105,7 +109,7 @@ public class ArtifactExplorerService {
    * to be absent. Only the repository can be unknown.
    */
   public List<ImageTagSummary> listTags(String repository, String image) {
-    requireType(repository, RepositoryType.OCI_IMAGES);
+    requireOci(repository);
     Map<String, OciManifest> byDigest = new HashMap<>();
     for (OciManifest manifest : manifests.listByImage(repository, image)) {
       byDigest.put(manifest.digest, manifest);
@@ -180,6 +184,7 @@ public class ArtifactExplorerService {
     return new StoreSummary(
         taken.ociPerImageSumBytes(),
         taken.liveBytes(RepositoryType.OCI_IMAGES),
+        taken.liveBytes(RepositoryType.OCI_MIRROR),
         taken.rowlessBytes(),
         taken.liveBytes(RepositoryType.NPM_PACKAGES),
         taken.liveBytes(RepositoryType.NPM_PROXY),
@@ -194,11 +199,16 @@ public class ArtifactExplorerService {
    * not this kind of thing" — an npm repository has no images and never will, and reporting that as
    * an empty list would look like an image registry that lost its images.
    */
-  private ArtifactRepository requireType(String name, RepositoryType type) {
+  private ArtifactRepository requireOci(String name) {
     ArtifactRepository repository = require(name);
-    if (repository.type != type) {
+    if (repository.type != RepositoryType.OCI_IMAGES
+        && repository.type != RepositoryType.OCI_MIRROR) {
       throw new BadRequestException(
-          "Repository '" + name + "' is " + repository.type.wireName() + ", not " + type.wireName());
+          "Repository '"
+              + name
+              + "' is "
+              + repository.type.wireName()
+              + ", not oci-images or oci-mirror");
     }
     return repository;
   }
@@ -227,7 +237,7 @@ public class ArtifactExplorerService {
 
   private long itemCount(ArtifactRepository repository) {
     return switch (repository.type) {
-      case OCI_IMAGES -> manifests.countImages(repository.name);
+      case OCI_IMAGES, OCI_MIRROR -> manifests.countImages(repository.name);
       case NPM_PACKAGES, NPM_PROXY -> versions.countPackages(repository.name);
       case CI_SCREENSHOTS, CI_VIDEOS -> records.countByRepository(repository.name);
     };
@@ -235,7 +245,7 @@ public class ArtifactExplorerService {
 
   private Long sizeOf(ArtifactRepository repository) {
     return switch (repository.type) {
-      case OCI_IMAGES ->
+      case OCI_IMAGES, OCI_MIRROR ->
           OciManifestFootprints.sum(footprints.union(manifests.listByRepository(repository.name)));
       case NPM_PACKAGES, NPM_PROXY ->
           tarballBytes(List.of(repository.name), diskIndex.sizes(), new HashSet<>());

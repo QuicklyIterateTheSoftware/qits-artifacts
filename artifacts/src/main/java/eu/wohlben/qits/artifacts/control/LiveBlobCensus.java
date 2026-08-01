@@ -37,10 +37,14 @@ import java.util.Set;
  * <p>Liveness per type, and where it is read from:
  *
  * <ul>
- *   <li>{@code oci-images} — the manifest closure ({@link OciManifestFootprints}, which walks an
- *       index's children, so a child manifest of a live index is live). Sizes are the {@code size}
- *       fields inside the manifest documents, which is what the OCI union has always been counted
- *       from.
+ *   <li>{@code oci-images} / {@code oci-mirror} — the manifest closure ({@link
+ *       OciManifestFootprints}, which walks an index's children, so a child manifest of a live index
+ *       is live). Sizes are the {@code size} fields inside the manifest documents, which is what the
+ *       OCI union has always been counted from. The two types are walked identically and counted
+ *       <em>separately</em>: what a mirror cached is live, so nothing pulled through it is ever
+ *       mistaken for an orphan, and the closure tolerates a mirror index whose children have no
+ *       local row — the lazy pull order fetches an index first and its children later, each on its
+ *       own miss.
  *   <li>{@code npm-packages} / {@code npm-proxy} — {@code npm_version.tarball_blob_id}, sized from
  *       disk because there is no size column.
  *   <li>{@code ci-screenshots} / {@code ci-videos} — {@code artifact_record.blob_id}, sized from the
@@ -162,12 +166,20 @@ public class LiveBlobCensus {
     List<ArtifactRepository> all = repositories.listAll();
     long perImageSum = 0;
     for (ArtifactRepository repository : all) {
-      if (repository.type == RepositoryType.OCI_IMAGES) {
-        Map<String, Long> ociUnion = live.get(RepositoryType.OCI_IMAGES);
+      // Both OCI types are walked, and each contributes to ITS OWN live set: the manifest closure is
+      // a property of the rows, not of who pushed them, and a mirror's cached layers are as live as
+      // a pushed image's. Only the hosted type feeds ociPerImageSumBytes, because that figure exists
+      // to be compared against the hosted union — the explorer's "the two differ by the layers two
+      // images share" line, which mixing a second type into would make unreadable.
+      if (repository.type == RepositoryType.OCI_IMAGES
+          || repository.type == RepositoryType.OCI_MIRROR) {
+        Map<String, Long> ociUnion = live.get(repository.type);
         for (String image : manifests.listImageNames(repository.name)) {
           Map<String, Long> perImage =
               footprints.union(manifests.listByImage(repository.name, image));
-          perImageSum += OciManifestFootprints.sum(perImage);
+          if (repository.type == RepositoryType.OCI_IMAGES) {
+            perImageSum += OciManifestFootprints.sum(perImage);
+          }
           perImage.forEach(ociUnion::putIfAbsent);
         }
       }

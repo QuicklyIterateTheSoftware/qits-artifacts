@@ -37,17 +37,18 @@ class GcPlanTest extends GcFixture {
   @Inject GcPlanner planner;
 
   @Test
-  void twoTypesAreCollectedAndTheThreeOthersSaySoRatherThanGoMissing() throws Exception {
+  void threeTypesAreCollectedAndTheOthersSaySoRatherThanGoMissing() throws Exception {
     // The report a reviewer sees first. "No plan", "nothing to collect" and "refused to plan" are
     // three different facts, so every type is listed with its own reason rather than omitted — and
     // oci-images demonstrates the third: this suite has no qits-cd, its pin fetch is refused at a
     // closed port, and a keep-set that cannot be established reclaims nothing. npm-packages
     // demonstrates the second: its rules run over the fixture's two released versions and condemn
-    // neither.
+    // neither. oci-mirror is the second's sharper form: a type whose whole policy is "nothing dies",
+    // which is a decision and therefore claims its type, unlike npm-proxy beside it.
     Store store = seed();
 
     assertEquals(
-        List.of("NpmPackagesGcStrategy", "OciImageGcStrategy"),
+        List.of("NpmPackagesGcStrategy", "OciImageGcStrategy", "OciMirrorGcStrategy"),
         planner.registered().stream().map(GcPlanner::nameOf).sorted().toList());
     GcPlanReport report = planner.plan();
 
@@ -65,6 +66,12 @@ class GcPlanTest extends GcFixture {
           assertNull(type.note());
           assertNull(type.error());
           assertEquals(0, type.dead().size(), "both fixture versions are releases");
+        }
+        case OCI_MIRROR -> {
+          assertEquals("OciMirrorGcStrategy", type.strategy());
+          assertNull(type.note());
+          assertNull(type.error(), "it depends on nothing outside this service, so it cannot fail");
+          assertEquals(0, type.dead().size(), "append-only: this type condemns nothing, ever");
         }
         default -> {
           assertNull(type.strategy());

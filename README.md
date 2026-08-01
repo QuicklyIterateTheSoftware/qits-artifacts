@@ -250,6 +250,68 @@ So `qits/alpine:latest` works out of the box, and `qits/build-images/ci-base:lat
 message naming this command; a single-segment reference (`docker push <host>/alpine`) is `400
 NAME_INVALID`, because it has no repository/image split at all.
 
+### The pull-through mirror
+
+A second kind of namespace answers on the same `/v2` routes: a **mirror**, which fronts an upstream
+public registry. Registered upstreams are rows, not config, and each carries the local segment it is
+reachable under:
+
+| domain | namespace | pulled as |
+|---|---|---|
+| `quay.io` | `quay` | `docker pull <host>/quay/quarkus/ubi9-quarkus-mandrel-builder-image:jdk-25` |
+| `registry.access.redhat.com` | `redhat` | `docker pull <host>/redhat/ubi9/ubi-minimal:9.6` |
+| `docker.io` | `hub` | `docker pull <host>/hub/alpine:latest` |
+
+All three are prefilled by the migration and re-ensured at every boot, so a fresh deployment has
+them with no manual step. They are ordinary `artifact_repository` rows of type `oci-mirror`, and what
+is cached under one is ordinary `oci_manifest`/`oci_tag` rows — so the hit path is the existing code,
+unchanged, and the explorer browses a mirror namespace exactly as it browses `qits`.
+
+Four rules are worth knowing before pulling through one:
+
+- **A push is `405`, by type.** A mirror never accepts content from a client. Cached upstream content
+  and pushed content must not share a namespace, and because it is the *type* refusing, no
+  deployment can configure its way past it and no repository can drift from one meaning to the
+  other. Same rule the npm proxy carries.
+- **A single-component image under `hub` means `library/`.** `hub/alpine` is `hub/library/alpine`,
+  the docker daemon's own expansion, so both spellings share one cache entry.
+- **A first segment that names no repository at all remaps into `hub`**, on `GET`/`HEAD` only, when
+  a Docker Hub upstream is registered. That exists so the optional Docker Desktop
+  `"registry-mirrors": ["http://localhost:8081"]` setting works — a daemon-configured mirror client
+  asks for bare Hub names. An existing repository always wins its segment, so `/v2/qits/…` never
+  reaches the remap; the consequence is that a Hub organisation sharing a name with a local
+  repository is shadowed, which is the correct precedence here.
+- **Nothing is fetched yet.** This release ships the namespaces; the miss path — fetch, verify while
+  streaming, promote, serve — is the next workstream. Until it lands, a miss in a mirror namespace is
+  a `404` whose message says this registry holds no cached copy, which is the truth rather than the
+  `NAME_UNKNOWN` a puller would otherwise read as a broken namespace.
+
+Managing upstreams is four routes under the JSON API, writes token-guarded like every other write
+here:
+
+```
+GET    /artifacts/api/mirror-upstreams            every upstream, by namespace
+GET    /artifacts/api/mirror-upstreams/{domain}    one of them
+PUT    /artifacts/api/mirror-upstreams/{domain}    {"slug":"quay"} — idempotent; creates the namespace too
+DELETE /artifacts/api/mirror-upstreams/{domain}    stop mirroring; THE CACHE STAYS
+```
+
+`PUT` writes both rows in one transaction — the upstream and the `oci-mirror` repository its
+namespace resolves to — because either alone is useless: a repository row with no upstream is a
+namespace nothing can be fetched into, and an upstream with no repository row is a namespace nothing
+resolves to. Re-pointing a registered upstream at another namespace is `400`: content is cached under
+the old name, so moving it is a delete and a create, where an operator can see what happens to the
+cache.
+
+`DELETE` removes **only** the upstream row. The namespace and every cached byte under it stay,
+which is the append-only posture this store has everywhere — what ends is the future, not the past.
+
+Credentials are out of scope until an upstream needs one, and the reason is worth stating because
+the intuition is natural and wrong: a client's `docker login` does **not** travel through a
+pull-through hop. The daemon authenticates to the registry it dials — this one — and the mirror
+dials upstream as itself, so a private upstream needs a *server-side* credential, which becomes an
+additive column pair on the upstream row the day it is needed. Every upstream above is anonymous.
+
 ### Reaching it from a client
 
 Over plain HTTP a client needs a one-time opt-in — this is deployment configuration, not something
@@ -548,11 +610,12 @@ operation carries `@Operation(hidden = true)` as everything here does, so `docs/
 
 ```
 GET /artifacts/api/repositories                                    every repository
-GET /artifacts/api/repositories/{repo}/images                      an oci-images repository
+GET /artifacts/api/repositories/{repo}/images                      an OCI repository, hosted or mirror
 GET /artifacts/api/repositories/{repo}/images/{image}/tags         one image's tags
 GET /artifacts/api/repositories/{repo}/packages                    an npm repository, either type
 GET /artifacts/api/repositories/{repo}/packages/{package}/versions one package's versions
-GET /artifacts/api/store/summary                                   the whole store, seven ways
+GET /artifacts/api/store/summary                                   the whole store, eight ways
+GET /artifacts/api/mirror-upstreams                                the registries this one mirrors
 ```
 
 | Route | Body |
@@ -562,7 +625,8 @@ GET /artifacts/api/store/summary                                   the whole sto
 | `tags` | `{"tags":[{"tag","digest","sizeBytes","createdAt"}]}` |
 | `packages` | `{"packages":[{"name","versionCount","latest"}]}` |
 | `versions` | `{"versions":[{"version","tarballSizeBytes","publishedAt","distTags"}]}` |
-| `store/summary` | `{"ociPerImageSumBytes","ociUnionBytes","orphanBytes","npmPublishedBytes","npmProxyTarballBytes","npmProxyPackumentBytes","diskTotalBytes"}` |
+| `store/summary` | `{"ociPerImageSumBytes","ociUnionBytes","ociMirrorBytes","orphanBytes","npmPublishedBytes","npmProxyTarballBytes","npmProxyPackumentBytes","diskTotalBytes"}` |
+| `mirror-upstreams` | `{"upstreams":[{"domain","slug","createdAt","cachedImages"}]}` |
 
 Details a client trips over if it does not know them:
 
@@ -571,7 +635,11 @@ Details a client trips over if it does not know them:
   type-dependent meaning beats four that are always null.
 - **404 is an unknown repository; 400 is a repository of the wrong type.** An npm repository has no
   images and never will, and reporting that as an empty list would read as an image registry that
-  lost its images.
+  lost its images. Both OCI types answer the image routes: a mirror namespace holds the same rows,
+  so it browses like any other, and `cachedImages` on an upstream is that same count.
+- **`ociMirrorBytes` is counted apart from `ociUnionBytes`**, because the two answer different
+  questions: what this platform published, and what it cached from three public registries and could
+  re-fetch.
 - **An unknown *image* is `200` with an empty list**, not a 404 — an image is not a row, so there is
   nothing to be absent. The same answer `tags/list` gives.
 - **`{image}` and `{package}` may contain slashes**, and both spellings resolve: `build-images%2Fci-base`
@@ -693,7 +761,7 @@ answer is its own.
 - **The blob sweep** is one mechanism with no policy at all. A blob may die only when **no type**
   reaches it any more, because the store dedupes globally across types and repositories.
 
-That split is what makes five independent strategies safe by construction: a strategy never touches
+That split is what makes six independent strategies safe by construction: a strategy never touches
 bytes, so no strategy can free a blob another type still needs.
 
 **Docker's and npm's rules resemble each other by coincidence, not by identity.** Both reduce to
@@ -709,6 +777,7 @@ if a change would let one strategy reuse another's policy, it is the wrong chang
 | `ci-screenshots` | records of deleted branches; superseded per (branch, userflow) | — | newest per (branch, userflow) | `artifact_record.blob_id` | rows exist (zero today) |
 | `ci-videos` | superseded per userflow beyond a byte budget | — | newest N per userflow, N in bytes | `artifact_record.blob_id` | rows exist (zero today) |
 | `npm-proxy` | **parked** — cache eviction is access-based, which is `artifact-access-tracking`'s territory, not a structural rule | — | — | — | not this design |
+| `oci-mirror` | **nothing** — append-only, at a recorded price, until access tracking lands | every cached tag and manifest | — | manifest closure over the namespace | claimed, so the report says so |
 | git host (not an `artifact_repository` type) | superseded pack descriptions after a repack | every ref | current packs | `PackCatalog.list` per repo | the DFS migration |
 
 The OCI keep-set is **fetched at plan time and fail-closed**: qits-cd unreachable aborts that type's
@@ -788,7 +857,7 @@ is the substrate's job. A strategy that cannot establish its keep-set safely **t
 reports the type as failed and treats every blob the census attributes to it as live, so an
 unreachable dependency reclaims nothing instead of guessing.
 
-### `oci-images`, the first of the two strategies that exist
+### `oci-images`, the first of the three strategies that exist
 
 `OciImageGcStrategy` implements the row the table above gives it. Five rules, each named in the
 report beside the identity it saved:
@@ -844,6 +913,30 @@ same transaction, and it refuses a version a dist-tag still names. It is package
 by nobody — collection is dry-run — and it ships ahead of its caller so the tombstone can never be a
 step someone forgets.
 
+### `oci-mirror`, the third — a rule of "nothing dies", said out loud
+
+`OciMirrorGcStrategy` keeps every cached tag and every cached manifest, under one rule:
+**`append-only pending access tracking`**. That is the settled posture, not a placeholder for one.
+
+A cache's eviction is access-based — *which of these has nobody pulled in a year* — and this store
+tracks no access, so the choices were an eviction rule computed from something that is not access, or
+keeping everything at a price stated up front. The price: an estimated 1.5–2.5 GiB one-time fill for
+the platform's real base images, then low-GiB-per-year drift as upstreams move mutable tags like
+`jdk-25` and strand the manifests they used to name. `artifact-access-tracking.md` is where eviction
+lives when it lands, and the mirror joins `npm-proxy` as its second waiting client.
+
+**Why a class at all, when the answer is "no".** An unclaimed type reports "no strategy registered",
+which is the honest report of a decision nobody has taken — and here one *was* taken. Claiming the
+type is how the report tells the two apart, and the contrast with the `npm-proxy` line beside it is
+the point of both. It is also why mirrors are a separate type: `jdk-25` and `9.6` are neither calver
+releases nor build shas, so inside docker's rules every mirrored tag would land on the
+unclassified-means-keep backstop — same outcome, dishonest report, and the one case that backstop
+exists to catch buried under hundreds that are not it.
+
+This is the one strategy that reads the census: with no rules of its own, the type's live set *is*
+its answer. It also depends on nothing outside this service, so it can never fail closed — an
+`error` on this type's line means something is genuinely wrong.
+
 ### What the plan says
 
 ```jsonc
@@ -851,7 +944,7 @@ step someone forgets.
   "generatedAt": "2026-08-01T12:00:00Z",
   "dryRun": true,                       // always, today
   "graceWindow": "P7D",
-  "types": [                            // all five, always — including the ones nobody collects
+  "types": [                            // all six, always — including the ones nobody collects
     { "type": "oci-images", "strategy": "OciImageGcStrategy",
       "note": null, "error": null,
       "dead": [{ "repository": "qits", "identity": "qits-ci:3ff84c05…",
@@ -866,6 +959,12 @@ step someone forgets.
       "kept": [{ "repository": "npm", "identity": "@qits/ui-components@2026.801.85149",
                  "rule": "release version — no prerelease part, so consumers' ranges resolve to it; releases are never eligible" }],
       "blobsReleased": 1, "blobsSweepable": 1, "reclaimableBytes": 17904 },
+    { "type": "oci-mirror", "strategy": "OciMirrorGcStrategy",
+      "note": null, "error": null,
+      "dead": [],                       // never; the rule is the posture, not a placeholder
+      "kept": [{ "repository": "quay", "identity": "quarkus/ubi9-quarkus-mandrel-builder-image:jdk-25",
+                 "rule": "append-only pending access tracking" }],
+      "blobsReleased": 0, "blobsSweepable": 0, "reclaimableBytes": 0 },
     { "type": "npm-proxy", "strategy": null,
       "note": "no strategy registered for npm-proxy", "error": null,
       "dead": [], "kept": [],
@@ -880,8 +979,9 @@ step someone forgets.
 Three details a reader trips over otherwise:
 
 - **A type with no strategy says so.** "Nothing to collect" and "nobody is collecting" are different
-  answers, and only one of them is fine. Two types are collected today (`oci-images`,
-  `npm-packages`); the other three report their reason rather than going missing.
+  answers, and only one of them is fine. Three types are collected today (`oci-images`,
+  `npm-packages`, `oci-mirror` — whose whole policy is "nothing dies", which is still a decision);
+  the other three report their reason rather than going missing.
 - **`sweep` is not the sum of the per-type figures.** A blob dies once, and two types releasing the
   same content free it once. The per-type numbers answer "what does this rule buy on its own"; the
   sweep answers "what would a run free tonight".

@@ -219,6 +219,16 @@ named datasource. This lineage is the original one from the monorepo, carried ov
 do not renumber it, and do not treat `V1__init.sql` as a squash baseline. Never touch the monorepo's
 `db/migration`; that is a different database.
 
+The OCI mirror owns two (V7): `oci_mirror_upstream`, whose slug is a foreign key into
+`artifact_repository` because every upstream is paired with the `oci-mirror` row its namespace
+resolves to, and `oci_mirror_tag_check`, which nothing writes yet — the miss path (workstream BX)
+does. **A plan reserves no migration number**: three workstreams were widening this lineage at once,
+and the rule they share is "take the next free V at land time, and re-enumerate
+`ck_artifact_repository_type` from the `RepositoryType` enum as it stands in the tree"
+(proxy-pulling-normal-images.md §4). `OciMirrorMigrationTest` pins that by looping over
+`values()` — it owns a private file-H2 under `target/` and runs Flyway over the real directory,
+because every `@QuarkusTest` here wipes the tables and a prefill is invisible to all of them.
+
 The git host owns **three** tables — `git_pack`, `git_pack_file` (V4) and `git_repository_protection`
 (V5) — in this same lineage, on this same datasource. It used to own none, and this file said so
 flatly; the sentence was amended rather than left standing when the second storage backend landed
@@ -267,22 +277,23 @@ anyway. Pack GC is its own later workstream and needs the DFS migration first.
   last identity row to a strategy's own deletion, so one that never had a row cannot be reached. This
   is not an allowlist and must not become one: 124 MiB of this store has no row, and one of those
   blobs is the CI daemon binary every build downloads by digest.
-- **Five strategies, no shared policy.** `GcStrategy` is the only thing they share — no base class,
+- **Six strategies, no shared policy.** `GcStrategy` is the only thing they share — no base class,
   no retention framework. Docker's and npm's rules look alike by coincidence; a change that lets one
   reuse the other's policy is the wrong change. Two beans claiming one type is reported as a
   collision, never merged.
 
-Two strategies exist: `OciImageGcStrategy` (`oci-images`) and `NpmPackagesGcStrategy`
-(`npm-packages`). Three things they share cost time otherwise.
+Three strategies exist: `OciImageGcStrategy` (`oci-images`), `NpmPackagesGcStrategy`
+(`npm-packages`) and `OciMirrorGcStrategy` (`oci-mirror`). Three things they share cost time
+otherwise.
 
-- **Both are `@Singleton`, not `@ApplicationScoped`, and the reason is the report.** `GcPlanner`
+- **All three are `@Singleton`, not `@ApplicationScoped`, and the reason is the report.** `GcPlanner`
   names a strategy by its class's simple name, and a normal-scoped bean would answer that through its
   client proxy — `OciImageGcStrategy_ClientProxy`, a name in no source file. `@Singleton` is a
   pseudo-scope, so there is no proxy and still one instance. `GcPlanner.nameOf` also unwraps a proxy
   if it gets one, so a strategy that forgets is merely inconsistent rather than misreported; both
   names are asserted.
-- **Neither reads the census.** The census carries blobs, not identities, so the rules are computed
-  from the type's own rows — `oci_tag`/`oci_manifest` plus `OciManifestFootprints` for one,
+- **The first two do not read the census.** The census carries blobs, not identities, so their rules
+  are computed from the type's own rows — `oci_tag`/`oci_manifest` plus `OciManifestFootprints` for one,
   `npm_version`/`npm_dist_tag` for the other. The two blob sets they return are in the census's
   vocabulary, which is what the substrate reconciles over, and each suite asserts `blobsRetained`
   equals the census's own live set for the type when nothing dies.
@@ -305,6 +316,12 @@ Two things are npm's alone, and the plan is explicit that docker needs neither:
   same transaction, and it refuses a version a dist-tag still names (a dist-tag pointing at a version
   the packument no longer lists is a broken package to every npm client). GC is dry-run, so nothing
   calls it yet — it ships first so the tombstone is never a step someone has to remember.
+
+`oci-mirror` is claimed by a strategy whose whole rule is "nothing dies"
+(`append-only pending access tracking`, proxy-pulling-normal-images.md ⚖2), and the class exists
+*because* the alternative — leaving the type unclaimed — reports a decision nobody took. It is the
+one strategy that reads the census, which is honest rather than lazy: with no rules of its own, the
+type's live set is its answer, and recomputing it would be a second answer to a settled question.
 
 `npm-proxy` is deliberately unclaimed. It shares `npm_version` with the hosted registry, so the scope
 is asserted rather than assumed (`NpmPackagesGcStrategyTest`); the planner's "no strategy registered
@@ -330,7 +347,7 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 
 ## Tests
 
-- `mvn verify` runs 317 tests (124 in `artifacts/`, 18 in `git-storage/`, 175 in `service/`) in about
+- `mvn verify` runs 358 tests (152 in `artifacts/`, 18 in `git-storage/`, 188 in `service/`) in about
   a minute. Nothing here
   needs docker — and that is the constraint that shapes the registry suite: `docker`, `podman` and
   `skopeo` may not be assumed present, so `registry/OciClient` + `registry/TinyImage` synthesise a
@@ -349,8 +366,8 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   than by touching its fields, and the reason is worth knowing before writing another one: Quarkus
   instantiates a `QuarkusTestProfile` in **two** classloaders, so a static singleton exists twice
   and the application ends up talking to a different instance than the test configures.
-- `mvn verify -Dnative` runs those, then 19 more against the compiled binary: `PackagedProcessIT`
-  (17) and `ProtectedGitHostIT` (2). They are two classes because they are two process
+- `mvn verify -Dnative` runs those, then 20 more against the compiled binary: `PackagedProcessIT`
+  (18) and `ProtectedGitHostIT` (2). They are two classes because they are two process
   configurations — `PackagedProcessIT` asserts the SHIPPED defaults leave the default branch
   unprotected, and the seatbelt cases need it on — and `@TestProfile` is per class. The protection
   cases used to turn it on per repository with one `git config` on the served bare; the override is
@@ -436,8 +453,8 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 ## What not to "fix"
 
 - `ArtifactsTokenFilter` matches on `getUriInfo().getPath()` against a **set** of prefixes —
-  `repositories` and `store` — relative to the JAX-RS base, so it holds whatever `quarkus.rest.path`
-  is. It was `artifacts` until the resource `@Path`s dropped that segment (the gateway segment
+  `repositories`, `store`, `gc` and `mirror-upstreams` — relative to the JAX-RS base, so it holds
+  whatever `quarkus.rest.path` is. It was `artifacts` until the resource `@Path`s dropped that segment (the gateway segment
   carries it now). **A resource added outside those prefixes is unguarded** — extend the set, do not
   assume it is covered. `store` holds only the read-only store summary today and is listed so that
   stays a choice rather than an accident. It guards writes only, by design, and is a no-op when
@@ -482,14 +499,23 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 - The blob store's `RepositoryType` enum hardcodes its types. Adding one is a schema check
   constraint change plus a validation profile, not a config knob — since V2 the constraint is named
   (`ck_artifact_repository_type`), so widening it is a one-liner (V3 is that one-liner, twice over).
-- **The three protocol types' profiles are empty and their `maxBytes()` is `0`, and that is not an
-  oversight.** `OCI_IMAGES`, `NPM_PACKAGES` and `NPM_PROXY` never flow through `BlobService` — their
+- **The four protocol types' profiles are empty and their `maxBytes()` is `0`, and that is not an
+  oversight.** `OCI_IMAGES`, `NPM_PACKAGES`, `NPM_PROXY` and `OCI_MIRROR` never flow through
+  `BlobService` — their
   bytes arrive on their own wire routes and go straight to `BlobStore` — so there is no media type to
   sniff (a gzipped tar sniffs to nothing and would 400) and no metadata to require. The empty
   media-type set is what makes the zero cap safe: `accepts()` rejects a stray JSON-API upload before
   anything reads the cap. The real caps are `qits.artifacts.oci.max-layer-size` and
   `qits.artifacts.npm.max-publish-size`, config knobs because they have to move with the wire
   ceiling.
+- **`/v2` has two resolution seams and they are not interchangeable.**
+  `OciRegistryService.requireOciRepository` is the **write** one: it demands an `oci-images` row and
+  refuses an `oci-mirror` one with `405`. `resolveForPull` is the **read** one: it also accepts a
+  mirror namespace, normalises a Hub single-component image to `library/<name>`, and remaps a first
+  segment with no repository row at all into the Hub namespace. Routing a write through the read seam
+  compiles, passes anything that does not push to a mirror, and quietly lets a client write into a
+  cache of somebody else's registry. The precedence inside `resolveForPull` is load-bearing too: an
+  existing repository always wins its segment, so `/v2/qits/…` can never be shadowed by the remap.
 - **Wire routes must not return DTOs.** The `dto/UploadResult` lesson is worse on a raw Vert.x
   route: behind a JAX-RS `Response` there is at least a provider chain for the build to see the type
   through, but nothing sees a type serialised only inside a Vert.x handler. Responses are built with

@@ -131,8 +131,8 @@ class ArtifactExplorerServiceTest extends ArtifactsTestSupport {
   }
 
   @Test
-  void theSevenStoreFiguresAccountForEveryByteOnDisk() {
-    // The panel's whole claim: disk = the OCI union + both npm tarball figures + the orphans. The
+  void theEightStoreFiguresAccountForEveryByteOnDisk() {
+    // The panel's whole claim: disk = both OCI unions + both npm tarball figures + the orphans. The
     // packument total is deliberately outside that sum — those bytes are H2 CLOBs, not files.
     Fixture fixture = seedImages();
     seedNpm();
@@ -142,9 +142,14 @@ class ArtifactExplorerServiceTest extends ArtifactsTestSupport {
     assertEquals(
         summary.diskTotalBytes(),
         summary.ociUnionBytes()
+            + summary.ociMirrorBytes()
             + summary.npmPublishedBytes()
             + summary.npmProxyTarballBytes()
             + summary.orphanBytes());
+    assertEquals(
+        0L,
+        summary.ociMirrorBytes(),
+        "nothing has been pulled through a mirror here, and zero is the honest figure for that");
     assertEquals(40 + 60, summary.npmPublishedBytes());
     assertEquals(70, summary.npmProxyTarballBytes());
     assertEquals(PACKUMENT_DOC.length(), summary.npmProxyPackumentBytes());

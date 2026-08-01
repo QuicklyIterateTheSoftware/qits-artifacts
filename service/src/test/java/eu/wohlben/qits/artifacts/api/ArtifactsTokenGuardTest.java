@@ -84,6 +84,40 @@ class ArtifactsTokenGuardTest {
   }
 
   @Test
+  void registeringAMirrorUpstreamIsGuardedAndListingThemIsNot() {
+    // The prefix set is extended by hand, never inherited — a resource served outside it ships
+    // unguarded. This route decides which public registry the service dials on a miss, so an
+    // unguarded PUT here would be handing out an outbound fetch; the read stays open like every
+    // other read.
+    given()
+        .contentType(ContentType.JSON)
+        .body(Map.of("slug", "quay"))
+        .when()
+        .put("/artifacts/api/mirror-upstreams/quay.io")
+        .then()
+        .statusCode(401);
+
+    given()
+        .header("X-Artifacts-Token", TOKEN)
+        .contentType(ContentType.JSON)
+        .body(Map.of("slug", "quay"))
+        .when()
+        .put("/artifacts/api/mirror-upstreams/quay.io")
+        .then()
+        .statusCode(200);
+
+    given().when().get("/artifacts/api/mirror-upstreams").then().statusCode(200);
+
+    given().when().delete("/artifacts/api/mirror-upstreams/quay.io").then().statusCode(401);
+    given()
+        .header("X-Artifacts-Token", TOKEN)
+        .when()
+        .delete("/artifacts/api/mirror-upstreams/quay.io")
+        .then()
+        .statusCode(204);
+  }
+
+  @Test
   void uploadIsRejectedWithoutTheToken() {
     given()
         .contentType("image/png")

@@ -2,6 +2,7 @@ package eu.wohlben.qits.artifacts.control;
 
 import eu.wohlben.qits.artifacts.entity.ArtifactRepository;
 import eu.wohlben.qits.artifacts.entity.OciManifest;
+import eu.wohlben.qits.artifacts.entity.OciMirrorUpstream;
 import eu.wohlben.qits.artifacts.entity.OciTag;
 import eu.wohlben.qits.artifacts.entity.RepositoryType;
 import eu.wohlben.qits.artifacts.error.OciCode;
@@ -40,12 +41,31 @@ public class OciRegistryService {
   @Inject OciManifestRepository manifests;
   @Inject OciTagRepository tags;
   @Inject BlobStore blobStore;
+  @Inject OciMirrorUpstreams mirrors;
 
   /** A manifest resolved for serving: what to read, how big it is, and what to call it. */
   public record StoredManifest(String digest, String mediaType, long size) {}
 
   /**
-   * Resolves an OCI {@code <name>} to the repository that must already hold it.
+   * A {@code <name>} resolved for reading: which rows to look in, and whether they are a mirror's.
+   *
+   * @param name the name to query rows by — <b>not</b> always the one the client sent, because a Hub
+   *     namespace expands a single-component image and an unknown first segment may have been
+   *     remapped into the Hub namespace
+   * @param type the resolved repository's type, so a caller can say why a miss is a miss
+   * @param upstreamDomain the registry the namespace fronts, or null for a hosted repository (and
+   *     for a mirror whose upstream row was deleted while its cache stayed)
+   */
+  public record PullTarget(OciImageName name, RepositoryType type, String upstreamDomain) {
+
+    public boolean mirror() {
+      return type == RepositoryType.OCI_MIRROR;
+    }
+  }
+
+  /**
+   * Resolves an OCI {@code <name>} for a <b>write</b>: the repository must exist and must be one
+   * this registry accepts content into.
    *
    * <p>Repositories are not created implicitly. A push to an unknown first segment is {@code
    * NAME_UNKNOWN}, and an operator creates it with the ordinary {@code PUT
@@ -57,11 +77,27 @@ public class OciRegistryService {
    * own publish convention uses: {@link ArtifactsRepositorySeeder} seeds that row at startup, so a
    * fresh deployment accepts {@code qits/<application>:<sha>} with no manual step. Every other
    * namespace still has to be asked for.
+   *
+   * <p><b>A mirror namespace is refused by type</b>, with {@code 405} and the type's name in the
+   * message — the npm two-part shape ({@code NpmRoutes.publish}). A pull-through cache that accepted
+   * a push would let cached upstream content and pushed content share a namespace, which is the one
+   * thing the separate type exists to prevent; and because it is the type refusing, no deployment
+   * can configure its way past it and no repository can drift from one meaning to the other.
    */
   @ActivateRequestContext
   public OciImageName requireOciRepository(String name) {
     OciImageName parsed = OciImageName.parse(name);
     ArtifactRepository repository = repositories.findById(parsed.repository());
+    if (repository != null && repository.type == RepositoryType.OCI_MIRROR) {
+      throw new OciException(
+          OciCode.UNSUPPORTED,
+          405,
+          "'"
+              + parsed.repository()
+              + "' is a pull-through cache of an upstream registry and accepts no pushes; push to an"
+              + " oci-images repository instead",
+          Map.of("name", parsed.full(), "type", RepositoryType.OCI_MIRROR.wireName()));
+    }
     if (repository == null || repository.type != RepositoryType.OCI_IMAGES) {
       throw new OciException(
           OciCode.NAME_UNKNOWN,
@@ -71,6 +107,62 @@ public class OciRegistryService {
           Map.of("name", parsed.full()));
     }
     return parsed;
+  }
+
+  /**
+   * Resolves an OCI {@code <name>} for a <b>read</b>, through the upstream table.
+   *
+   * <p>Three answers, in this order, and the order is the whole of the precedence rule:
+   *
+   * <ol>
+   *   <li>An {@code oci-images} row — the hosted registry, unchanged code.
+   *   <li>An {@code oci-mirror} row — a registered namespace. The image name is normalised the way
+   *       the upstream spells it, which today means Hub's {@code alpine} → {@code library/alpine}.
+   *   <li>No row at all — the {@code registry-mirrors} remap. A daemon configured to mirror Docker
+   *       Hub asks for bare Hub names ({@code /v2/library/alpine/…}), so a first segment naming no
+   *       repository is answered out of the Hub namespace when one is registered. <b>Existing
+   *       repositories always win</b>, so {@code /v2/qits/…} never reaches this; the known
+   *       consequence is that a Hub organisation sharing a name with a local repository is shadowed,
+   *       which is the correct precedence here.
+   * </ol>
+   *
+   * <p>Nothing is fetched. A mirror namespace resolves whether or not anything is cached under it,
+   * and a miss is the caller's 404 to phrase — see the routes, which say the mirror holds no copy
+   * rather than that the image does not exist.
+   */
+  @ActivateRequestContext
+  public PullTarget resolveForPull(String name) {
+    OciImageName parsed = OciImageName.parse(name);
+    ArtifactRepository repository = repositories.findById(parsed.repository());
+
+    if (repository != null && repository.type == RepositoryType.OCI_IMAGES) {
+      return new PullTarget(parsed, RepositoryType.OCI_IMAGES, null);
+    }
+    if (repository != null && repository.type == RepositoryType.OCI_MIRROR) {
+      OciMirrorUpstream upstream = mirrors.bySlug(parsed.repository()).orElse(null);
+      return mirrorTarget(parsed.repository(), OciMirrorUpstreams.normalize(upstream, parsed.image()), upstream);
+    }
+    if (repository == null) {
+      OciMirrorUpstream hub = mirrors.hub().orElse(null);
+      if (hub != null) {
+        // The remap: the whole name the client sent becomes the image inside the Hub namespace, so
+        // `library/alpine` is cached exactly where a `hub/library/alpine` pull would put it.
+        return mirrorTarget(hub.slug, parsed.full(), hub);
+      }
+    }
+    throw new OciException(
+        OciCode.NAME_UNKNOWN,
+        "no such image repository; create it with PUT /artifacts/api/repositories/"
+            + parsed.repository()
+            + " {\"type\":\"oci-images\"}, or register a mirror upstream for it",
+        Map.of("name", parsed.full()));
+  }
+
+  private static PullTarget mirrorTarget(String slug, String image, OciMirrorUpstream upstream) {
+    return new PullTarget(
+        new OciImageName(slug, image, slug + "/" + image),
+        RepositoryType.OCI_MIRROR,
+        upstream == null ? null : upstream.domain);
   }
 
   /**

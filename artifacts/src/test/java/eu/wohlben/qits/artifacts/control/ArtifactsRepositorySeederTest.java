@@ -2,6 +2,7 @@ package eu.wohlben.qits.artifacts.control;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+import eu.wohlben.qits.artifacts.dto.MirrorUpstreamSummary;
 import eu.wohlben.qits.artifacts.entity.RepositoryType;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -23,8 +24,10 @@ class ArtifactsRepositorySeederTest extends ArtifactsTestSupport {
 
   @Inject ArtifactRepositoryService service;
 
+  @Inject OciMirrorUpstreams upstreams;
+
   @Test
-  void seedsTheTwoCiTypesThePlatformImageRepositoryAndTheTwoNpmRoots() {
+  void seedsTheTwoCiTypesThePlatformImageRepositoryTheTwoNpmRootsAndTheThreeMirrorNamespaces() {
     seeder.ensureDefaults();
     assertEquals(
         Map.of(
@@ -32,8 +35,26 @@ class ArtifactsRepositorySeederTest extends ArtifactsTestSupport {
             ArtifactsRepositorySeeder.CI_VIDEOS, RepositoryType.CI_VIDEOS,
             ArtifactsRepositorySeeder.IMAGES, RepositoryType.OCI_IMAGES,
             ArtifactsRepositorySeeder.NPM, RepositoryType.NPM_PACKAGES,
-            ArtifactsRepositorySeeder.NPM_PROXY, RepositoryType.NPM_PROXY),
+            ArtifactsRepositorySeeder.NPM_PROXY, RepositoryType.NPM_PROXY,
+            "hub", RepositoryType.OCI_MIRROR,
+            "quay", RepositoryType.OCI_MIRROR,
+            "redhat", RepositoryType.OCI_MIRROR),
         seededTypesByName());
+  }
+
+  @Test
+  void everyMirrorNamespaceIsSeededWithTheUpstreamItFronts() {
+    // The pairing, from the boot path rather than from the migration: a repository row with no
+    // upstream is a namespace nothing can be fetched into, and an upstream with no repository row is
+    // a namespace nothing resolves to. Neither half is useful alone, so neither is written alone.
+    seeder.ensureDefaults();
+    assertEquals(
+        Map.of(
+            "docker.io", "hub",
+            "quay.io", "quay",
+            "registry.access.redhat.com", "redhat"),
+        upstreams.list().stream()
+            .collect(Collectors.toMap(MirrorUpstreamSummary::domain, MirrorUpstreamSummary::slug)));
   }
 
   @Test
@@ -42,7 +63,8 @@ class ArtifactsRepositorySeederTest extends ArtifactsTestSupport {
     // the seed must never be what keeps a restarted instance from coming up.
     seeder.ensureDefaults();
     seeder.ensureDefaults();
-    assertEquals(5, service.list().size());
+    assertEquals(8, service.list().size());
+    assertEquals(3, upstreams.list().size());
   }
 
   private Map<String, RepositoryType> seededTypesByName() {

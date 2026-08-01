@@ -102,6 +102,98 @@ abstract class GcFixture extends ArtifactsTestSupport {
         manifestDoomed);
   }
 
+  /** What {@link #seedMirror()} built. */
+  record MirrorStore(
+      String config, String layer, String child, String index, String absentChild) {}
+
+  static final int MIRROR_CONFIG = 11;
+  static final int MIRROR_LAYER = 700;
+  static final int ABSENT_CHILD = 900;
+
+  /**
+   * One cached multi-arch image in a mirror namespace, <b>with one child that was never fetched</b>.
+   *
+   * <p>That missing child is the fixture's whole point. A push arrives children-first — the registry
+   * refuses an index whose children it does not have — but a <em>pull</em> arrives index-first, and
+   * the mirror binds it immediately and fetches children lazily, each on its own miss, so it never
+   * pays an upstream for an architecture nobody pulled. A mirror index referencing a child with no
+   * local row is therefore the normal state of a partially-pulled image, not a corruption, and every
+   * reader that walks manifests has to survive it.
+   */
+  MirrorStore seedMirror() throws IOException {
+    repositoryService.ensure(MIRROR_REPO, RepositoryType.OCI_MIRROR);
+
+    String config = store(filled(MIRROR_CONFIG, (byte) 6));
+    String layer = store(filled(MIRROR_LAYER, (byte) 7));
+    byte[] childBytes = imageManifest(config, Map.of(layer, (long) MIRROR_LAYER), MIRROR_CONFIG);
+    String child = store(childBytes);
+    // Never stored and never rowed: the architecture nobody pulled.
+    String absentChild = "a".repeat(64);
+    byte[] indexBytes =
+        indexManifest(Map.of(child, (long) childBytes.length, absentChild, (long) ABSENT_CHILD));
+    String index = store(indexBytes);
+
+    QuarkusTransaction.requiringNew()
+        .run(
+            () -> {
+              ociManifests.persist(
+                  mirrorManifest(child, childBytes.length, OciMediaTypes.OCI_MANIFEST_V1));
+              ociManifests.persist(
+                  mirrorManifest(index, indexBytes.length, OciMediaTypes.OCI_INDEX_V1));
+              ociTags.persist(mirrorTag("jdk-25", index));
+            });
+
+    for (String blobId : List.of(config, layer, child, index)) {
+      backdate(blobId, Duration.ofDays(30));
+    }
+    return new MirrorStore(config, layer, child, index, absentChild);
+  }
+
+  static final String MIRROR_REPO = "quay";
+  static final String MIRROR_IMAGE = "quarkus/ubi9-quarkus-mandrel-builder-image";
+
+  private static OciManifest mirrorManifest(String digest, long size, String mediaType) {
+    OciManifest row = new OciManifest();
+    row.repository = MIRROR_REPO;
+    row.imageName = MIRROR_IMAGE;
+    row.digest = digest;
+    row.mediaType = mediaType;
+    row.size = size;
+    row.createdAt = Instant.now();
+    return row;
+  }
+
+  private static OciTag mirrorTag(String name, String digest) {
+    OciTag row = new OciTag();
+    row.repository = MIRROR_REPO;
+    row.imageName = MIRROR_IMAGE;
+    row.tag = name;
+    row.manifestDigest = digest;
+    row.updatedAt = Instant.now();
+    return row;
+  }
+
+  /** A real OCI index — the children are manifests, not blobs, which is what makes the walk recurse. */
+  static byte[] indexManifest(Map<String, Long> children) {
+    List<String> descriptors = new ArrayList<>();
+    children.forEach(
+        (digest, size) ->
+            descriptors.add(
+                "{\"mediaType\":\""
+                    + OciMediaTypes.OCI_MANIFEST_V1
+                    + "\",\"digest\":\"sha256:"
+                    + digest
+                    + "\",\"size\":"
+                    + size
+                    + "}"));
+    return ("{\"schemaVersion\":2,\"mediaType\":\""
+            + OciMediaTypes.OCI_INDEX_V1
+            + "\",\"manifests\":["
+            + String.join(",", descriptors)
+            + "]}")
+        .getBytes(StandardCharsets.UTF_8);
+  }
+
   String store(byte[] bytes) {
     BlobStore.StagedBlob staged = blobStore.stage(new ByteArrayInputStream(bytes), Long.MAX_VALUE);
     blobStore.promote(staged);
@@ -116,6 +208,11 @@ abstract class GcFixture extends ArtifactsTestSupport {
 
   /** A real OCI image manifest — the footprint parser reads these bytes, so a stub proves nothing. */
   static byte[] imageManifest(String configDigest, Map<String, Long> layers) {
+    return imageManifest(configDigest, layers, CONFIG);
+  }
+
+  /** The same, for a fixture whose config blob is not {@link #CONFIG} bytes long. */
+  static byte[] imageManifest(String configDigest, Map<String, Long> layers, int configSize) {
     List<String> descriptors = new ArrayList<>();
     layers.forEach(
         (digest, size) ->
@@ -131,7 +228,7 @@ abstract class GcFixture extends ArtifactsTestSupport {
             + "\"digest\":\"sha256:"
             + configDigest
             + "\",\"size\":"
-            + CONFIG
+            + configSize
             + "},\"layers\":["
             + String.join(",", descriptors)
             + "]}")

@@ -22,8 +22,22 @@ public record OciImageName(String repository, String image, String full) {
   /** One path component of a name, per the Distribution spec's grammar. */
   private static final String COMPONENT = "[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*";
 
+  private static final Pattern COMPONENT_ONLY = Pattern.compile(COMPONENT);
+
   private static final Pattern NAME =
       Pattern.compile(COMPONENT + "(?:/" + COMPONENT + ")*");
+
+  /**
+   * Whether a string is a single, legal name component — which is exactly what a repository name has
+   * to be to be reachable at {@code /v2}.
+   *
+   * <p>Exposed so a mirror upstream's slug is checked against <b>this</b> grammar rather than a
+   * second copy of it: a slug that is not a component names a namespace no puller can address, and
+   * finding that out at pull time reads as a broken registry rather than as a bad slug.
+   */
+  public static boolean isComponent(String value) {
+    return value != null && COMPONENT_ONLY.matcher(value).matches();
+  }
 
   /**
    * Splits a name.

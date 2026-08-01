@@ -7,6 +7,7 @@ import eu.wohlben.qits.artifacts.persistence.NpmProxyPackumentRepository;
 import eu.wohlben.qits.artifacts.persistence.NpmVersionRepository;
 import eu.wohlben.qits.artifacts.persistence.NpmVersionTombstoneRepository;
 import eu.wohlben.qits.artifacts.persistence.OciManifestRepository;
+import eu.wohlben.qits.artifacts.persistence.OciMirrorUpstreamRepository;
 import eu.wohlben.qits.artifacts.persistence.OciTagRepository;
 import io.quarkus.narayana.jta.QuarkusTransaction;
 import jakarta.inject.Inject;
@@ -41,6 +42,8 @@ abstract class ArtifactsTestSupport {
 
   @Inject NpmProxyPackumentRepository npmProxyPackuments;
 
+  @Inject OciMirrorUpstreamRepository mirrorUpstreams;
+
   @Inject BlobDiskIndex diskIndex;
 
   @ConfigProperty(name = "qits.artifacts.blobs-dir")
@@ -60,6 +63,9 @@ abstract class ArtifactsTestSupport {
               npmVersionTombstones.deleteAll();
               npmProxyPackuments.deleteAll();
               records.deleteAll();
+              // The mirror upstreams too: their slug is a foreign key into artifact_repository, so
+              // the pairing that makes a namespace resolvable is also what makes the wipe ordered.
+              mirrorUpstreams.deleteAll();
               repositories.deleteAll();
             });
     Path dir = Path.of(blobsDir);

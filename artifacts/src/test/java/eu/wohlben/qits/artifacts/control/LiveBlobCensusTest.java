@@ -1,6 +1,7 @@
 package eu.wohlben.qits.artifacts.control;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.artifacts.dto.StoreSummary;
@@ -49,8 +50,56 @@ class LiveBlobCensusTest extends GcFixture {
         sorted(store.tarball(), store.shared()),
         sorted(taken.live(RepositoryType.NPM_PACKAGES).keySet()));
     assertEquals(Set.of(), taken.live(RepositoryType.NPM_PROXY).keySet());
+    assertEquals(Set.of(), taken.live(RepositoryType.OCI_MIRROR).keySet());
     assertEquals(Set.of(), taken.live(RepositoryType.CI_SCREENSHOTS).keySet());
     assertEquals(Set.of(), taken.live(RepositoryType.CI_VIDEOS).keySet());
+  }
+
+  @Test
+  void whatAMirrorCachedIsLiveUnderItsOwnTypeRatherThanOrphaned() throws Exception {
+    // The pin the mirror plan asks for. Cached bytes have manifest rows like any other, so the
+    // closure reaches them — but only if the census WALKS the new type. Without that line they are
+    // row-less: reported as orphans by the store summary and, worse, indistinguishable from the
+    // untouchable pool in every later reading.
+    seed();
+    MirrorStore mirror = seedMirror();
+
+    LiveBlobCensus.Census taken = census.take();
+
+    assertTrue(
+        taken.live(RepositoryType.OCI_MIRROR).keySet().containsAll(
+            Set.of(mirror.index(), mirror.child(), mirror.config(), mirror.layer())),
+        "the index, its fetched child, and that child's config and layer");
+    assertTrue(
+        taken.rowless().stream().noneMatch(Set.of(mirror.index(), mirror.child(), mirror.config(), mirror.layer())::contains),
+        "nothing a mirror cached may be classified as an orphan");
+    assertFalse(
+        taken.live(RepositoryType.OCI_IMAGES).containsKey(mirror.layer()),
+        "and it is the MIRROR's live set, not the hosted registry's — the two types are collected"
+            + " under different rules");
+  }
+
+  @Test
+  void aMirrorIndexWhoseChildWasNeverFetchedIsWalkedRatherThanRefused() throws Exception {
+    // The lazy pull order, as the census sees it: an index binds first and its children arrive one
+    // miss at a time, so an index pointing at a manifest with no local row is the normal state of a
+    // partially-pulled image. The walk must survive it and keep counting — the property is lenient
+    // by construction (OciManifestParser.sizedReferences), and this is the test rather than the
+    // assumption the plan asked for.
+    MirrorStore mirror = seedMirror();
+
+    LiveBlobCensus.Census taken = census.take();
+
+    assertTrue(
+        taken.live(RepositoryType.OCI_MIRROR).containsKey(mirror.child()),
+        "the child that WAS fetched is still reached — the walk did not stop at the missing one");
+    assertTrue(
+        taken.live(RepositoryType.OCI_MIRROR).containsKey(mirror.absentChild()),
+        "and the missing one is counted at its declared size, which is all that is known of it");
+    assertEquals(
+        0L,
+        taken.bytesOnDisk(Set.of(mirror.absentChild())),
+        "it frees nothing, because there is no file: a declared size is not bytes on disk");
   }
 
   @Test
@@ -86,6 +135,7 @@ class LiveBlobCensusTest extends GcFixture {
     StoreSummary summary = explorer.storeSummary();
 
     assertEquals(taken.liveBytes(RepositoryType.OCI_IMAGES), summary.ociUnionBytes());
+    assertEquals(taken.liveBytes(RepositoryType.OCI_MIRROR), summary.ociMirrorBytes());
     assertEquals(taken.liveBytes(RepositoryType.NPM_PACKAGES), summary.npmPublishedBytes());
     assertEquals(taken.liveBytes(RepositoryType.NPM_PROXY), summary.npmProxyTarballBytes());
     assertEquals(taken.rowlessBytes(), summary.orphanBytes());

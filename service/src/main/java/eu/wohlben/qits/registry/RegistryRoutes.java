@@ -43,6 +43,13 @@ import org.jboss.logging.Logger;
  * two rules that makes mandatory. The manifest routes do buffer, deliberately: a manifest is small
  * JSON that has to be digested and parsed as a whole, and is capped far below the wire ceiling.
  *
+ * <p><b>Two kinds of namespace answer on these routes.</b> A hosted {@code oci-images} repository is
+ * the original path, unchanged. A registered mirror namespace ({@code oci-mirror}) serves cached
+ * upstream content from the same rows through the same handlers — the difference is in two places
+ * only: a read resolves through {@code OciRegistryService.resolveForPull}, which consults the
+ * upstream table, and every write refuses by type with {@code 405}. Nothing here fetches: a mirror
+ * miss is an honest 404 saying so until workstream BX lands the miss path.
+ *
  * <p>No handler here calls {@code rc.fail()}. Quarkus installs {@code QuarkusErrorHandler} as the
  * router's failure handler and it answers in a shape no registry client can read, so every handler
  * catches and writes its own response — the discipline {@code GitHostRoutes.fail()} already follows.
@@ -177,7 +184,7 @@ public class RegistryRoutes {
 
   /** {@code GET|HEAD /v2/<name>/blobs/<digest>} — the pull path. */
   private void serveBlob(RoutingContext rc, boolean withBody) {
-    registry.requireOciRepository(rc.pathParam("name"));
+    OciRegistryService.PullTarget target = registry.resolveForPull(rc.pathParam("name"));
     String wireDigest = rc.pathParam("digest");
     String hex = OciDigest.requireHex(wireDigest);
 
@@ -187,8 +194,12 @@ public class RegistryRoutes {
       path = blobStore.locate(hex);
       size = Files.size(path);
     } catch (Exception missing) {
-      throw new OciException(
-          OciCode.BLOB_UNKNOWN, "blob unknown to registry", Map.of("digest", wireDigest));
+      throw notCached(
+          target,
+          OciCode.BLOB_UNKNOWN,
+          "blob unknown to registry",
+          "this mirror has no cached copy of that blob",
+          Map.of("digest", wireDigest));
     }
 
     HttpServerResponse response = rc.response();
@@ -445,18 +456,20 @@ public class RegistryRoutes {
 
   /** {@code GET|HEAD /v2/<name>/manifests/<ref>} — {@code <ref>} is a tag or a digest. */
   private void serveManifest(RoutingContext rc, boolean withBody) {
-    OciImageName name = registry.requireOciRepository(rc.pathParam("name"));
+    OciRegistryService.PullTarget target = registry.resolveForPull(rc.pathParam("name"));
     String reference = rc.pathParam("ref");
     requireWellFormedReference(reference);
 
     OciRegistryService.StoredManifest manifest =
         registry
-            .resolveManifest(name, reference)
+            .resolveManifest(target.name(), reference)
             .orElseThrow(
                 () ->
-                    new OciException(
+                    notCached(
+                        target,
                         OciCode.MANIFEST_UNKNOWN,
                         "manifest unknown to this image",
+                        "this mirror has no cached copy of that manifest",
                         Map.of("reference", reference)));
 
     // Accept is deliberately ignored. We never convert between manifest schemas, so returning what
@@ -524,7 +537,7 @@ public class RegistryRoutes {
 
   /** {@code GET /v2/<name>/tags/list}, with the spec's {@code ?n=} and {@code ?last=} paging. */
   private void listTags(RoutingContext rc) {
-    OciImageName name = registry.requireOciRepository(rc.pathParam("name"));
+    OciImageName name = registry.resolveForPull(rc.pathParam("name")).name();
     int limit = pageSize(rc.request().getParam("n"));
     String last = rc.request().getParam("last");
 
@@ -564,6 +577,41 @@ public class RegistryRoutes {
   }
 
   // --- plumbing ---------------------------------------------------------------------------------
+
+  /**
+   * The 404 a miss gets, phrased for the namespace it missed in.
+   *
+   * <p>In a hosted repository the answer is unchanged: the image does not have that manifest or that
+   * blob. In a <b>mirror</b> namespace the same status carries a different fact — the namespace is
+   * real, the reference may well exist upstream, and this registry simply holds no copy of it. Until
+   * the miss path lands (workstream BX) that is the whole truth about a mirror miss, and saying it
+   * is what keeps a puller from reading a 404 as "your mirror is misconfigured".
+   *
+   * <p>The shape is deliberately the one BX inherits: a mirror miss is already the single place a
+   * fetch will be attempted from, so BX changes what happens here, not where.
+   */
+  private static OciException notCached(
+      OciRegistryService.PullTarget target,
+      OciCode code,
+      String hostedMessage,
+      String mirrorMessage,
+      Map<String, Object> detail) {
+    if (!target.mirror()) {
+      return new OciException(code, hostedMessage, detail);
+    }
+    Map<String, Object> mirrorDetail = new java.util.HashMap<>(detail);
+    mirrorDetail.put("namespace", target.name().repository());
+    if (target.upstreamDomain() != null) {
+      mirrorDetail.put("upstream", target.upstreamDomain());
+    }
+    return new OciException(
+        code,
+        mirrorMessage
+            + (target.upstreamDomain() == null
+                ? "; no upstream is registered for this namespace, so nothing can be fetched into it"
+                : ", and it does not fetch from " + target.upstreamDomain() + " yet"),
+        mirrorDetail);
+  }
 
   /**
    * Wraps a handler so every throwable becomes the spec's error envelope rather than

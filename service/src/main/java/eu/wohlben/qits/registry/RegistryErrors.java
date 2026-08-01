@@ -83,7 +83,9 @@ final class RegistryErrors {
    */
   static void fail(RoutingContext rc, String what, Throwable thrown) {
     switch (thrown) {
-      case OciException e -> send(rc, e.code(), e.getMessage(), e.detail());
+      // The exception's status, not the code's: they differ wherever a code carries more than one
+      // meaning — UNSUPPORTED is a 404 for an unserved route and a 405 for a refused operation.
+      case OciException e -> send(rc, e.statusCode(), e.code(), e.getMessage(), e.detail());
       case PayloadTooLargeException e -> send(rc, OciCode.SIZE_INVALID, e.getMessage());
       case NotFoundException e -> send(rc, OciCode.BLOB_UNKNOWN, e.getMessage());
       case BadRequestException e -> send(rc, OciCode.BLOB_UPLOAD_INVALID, e.getMessage());

@@ -103,7 +103,36 @@ public enum RepositoryType {
    * set it up, and no repository can drift from one meaning to the other — {@code
    * ArtifactRepositoryService.ensure} makes a repository's type immutable.
    */
-  NPM_PROXY(Set.of(), Set.of(), 0L);
+  NPM_PROXY(Set.of(), Set.of(), 0L),
+
+  /**
+   * A <b>pull-through cache</b> of an upstream container registry, served on the same {@code /v2}
+   * routes as {@link #OCI_IMAGES}.
+   *
+   * <p>A protocol type on the {@link #OCI_IMAGES} pattern, and everything that javadoc says about
+   * empty profiles and a zero cap holds verbatim — a mirrored layer arrives on the registry's own
+   * wire routes and goes straight to {@code BlobStore}, so there is no media type to sniff and no
+   * metadata to require. The real cap is {@code qits.artifacts.oci.max-layer-size}, the same one the
+   * hosted type is bounded by.
+   *
+   * <p>One row per registered upstream, named by that upstream's local namespace segment: {@code
+   * hub}, {@code quay}, {@code redhat}, paired with an {@code oci_mirror_upstream} row carrying the
+   * domain it fronts. So {@code docker pull <host>/quay/quarkus/ubi9-…:jdk-25} reads like what it
+   * is, and every future per-upstream property (a credential, a per-upstream TTL) has a row to hang
+   * on. Cached content lives in ordinary {@code oci_manifest}/{@code oci_tag} rows under the slug.
+   *
+   * <p><b>A push here is refused by type</b>, exactly as {@link #NPM_PROXY} refuses a publish:
+   * cached upstream content and pushed content must never share a namespace, and no repository can
+   * drift from one meaning to the other because {@code ArtifactRepositoryService.ensure} makes a
+   * type immutable. The refusal is {@code 405}, not a configuration.
+   *
+   * <p>Garbage collection is <b>append-only</b> ({@code OciMirrorGcStrategy}, ⚖2): a cache's
+   * eviction is access-based, and access tracking is its own feature. The separate type is what
+   * keeps that decision from distorting {@link #OCI_IMAGES}'s rules — a mirror tag like {@code
+   * jdk-25} is neither a calver release nor a build sha, and would otherwise be kept by docker's
+   * unclassified-means-keep rule and reported as if somebody had decided something.
+   */
+  OCI_MIRROR(Set.of(), Set.of(), 0L);
 
   private final Set<String> allowedMediaTypes;
   private final Set<String> requiredMetadataKeys;
