@@ -202,6 +202,13 @@ is exactly why the artifacts→ci seam survived the split untouched: only the ur
 [qits-ci](https://github.com/QuicklyIterateTheSoftware/qits-ci) becomes its own deployable. It is
 fire-and-forget — a failed delivery is a missed advisory run, never a failed push.
 
+qits-ci's intake wants a bearer minted by qits-idp for `aud=qits-ci`, so the notifier attaches one
+when this deployment has client credentials (`quarkus.oidc-client.client-enabled` plus
+`QITS_ARTIFACTS_CLIENT_SECRET`). Without them nothing is fetched and the POST goes out as it always
+has, which is what lets the two services cut over one at a time. This service hosts every project's
+repositories, so its client at the idp is granted `project=*` — qits-ci's guard matches the event's
+project against that claim.
+
 ## The OCI registry
 
 `RegistryRoutes` serves the [OCI Distribution
@@ -1090,6 +1097,8 @@ app's `application.properties` overrides them.
 | `qits.repositories.git.storage` | `file` | which git storage backend serves repositories — `file` (bare origins on the volume) or `dfs` (packs and refs as blobs in this service's own store). Runtime; an unknown value fails the boot |
 | `qits.ci.intake-url` | `http://localhost:8080/ci/api/events/post-receive` | post-receive delivery |
 | `qits.ci.token` | blank | `X-CI-Token` on those events |
+| `quarkus.oidc-client.client-enabled` | `false` | whether those events carry a bearer for `aud=qits-ci`. On needs `QITS_ARTIFACTS_CLIENT_SECRET`, or the boot fails |
+| `quarkus.oidc.auth-server-url` | `http://qits-idp:8080/idp` | the idp, reached direct on qits-net. Both the validation above and the token fetch use it |
 | `qits.artifacts.oci.max-layer-size` | `1G` | the registry's per-layer cap, enforced while streaming |
 | `qits.artifacts.oci.max-manifest-size` | `4M` | manifests are buffered whole to be digested and parsed |
 | `qits.artifacts.oci.upload-session-ttl` | `PT30M` | in-memory upload sessions; lost on restart, by design |

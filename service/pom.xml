@@ -95,6 +95,17 @@
             <artifactId>quarkus-oidc</artifactId>
         </dependency>
         <dependency>
+            <!-- The other direction: this service CALLS qits-ci with the git host's post-receive
+                 events, and that intake wants a bearer. The extension fetches, caches and refreshes
+                 the token; CiPostReceiveNotifier only attaches it.
+
+                 Disabled by default (quarkus.oidc-client.client-enabled), so with no client
+                 credentials configured nothing is fetched and the notifier posts exactly as it
+                 always has. -->
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-oidc-client</artifactId>
+        </dependency>
+        <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-rest-jackson</artifactId>
         </dependency>
