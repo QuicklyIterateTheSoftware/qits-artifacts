@@ -76,7 +76,12 @@ import java.util.regex.Pattern;
  * throw out, which is the interface's documented fail-closed answer — the planner reports the type as
  * failed and the sweep keeps every OCI blob the census found.
  *
- * <p>Nothing here deletes. The {@link Plan} is read by a report; there is no execute surface.
+ * <p>{@link #plan} still deletes nothing — a report reads it. Deletion is {@link #apply}, invoked
+ * only by the executor behind {@code POST /artifacts/api/gc/sweep}, on a plan computed in the same
+ * request. Tag rows go through {@code OciRegistryService.collectTag}, manifest rows through {@code
+ * collectManifest} (which refuses a manifest a tag still names — the mechanism's own belt), and an
+ * identity whose released blobs are still inside the grace window is withheld whole, rows intact,
+ * because a deleted row over an in-grace blob would strand the blob as row-less and untouchable.
  *
  * <p>{@code @Singleton} rather than the {@code @ApplicationScoped} everything else here carries, and
  * the reason is the report: {@link GcPlanner} names the strategy by {@code
@@ -119,6 +124,7 @@ public class OciImageGcStrategy implements GcStrategy {
   @Inject OciManifestRepository manifests;
   @Inject OciManifestFootprints footprints;
   @Inject CdDeploymentPins pins;
+  @Inject OciRegistryService registry;
 
   @Override
   public RepositoryType type() {
@@ -149,6 +155,97 @@ public class OciImageGcStrategy implements GcStrategy {
     dead.sort(BY_IDENTITY);
     kept.sort(BY_IDENTITY);
     return dead.isEmpty() ? Plan.nothingDies(kept, retained) : new Plan(dead, kept, released, retained);
+  }
+
+  /**
+   * The execute half: tag rows first, then manifest rows, both parsed back out of identities this
+   * class spelled itself minutes ago — {@code image:tag} and {@code image@sha256:digest}, formats
+   * {@link #collect} owns end to end.
+   *
+   * <p>Tags before manifests is load-bearing: a dead tag over a dead manifest must lose its row
+   * before {@code collectManifest}'s a-tag-still-names-it belt looks. The two condemn the same
+   * closure, so the grace gate always gives them the same answer — withheld together or deleted
+   * together, never a tag left dangling over a removed manifest.
+   */
+  @Override
+  public Applied apply(Plan plan, GraceWindow grace) {
+    List<GcIdentity> deleted = new ArrayList<>();
+    List<GcIdentity> withheld = new ArrayList<>();
+    List<String> errors = new ArrayList<>();
+    for (GcIdentity dead : plan.dead()) {
+      if (DEAD_TAG.equals(dead.rule())) {
+        applyTag(dead, grace, deleted, withheld, errors);
+      }
+    }
+    for (GcIdentity dead : plan.dead()) {
+      if (DEAD_MANIFEST.equals(dead.rule())) {
+        applyManifest(dead, grace, deleted, withheld, errors);
+      } else if (!DEAD_TAG.equals(dead.rule())) {
+        errors.add(dead.identity() + ": condemned under an unknown rule, refusing to apply it");
+      }
+    }
+    return new Applied(deleted, withheld, errors);
+  }
+
+  private void applyTag(
+      GcIdentity dead,
+      GraceWindow grace,
+      List<GcIdentity> deleted,
+      List<GcIdentity> withheld,
+      List<String> errors) {
+    // An image name cannot contain a colon, so the last one separates image from tag.
+    int colon = dead.identity().lastIndexOf(':');
+    String image = dead.identity().substring(0, colon);
+    String tagName = dead.identity().substring(colon + 1);
+    try {
+      OciTag row = tags.findOne(dead.repository(), image, tagName).orElse(null);
+      if (row == null) {
+        errors.add(dead.identity() + ": no such tag row — the store moved since planning");
+        return;
+      }
+      if (anyWithinGrace(dead.repository(), image, row.manifestDigest, grace)) {
+        withheld.add(dead);
+        return;
+      }
+      registry.collectTag(dead.repository(), image, tagName);
+      deleted.add(dead);
+    } catch (RuntimeException failed) {
+      errors.add(dead.identity() + ": " + failed.getMessage());
+    }
+  }
+
+  private void applyManifest(
+      GcIdentity dead,
+      GraceWindow grace,
+      List<GcIdentity> deleted,
+      List<GcIdentity> withheld,
+      List<String> errors) {
+    int at = dead.identity().lastIndexOf("@sha256:");
+    String image = dead.identity().substring(0, at);
+    String digest = dead.identity().substring(at + "@sha256:".length());
+    try {
+      if (anyWithinGrace(dead.repository(), image, digest, grace)) {
+        withheld.add(dead);
+        return;
+      }
+      registry.collectManifest(dead.repository(), image, digest);
+      deleted.add(dead);
+    } catch (RuntimeException failed) {
+      errors.add(dead.identity() + ": " + failed.getMessage());
+    }
+  }
+
+  /**
+   * Whether any blob the manifest's closure releases is still inside the grace window — the whole
+   * gate on identity deletion. A manifest row that is already gone gates on nothing.
+   */
+  private boolean anyWithinGrace(
+      String repository, String image, String digest, GraceWindow grace) {
+    OciManifest manifest = manifests.findOne(repository, image, digest).orElse(null);
+    if (manifest == null) {
+      return false;
+    }
+    return footprints.of(manifest).keySet().stream().anyMatch(grace::withinGrace);
   }
 
   private void collect(

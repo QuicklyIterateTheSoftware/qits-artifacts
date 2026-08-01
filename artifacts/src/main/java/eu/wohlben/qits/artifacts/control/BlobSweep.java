@@ -1,5 +1,6 @@
 package eu.wohlben.qits.artifacts.control;
 
+import eu.wohlben.qits.artifacts.dto.GcSweepOutcome;
 import eu.wohlben.qits.artifacts.dto.GcSweepPlan;
 import eu.wohlben.qits.artifacts.dto.GcUntouchablePool;
 import eu.wohlben.qits.artifacts.entity.RepositoryType;
@@ -23,16 +24,18 @@ import java.util.TreeSet;
  * repositories. That split is what makes "one strategy per type" safe by construction — a strategy
  * cannot free a blob another type still needs, because a strategy never frees anything.
  *
- * <p><b>It does not delete, this workstream.</b> {@link #plan} reports what it would unlink and
- * there is no method that unlinks: the platform has never deleted a byte, and the first one goes
- * after a human has read these reports. {@link BlobStore#delete} exists, is package-private, and
- * names this class as its only permitted caller — the loop that calls it lands with the flag that
- * turns collection on, not before.
+ * <p><b>{@link #plan} still deletes nothing</b> — it is what the dry-run report reads, and it must
+ * stay reviewable without side effects. The unlink loop is {@link #execute}, added after the user
+ * reviewed the dry-run, and it is still the <b>only</b> caller of {@link BlobStore#delete}: it runs
+ * only when {@code GcSweepExecutor} drives it behind {@code POST /artifacts/api/gc/sweep}, after
+ * the strategies have deleted their identity rows, against a census taken fresh after those
+ * deletions.
  */
 @ApplicationScoped
 public class BlobSweep {
 
   @Inject BlobStore blobStore;
+  @Inject LiveBlobCensus census;
 
   /**
    * Blobs no type reaches once every given plan is applied, with what they would free.
@@ -109,6 +112,75 @@ public class BlobSweep {
       reclaimable += size;
     }
     return new GcSweepPlan(sweepable.size(), reclaimable, withheld, withheldBytes, sweepable);
+  }
+
+  /**
+   * Unlinks what the applied plans freed — the one loop on this platform that deletes bytes.
+   *
+   * <p>Called after the strategies' identity deletions, with the census the plans were computed
+   * from. The safety order inside:
+   *
+   * <ol>
+   *   <li><b>Candidates are structural</b>: released by some plan, retained by none, on disk, and
+   *       rowed in the planning census — the same reconciliation the report shows, with the grace
+   *       filter left to the gates below.
+   *   <li><b>Grace-withheld candidates never reach the unlink.</b> Their identities were withheld
+   *       too (rows intact — the executor's gate), so they are counted once, as withheld, rather
+   *       than smeared across refusal counters.
+   *   <li><b>The pre-unlink re-census</b>: one fresh census taken here, after the row deletions.
+   *       A candidate something still references — a withheld identity of another type, a push
+   *       since planning — is skipped and counted. The same set backs the {@link
+   *       BlobStore.SweepGuard} asked again inside the store's write lock, so the check and the
+   *       unlink cannot be separated by a write.
+   *   <li>{@link BlobStore#delete} enforces the grace window and the guard once more, per blob,
+   *       inside the lock. Every refusal is a counted outcome, never an exception.
+   * </ol>
+   */
+  public GcSweepOutcome execute(
+      LiveBlobCensus.Census planned, Map<RepositoryType, GcStrategy.Plan> plans) {
+    GcSweepPlan structural = reconcile(planned, plans, false);
+    GcSweepPlan matured = reconcile(planned, plans, true);
+    Set<String> withheldIds = new HashSet<>(structural.blobIds());
+    withheldIds.removeAll(matured.blobIds());
+
+    LiveBlobCensus.Census fresh = census.take();
+    Set<String> referenced = fresh.referenced();
+    BlobStore.SweepGuard guard = blobId -> !referenced.contains(blobId);
+
+    int unlinked = 0;
+    long reclaimed = 0;
+    int withheld = matured.withheldByGraceWindow();
+    long withheldBytes = matured.withheldBytes();
+    int stillReferenced = 0;
+    int alreadyGone = 0;
+    List<String> unlinkedIds = new ArrayList<>();
+    for (String blobId : structural.blobIds()) {
+      if (withheldIds.contains(blobId)) {
+        continue; // counted in the withheld figures already; its identity rows are intact too
+      }
+      if (referenced.contains(blobId)) {
+        stillReferenced++;
+        continue;
+      }
+      long size = fresh.onDisk().getOrDefault(blobId, planned.onDisk().getOrDefault(blobId, 0L));
+      switch (blobStore.delete(blobId, guard)) {
+        case DELETED -> {
+          unlinked++;
+          reclaimed += size;
+          unlinkedIds.add(blobId);
+        }
+        case STILL_REFERENCED -> stillReferenced++;
+        case ALREADY_GONE, NOT_A_BLOB_ID -> alreadyGone++;
+        case WITHIN_GRACE_WINDOW -> {
+          // The store's own belt: the reconcile above judged this blob mature, the store's clock
+          // says otherwise at the unlink. Counted as withheld — that is what it is.
+          withheld++;
+          withheldBytes += size;
+        }
+      }
+    }
+    return new GcSweepOutcome(
+        unlinked, reclaimed, withheld, withheldBytes, stillReferenced, alreadyGone, unlinkedIds);
   }
 
   /**

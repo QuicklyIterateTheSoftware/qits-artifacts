@@ -3,6 +3,7 @@ package eu.wohlben.qits.artifacts.control;
 import eu.wohlben.qits.artifacts.dto.GcIdentity;
 import eu.wohlben.qits.artifacts.entity.ArtifactRepository;
 import eu.wohlben.qits.artifacts.entity.NpmDistTag;
+import eu.wohlben.qits.artifacts.entity.NpmVersion;
 import eu.wohlben.qits.artifacts.entity.RepositoryType;
 import eu.wohlben.qits.artifacts.persistence.ArtifactRepositoryRepository;
 import eu.wohlben.qits.artifacts.persistence.NpmDistTagRepository;
@@ -77,7 +78,13 @@ import java.util.regex.Pattern;
  * reads {@code npm_version} and {@code npm_dist_tag} directly and answers in the census's vocabulary
  * — tarball blob ids — which is what the substrate reconciles over.
  *
- * <p>Nothing here deletes. The {@link Plan} is read by a report; there is no execute surface.
+ * <p>{@link #plan} still deletes nothing — a report reads it. Deletion is {@link #apply}, invoked
+ * only by the executor behind {@code POST /artifacts/api/gc/sweep}, on a plan computed in the same
+ * request. Every row goes through {@code NpmRegistryService.collect}, which writes the republish
+ * tombstone in the same transaction and refuses a version a dist-tag still names — both guarantees
+ * are the mechanism's, so no path around them exists to forget. An identity whose tarball is still
+ * inside the grace window is withheld whole, row intact, because a deleted row over an in-grace
+ * blob would strand the blob as row-less and untouchable.
  *
  * <p>{@code @Singleton} rather than {@code @ApplicationScoped}, for the report's sake: a
  * normal-scoped bean answers {@code getClass().getSimpleName()} through its client proxy. {@link
@@ -118,10 +125,48 @@ public class NpmPackagesGcStrategy implements GcStrategy {
   @Inject ArtifactRepositoryRepository repositories;
   @Inject NpmVersionRepository versions;
   @Inject NpmDistTagRepository distTags;
+  @Inject NpmRegistryService npm;
 
   @Override
   public RepositoryType type() {
     return RepositoryType.NPM_PACKAGES;
+  }
+
+  /**
+   * The execute half: each dead version through {@code NpmRegistryService.collect}, one
+   * transaction per row so a refusal takes down its own identity and nothing else.
+   *
+   * <p>The identity is parsed back out of the spelling this class produced minutes ago — {@code
+   * <package>@<version>}. A scoped package starts with {@code @}, so the <em>last</em> {@code @}
+   * is the separator; the version cannot contain one.
+   */
+  @Override
+  public Applied apply(Plan plan, GraceWindow grace) {
+    List<GcIdentity> deleted = new ArrayList<>();
+    List<GcIdentity> withheld = new ArrayList<>();
+    List<String> errors = new ArrayList<>();
+    for (GcIdentity dead : plan.dead()) {
+      int at = dead.identity().lastIndexOf('@');
+      String packageName = dead.identity().substring(0, at);
+      String version = dead.identity().substring(at + 1);
+      try {
+        NpmVersion row =
+            versions.findOne(dead.repository(), packageName, version).orElse(null);
+        if (row == null) {
+          errors.add(dead.identity() + ": no such version row — the store moved since planning");
+          continue;
+        }
+        if (grace.withinGrace(row.tarballBlobId)) {
+          withheld.add(dead);
+          continue;
+        }
+        npm.collect(dead.repository(), packageName, version);
+        deleted.add(dead);
+      } catch (RuntimeException failed) {
+        errors.add(dead.identity() + ": " + failed.getMessage());
+      }
+    }
+    return new Applied(deleted, withheld, errors);
   }
 
   @Override

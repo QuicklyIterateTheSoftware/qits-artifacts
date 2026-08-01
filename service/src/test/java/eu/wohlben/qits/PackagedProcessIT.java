@@ -481,13 +481,13 @@ class PackagedProcessIT {
     // nothing references. The store here holds blobs pushed by the cases above, so the row-less
     // figures are a real reading rather than a zero that would pass either way.
     //
-    // Three of the six types have no strategy and must say so. oci-images must name the one that
+    // One of the six types has no strategy and must say so. oci-images must name the one that
     // does — and, with no qits-cd to answer, must report the refusal rather than a plan. That
     // fail-closed path only exists in the binary if the JDK HttpClient survived the compile, so this
     // is the one assertion here that a JVM test cannot make on its behalf. npm-packages is the
     // opposite case, and worth its own line for it: its rules read rows this process really
     // published, run with no outbound call at all, and condemn nothing — both packages above are
-    // releases, and releases are never eligible.
+    // releases, and releases are never eligible. The two CI stubs carry their captions.
     given()
         .when()
         .get("/artifacts/api/gc/plan")
@@ -510,13 +510,47 @@ class PackagedProcessIT {
         .body("types.find { it.type == 'oci-mirror' }.strategy", equalTo("OciMirrorGcStrategy"))
         .body("types.find { it.type == 'oci-mirror' }.note", nullValue())
         .body("types.find { it.type == 'oci-mirror' }.dead", hasSize(0))
+        .body(
+            "types.find { it.type == 'ci-screenshots' }.strategy",
+            equalTo("CiScreenshotsGcStrategy"))
+        // The stub answers with its rule-naming note at zero rows and a fail-closed refusal once
+        // the upload case above has run — both honest, and which one depends on method order, so
+        // the assertion accepts the pair rather than betting on the order.
+        .body(
+            "types.find { it.type == 'ci-screenshots' }.note"
+                + " ?: types.find { it.type == 'ci-screenshots' }.error",
+            containsString("branch"))
+        .body("types.find { it.type == 'ci-videos' }.strategy", equalTo("CiVideosGcStrategy"))
+        .body(
+            "types.find { it.type == 'ci-videos' }.note"
+                + " ?: types.find { it.type == 'ci-videos' }.error",
+            containsString("byte"))
         .body("sweep.blobCount", equalTo(0))
         .body("sweep.blobIds", hasSize(0))
         .body("untouchable.blobCount", greaterThanOrEqualTo(0))
         .body("untouchable.reason", containsString("LOSES its last row"));
 
-    // The absence of an execute surface, asserted against the binary: this feature deletes nothing.
+    // Reading and executing stay two different URLs, asserted against the binary.
     given().when().post("/artifacts/api/gc/plan").then().statusCode(405);
+
+    // And the execute surface itself, in the binary: one more Jackson-serialised record family, and
+    // the receipt of a sweep over a store whose every blob this process wrote seconds ago — the
+    // grace window withholds identities and files alike, so the honest answer is zeros with the
+    // withheld figures carrying the story. The store summary above already proved the blobs exist;
+    // this proves invoking the sweep did not touch them.
+    given()
+        .when()
+        .post("/artifacts/api/gc/sweep")
+        .then()
+        .statusCode(200)
+        .body("dryRun", equalTo(false))
+        .body("graceWindow", equalTo("P7D"))
+        .body("types", hasSize(6))
+        .body("types.find { it.type == 'oci-images' }.error", containsString("qits-cd"))
+        .body("types.find { it.type == 'npm-packages' }.deleted", hasSize(0))
+        .body("sweep.blobsUnlinked", equalTo(0))
+        .body("sweep.unlinkedBlobIds", hasSize(0))
+        .body("untouchable.reason", containsString("LOSES its last row"));
   }
 
   @Test

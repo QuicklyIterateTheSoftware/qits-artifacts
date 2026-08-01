@@ -31,8 +31,11 @@ import org.junit.jupiter.api.Test;
  * the suite points the base url at a closed port. Fail-closed on the wire is worth an assertion of
  * its own — a plan that answered with an empty keep-set would condemn every sha tag on the platform.
  *
- * <p>There is no execute route to test, deliberately, and the missing method is asserted: a {@code
- * POST} to the plan path must not quietly find some other resource.
+ * <p>The execute route exists now — {@code POST /gc/sweep}, landed after the user reviewed the
+ * dry-run — and this suite asserts what makes invoking it here safe: every blob a test creates is
+ * seconds old, so identity rows and files alike sit inside the grace window and a sweep deletes
+ * nothing, provably. The plan path still refuses a {@code POST}: reading and executing stay two
+ * different URLs.
  */
 @QuarkusTest
 class GcPlanControllerTest {
@@ -61,12 +64,48 @@ class GcPlanControllerTest {
         .body("types.find { it.type == 'npm-packages' }.strategy", is("NpmPackagesGcStrategy"))
         .body("types.find { it.type == 'oci-mirror' }.strategy", is("OciMirrorGcStrategy"))
         .body(
-            "types.findAll { !(it.type in ['oci-images', 'npm-packages', 'oci-mirror']) }.note",
-            everyItem(org.hamcrest.Matchers.startsWith("no strategy registered")))
-        .body(
-            "types.findAll { !(it.type in ['oci-images', 'npm-packages', 'oci-mirror']) }.strategy",
-            everyItem(nullValue()))
+            "types.find { it.type == 'ci-screenshots' }.strategy", is("CiScreenshotsGcStrategy"))
+        .body("types.find { it.type == 'ci-videos' }.strategy", is("CiVideosGcStrategy"))
+        .body("types.find { it.type == 'npm-proxy' }.note", is("no strategy registered for npm-proxy"))
+        .body("types.find { it.type == 'npm-proxy' }.strategy", nullValue())
         .body("types.reclaimableBytes", everyItem(is(0)));
+  }
+
+  @Test
+  void theStubsClaimTheirTypesAndSayEitherTheirRuleOrTheirRefusal() {
+    // The five-type table is complete: both CI types are claimed by stubs. Their wire state depends
+    // on suite order — BlobControllerTest uploads real screenshot records into this shared process —
+    // so both honest answers are accepted and pinned: at zero rows, a note naming the intended rule
+    // (branch-scoped for screenshots, byte-budgeted for videos) and that the loop has never
+    // produced content; with rows, the fail-closed refusal that names the rule to implement. What
+    // is never acceptable is a plan: dead stays empty in both states.
+    io.restassured.path.json.JsonPath json =
+        given().when().get("/artifacts/api/gc/plan").then().statusCode(200).extract().jsonPath();
+    assertStubState(json, "ci-screenshots", "branch-scoped", "branch", "dead");
+    assertStubState(json, "ci-videos", "byte-budgeted", "byte", "dead");
+  }
+
+  private static void assertStubState(
+      io.restassured.path.json.JsonPath json,
+      String type,
+      String ruleWord,
+      String refusalWord,
+      String deadKey) {
+    java.util.Map<String, Object> plan = json.getMap("types.find { it.type == '" + type + "' }");
+    org.junit.jupiter.api.Assertions.assertEquals(
+        java.util.List.of(), plan.get(deadKey), type + " must never plan a deletion as a stub");
+    Object error = plan.get("error");
+    if (error == null) {
+      String note = (String) plan.get("note");
+      org.junit.jupiter.api.Assertions.assertNotNull(note, type + " at zero rows carries its note");
+      org.junit.jupiter.api.Assertions.assertTrue(note.contains(ruleWord), note);
+      org.junit.jupiter.api.Assertions.assertTrue(note.contains("never produced"), note);
+    } else {
+      String refused = (String) error;
+      org.junit.jupiter.api.Assertions.assertTrue(refused.contains("stub"), refused);
+      org.junit.jupiter.api.Assertions.assertTrue(
+          refused.contains(refusalWord), "the refusal names the rule to implement: " + refused);
+    }
   }
 
   @Test
@@ -137,10 +176,47 @@ class GcPlanControllerTest {
   }
 
   @Test
-  void thereIsNoExecuteSurface() {
-    // Not "not yet wired" — the absence is the design. Nothing about this feature may become a URL
-    // that deletes, and a route added under this path would be caught here first.
+  void theSweepExecutesOnPostAndAnswersWithTheReceiptShapedLikeThePlan() {
+    // The executed twin. Invoking it here is safe by the same physics the deployment relies on:
+    // every blob this suite ever writes is seconds old, so identities are withheld with their
+    // files and the sweep deletes nothing — which is exactly what the receipt must say. dryRun is
+    // false because this IS the execute surface; the zeros are the grace window working, not a
+    // report of intent.
+    io.restassured.path.json.JsonPath receipt =
+        given()
+            .when()
+            .post("/artifacts/api/gc/sweep")
+            .then()
+            .statusCode(200)
+            .body("dryRun", is(false))
+            .body("executedAt", notNullValue())
+            .body("graceWindow", is("P7D"))
+            .body("types", hasSize(6))
+            .body(
+                "types.find { it.type == 'oci-images' }.error",
+                org.hamcrest.Matchers.containsString("qits-cd"))
+            .body("types.find { it.type == 'oci-images' }.deleted", hasSize(0))
+            .body("types.find { it.type == 'npm-packages' }.deleted", hasSize(0))
+            .body(
+                "types.find { it.type == 'npm-proxy' }.note",
+                is("no strategy registered for npm-proxy"))
+            .body("sweep.blobsUnlinked", is(0))
+            .body("sweep.bytesReclaimed", is(0))
+            .body("sweep.unlinkedBlobIds", hasSize(0))
+            .body(
+                "untouchable.reason", org.hamcrest.Matchers.containsString("LOSES its last row"))
+            .extract()
+            .jsonPath();
+    // The stubs' captions ride the receipt too, in whichever honest state the suite order left them.
+    assertStubState(receipt, "ci-screenshots", "branch-scoped", "branch", "deleted");
+    assertStubState(receipt, "ci-videos", "byte-budgeted", "byte", "deleted");
+  }
+
+  @Test
+  void readingAndExecutingStayTwoDifferentUrls() {
+    // A POST to the plan path must not quietly find some other resource, and a GET must never
+    // sweep: the reviewed-report-then-invoke order is carried by the verbs.
     given().when().post("/artifacts/api/gc/plan").then().statusCode(405);
-    given().when().post("/artifacts/api/gc/sweep").then().statusCode(404);
+    given().when().get("/artifacts/api/gc/sweep").then().statusCode(405);
   }
 }

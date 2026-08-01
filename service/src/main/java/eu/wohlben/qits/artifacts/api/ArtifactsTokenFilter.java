@@ -39,8 +39,10 @@ public class ArtifactsTokenFilter implements ContainerRequestFilter {
    * The JAX-RS base-relative prefixes this filter claims. A resource served outside them is
    * <b>unguarded</b>, so this set is extended when one is added rather than assumed to cover it.
    * {@code store} holds only the read-only store summary today and is listed so that stays a choice.
-   * {@code gc} holds only the dry-run plan, and is listed for a sharper reason: the day anything
-   * under it writes, it deletes bytes, and inheriting the guard beats remembering it.
+   * {@code gc} was listed ahead of its write for a sharper reason — anything under it that writes
+   * deletes bytes — and that write exists now: {@code POST /gc/sweep} inherited this guard by
+   * construction instead of by remembering. (A deployment shipping a blank token still runs the
+   * guard as a no-op — the standing posture until the platform's auth story lands.)
    * {@code mirror-upstreams} is the first entry here that was added <em>with</em> its writes rather
    * than ahead of them: registering an upstream is what decides which public registry this service
    * dials on a miss, so shipping that route unguarded would be handing out an outbound fetch.

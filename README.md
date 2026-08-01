@@ -795,17 +795,34 @@ belongs to the image. There is no garbage collector to reclaim them. Report it; 
 
 ## Garbage collection
 
-**Nothing here deletes anything.** What ships is the substrate and one read endpoint that says what
-collection *would* do. This platform has never deleted a byte, and the first one happens after a
-person has read these plans — not because a URL existed.
+**Reading is the default; executing is a separate, deliberate act.** The dry-run plan shipped
+first, the user reviewed it, and only then did the execute route land. Nothing executes without the
+`POST`.
 
 ```
-GET /artifacts/api/gc/plan     what every type's strategy would delete, and what a sweep would unlink
+GET  /artifacts/api/gc/plan     what every type's strategy would delete, and what a sweep would unlink
+POST /artifacts/api/gc/sweep    execute exactly that, once, and answer with the receipt
 ```
 
-There is no execute route, and its absence is the design rather than a gap. The registries' `405` on
-client deletes (`/v2` manifests, npm unpublish) is untouched: collection is an internal process
-behind a flag, and no client gains deletion semantics from any of this.
+The sweep computes its own plan inside the request — there is no way to submit one, because a
+stored plan is a plan on stale facts, and a plan on stale facts deletes a running image (the OCI
+keep-set's cd pins are fetched inside the same request too). The receipt is the plan report's
+executed twin: identities deleted per type, blobs unlinked with their bytes, what the grace window
+withheld, and the untouchable pool restated.
+
+**The grace window gates identity rows as well as blob unlinks.** A blob may only be swept by
+*losing* its last identity row — so deleting a row while the blob's file is still inside the window
+would strand the blob forever, row-less and untouchable. An identity whose released blobs include
+one still in grace is therefore withheld whole: rows stay, the next run re-plans it, and row and
+file mature out of the window together. On a store younger than the window a sweep provably
+deletes nothing, and that no-op receipt is the mechanism's own safety proof.
+
+The `POST` is a write under the `gc` prefix, so it inherits `ArtifactsTokenFilter`'s
+`X-Artifacts-Token` check — stated honestly: the live deployment ships `qits.artifacts.token`
+blank, which makes that guard inert until the platform's auth posture lands (the standing qits-idp
+direction; per the recorded decision, no interim token scheme is invented meanwhile). The
+registries' `405` on client deletes (`/v2` manifests, npm unpublish) is untouched: no client gains
+deletion semantics from any of this.
 
 ### Two layers, because identities and blobs are different questions
 
@@ -831,8 +848,8 @@ if a change would let one strategy reuse another's policy, it is the wrong chang
 |---|---|---|---|---|---|
 | `oci-images` | sha tags; manifests unreachable from kept tags | calver version tags | shas an ACTIVE qits-cd deployment pins, plus the previous distinct sha per service; newest sha per image | manifest closure over kept manifests | dry-run reviewed |
 | `npm-packages` | suffixed `-main.g<sha7>` versions except the newest per package | every unsuffixed version; anything a dist-tag names | newest prerelease per package | tarball blob ids of kept versions | dry-run reviewed |
-| `ci-screenshots` | records of deleted branches; superseded per (branch, userflow) | — | newest per (branch, userflow) | `artifact_record.blob_id` | rows exist (zero today) |
-| `ci-videos` | superseded per userflow beyond a byte budget | — | newest N per userflow, N in bytes | `artifact_record.blob_id` | rows exist (zero today) |
+| `ci-screenshots` | records of deleted branches; superseded per (branch, userflow) | — | newest per (branch, userflow) | `artifact_record.blob_id` | **stub claims the type** (`CiScreenshotsGcStrategy`): plans nothing at zero rows under a note naming the rule, fails closed once rows exist |
+| `ci-videos` | superseded per userflow beyond a byte budget | — | newest N per userflow, N in bytes | `artifact_record.blob_id` | **stub claims the type** (`CiVideosGcStrategy`): same posture, deliberately its own class — byte-budgeted is not branch-scoped |
 | `npm-proxy` | **parked** — cache eviction is access-based, which is `artifact-access-tracking`'s territory, not a structural rule | — | — | — | not this design |
 | `oci-mirror` | **nothing** — append-only, at a recorded price, until access tracking lands | every cached tag and manifest | — | manifest closure over the namespace | claimed, so the report says so |
 | git host (not an `artifact_repository` type) | superseded pack descriptions after a repack | every ref | current packs | `PackCatalog.list` per repo | the DFS migration |
@@ -869,10 +886,10 @@ when it lands, contributes them as a live set of its own; nothing about them nee
 
 ### The delete primitive
 
-`BlobStore.delete` is the only way bytes leave this store. It is **package-private**, its only
-permitted caller is `BlobSweep`, and today `BlobSweep` does not call it: the sweep reports what it
-would unlink and cannot unlink. Three constraints are enforced in the method rather than trusted to
-its caller:
+`BlobStore.delete` is the only way bytes leave this store. It is **package-private** and its only
+permitted caller is `BlobSweep` — whose unlink loop runs only when `GcSweepExecutor` drives it
+behind the `POST`, after the strategies' identity deletions, against a census taken fresh after
+them. Three constraints are enforced in the method rather than trusted to its caller:
 
 - **A grace window** — `qits.artifacts.gc.blob-grace-period`, default **7 days**, measured from the
   file's mtime, which is when `promote` moved it into place. It closes the upload race: a client's
@@ -898,12 +915,20 @@ with two claimants is reported as a policy collision rather than merged.
 ```java
 public interface GcStrategy {
   RepositoryType type();
-  Plan plan(LiveBlobCensus.Census census);   // throws ⇒ that type is fail-closed
+  Plan plan(LiveBlobCensus.Census census);       // pure; throws ⇒ that type is fail-closed
+  default String note();                         // a standing caption for the reports, or null
+  default Applied apply(Plan plan, GraceWindow grace);  // the execute half; the default refuses
+                                                        // any plan that condemns
 
   record Plan(List<GcIdentity> dead,      // what dies, each naming the rule that condemned it
               List<GcIdentity> kept,      // what survives, each naming the rule that saved it
               Set<String> blobsReleased,  // every blob the dead identities reference
               Set<String> blobsRetained)  // this type's live set AFTER the plan
+  {}
+
+  record Applied(List<GcIdentity> deleted,               // rows gone now
+                 List<GcIdentity> withheldByGraceWindow, // left whole; re-planned next run
+                 List<String> errors)                    // per identity, never thrown
   {}
 }
 ```
@@ -914,7 +939,15 @@ is the substrate's job. A strategy that cannot establish its keep-set safely **t
 reports the type as failed and treats every blob the census attributes to it as live, so an
 unreachable dependency reclaims nothing instead of guessing.
 
-### `oci-images`, the first of the three strategies that exist
+`plan()` stays pure — it is what the dry-run report reads. `apply()` is called only by
+`GcSweepExecutor`, only on a plan the same request computed, and it owns its type's deletion
+mechanics end to end: OCI rows go through `OciRegistryService.collectTag`/`collectManifest` (the
+latter refuses a manifest a tag still names), npm rows through `NpmRegistryService.collect` (the
+tombstone and the dist-tag refusal live in the mechanism, not the policy). A strategy that never
+condemns — the mirror, the CI stubs — keeps the default, which is correct for the empty set and
+loud for anything else.
+
+### `oci-images`, the first of the five strategies that exist
 
 `OciImageGcStrategy` implements the row the table above gives it. Five rules, each named in the
 report beside the identity it saved:
@@ -966,9 +999,10 @@ by design and re-pushing one has always been legal, so there is no promise for a
 on that side.
 
 `NpmRegistryService.collect` is the only way a version row ever leaves, it writes the tombstone in the
-same transaction, and it refuses a version a dist-tag still names. It is package-private and called
-by nobody — collection is dry-run — and it ships ahead of its caller so the tombstone can never be a
-step someone forgets.
+same transaction, and it refuses a version a dist-tag still names. It is package-private and its one
+caller is `NpmPackagesGcStrategy.apply` — it shipped ahead of that caller precisely so the tombstone
+was never a step someone had to remember, and both guarantees live in the mechanism where no path
+around them exists.
 
 ### `oci-mirror`, the third — a rule of "nothing dies", said out loud
 
@@ -999,7 +1033,7 @@ its answer. It also depends on nothing outside this service, so it can never fai
 ```jsonc
 {
   "generatedAt": "2026-08-01T12:00:00Z",
-  "dryRun": true,                       // always, today
+  "dryRun": true,                       // always, on this route; the sweep's receipt is the twin with false
   "graceWindow": "P7D",
   "types": [                            // all six, always — including the ones nobody collects
     { "type": "oci-images", "strategy": "OciImageGcStrategy",
@@ -1036,9 +1070,10 @@ its answer. It also depends on nothing outside this service, so it can never fai
 Three details a reader trips over otherwise:
 
 - **A type with no strategy says so.** "Nothing to collect" and "nobody is collecting" are different
-  answers, and only one of them is fine. Three types are collected today (`oci-images`,
-  `npm-packages`, `oci-mirror` — whose whole policy is "nothing dies", which is still a decision);
-  the other three report their reason rather than going missing.
+  answers, and only one of them is fine. Five types are claimed today (`oci-images`, `npm-packages`,
+  `oci-mirror` — whose whole policy is "nothing dies", which is still a decision — and the two CI
+  stubs, whose notes name their intended rules); only `npm-proxy` reports "no strategy registered",
+  which is the honest state of a decision nobody has taken.
 - **`sweep` is not the sum of the per-type figures.** A blob dies once, and two types releasing the
   same content free it once. The per-type numbers answer "what does this rule buy on its own"; the
   sweep answers "what would a run free tonight".
@@ -1046,9 +1081,9 @@ Three details a reader trips over otherwise:
   unlink may happen, not about what a rule structurally frees, and a strategy's worth should not read
   as zero because its content was pushed this morning.
 
-Reads are unguarded like their neighbours (`ArtifactsTokenFilter` covers write methods only), but
-`gc` is named in that filter's prefix set anyway, so anything under it that ever writes inherits the
-guard instead of needing to remember it.
+Reads are unguarded like their neighbours (`ArtifactsTokenFilter` covers write methods only). The
+sweep `POST` is the write the `gc` prefix was pre-listed for, and it inherits the guard by
+construction — with the blank-token honesty stated at the top of this section still applying.
 
 ## The boundary
 
@@ -1163,10 +1198,10 @@ and only the host part is a deployment decision.
   failing — consuming this registry works immediately, producing from within a step needs an
   unprivileged builder story of its own. Until then a producer is a host with a docker daemon; no
   credential, since the registry is tokenless and pushes stay inside the deployment.
-- **Garbage collection that collects anything.** The substrate and the dry-run plan are here (see
-  "Garbage collection"); no strategy is, so both registries are still append-only and untagged
-  manifests, row-less blobs and a proxy cache that only grows all accumulate. The `DELETE` endpoints
-  stay unimplemented, and collection will not become one when it arrives.
+- **Client-facing deletion.** Garbage collection executes now (see "Garbage collection"), but only
+  as an operator's `POST /artifacts/api/gc/sweep` — the registries' `DELETE` endpoints stay
+  unimplemented, row-less blobs stay untouchable, and the npm proxy cache still only grows (its
+  eviction is parked for access tracking).
 - **A maven repository type.** The same seam again, a third protocol.
 - **Building packages.** The npm registry stores and serves them; nothing here runs `npm pack`. A
   producer is a CI step that runs `npm publish` over plain HTTP to `qits-artifacts:8080` — no docker

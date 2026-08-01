@@ -82,7 +82,7 @@ public class GcPlanner {
             new GcTypePlan(
                 type,
                 name,
-                null,
+                strategy.note(),
                 null,
                 plan.dead(),
                 plan.kept(),
@@ -144,9 +144,10 @@ public class GcPlanner {
   /**
    * The window, spelled the way it is configured. {@code Duration.toString()} normalises days into
    * hours — the shipped {@code P7D} prints as {@code PT168H} — and a safety window a reviewer has to
-   * divide by 24 is a safety window they will misread.
+   * divide by 24 is a safety window they will misread. Package-visible because the sweep receipt
+   * spells the same window and must spell it the same way.
    */
-  private static String iso(Duration window) {
+  static String iso(Duration window) {
     return window.toDaysPart() > 0 && window.minusDays(window.toDaysPart()).isZero()
         ? "P" + window.toDaysPart() + "D"
         : window.toString();

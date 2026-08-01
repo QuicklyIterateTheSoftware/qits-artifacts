@@ -262,11 +262,11 @@ down because the one thing that must never happen is someone running a repack to
 posture is repeated in `V4__git_pack_catalog.sql`, in `GitPack`'s javadoc and in
 `git-storage/README.md`, and `GarbageCollectionTest` asserts the amplification rather than hiding it.
 
-`BlobStore` **now has a delete** and this paragraph still holds, which is worth being precise about:
-it is package-private, its only permitted caller is `BlobSweep`, and `BlobSweep` does not call it —
-the sweep ships dry-run (see "Garbage collection" below). So a repack still duplicates, the measured
-7.8 MB → 15 MB stands, and the git pack blobs are row-less to the census and therefore untouchable
-anyway. Pack GC is its own later workstream and needs the DFS migration first.
+`BlobStore` **now has a delete, and the sweep now calls it** — only behind
+`POST /artifacts/api/gc/sweep` (see "Garbage collection" below) — and this paragraph still holds,
+which is worth being precise about: a repack still duplicates, the measured 7.8 MB → 15 MB stands,
+and the git pack blobs are row-less to the census and therefore untouchable — no sweep can reach
+them. Pack GC is its own later workstream and needs the DFS migration first.
 
 ## Garbage collection
 
@@ -285,12 +285,23 @@ anyway. Pack GC is its own later workstream and needs the DFS migration first.
   no retention framework. Docker's and npm's rules look alike by coincidence; a change that lets one
   reuse the other's policy is the wrong change. Two beans claiming one type is reported as a
   collision, never merged.
+- **The grace window gates identity rows, not only blob unlinks.** A blob can only be swept by
+  *losing* its last row, so a row deleted while the blob's file is inside the window would strand
+  the blob — row-less, untouchable, never reclaimed. `GcStrategy.apply` therefore withholds an
+  identity whole when any blob it releases is still in grace; `GcSweepExecutor` (behind
+  `POST /artifacts/api/gc/sweep`) applies only plans it computed in the same request, and on a
+  store younger than the window a sweep provably deletes nothing.
 
-Three strategies exist: `OciImageGcStrategy` (`oci-images`), `NpmPackagesGcStrategy`
-(`npm-packages`) and `OciMirrorGcStrategy` (`oci-mirror`). Three things they share cost time
-otherwise.
+Five strategies exist: `OciImageGcStrategy` (`oci-images`), `NpmPackagesGcStrategy`
+(`npm-packages`), `OciMirrorGcStrategy` (`oci-mirror`), and the two CI stubs
+(`CiScreenshotsGcStrategy`, `CiVideosGcStrategy`) — deliberately two classes, because their
+intended rules already diverge in kind (branch-scoped against byte-budgeted) and sharing a base
+would be the exact unification the plan forbids, demonstrated at the cheapest place. The stubs plan
+`nothingDies` at zero rows under a `note()` naming the intended rule, and **fail closed the day
+rows exist** — a plan over rows with no implemented rule is a guess. A few things the strategies
+share cost time otherwise.
 
-- **All three are `@Singleton`, not `@ApplicationScoped`, and the reason is the report.** `GcPlanner`
+- **All five are `@Singleton`, not `@ApplicationScoped`, and the reason is the report.** `GcPlanner`
   names a strategy by its class's simple name, and a normal-scoped bean would answer that through its
   client proxy — `OciImageGcStrategy_ClientProxy`, a name in no source file. `@Singleton` is a
   pseudo-scope, so there is no proxy and still one instance. `GcPlanner.nameOf` also unwraps a proxy
@@ -315,11 +326,13 @@ Two things are npm's alone, and the plan is explicit that docker needs neither:
   *garbage-collected*, not *immutable* — a pusher told "immutable" goes looking for a version that is
   not there. A separate table rather than a flag on `npm_version`, because the packument is assembled
   from those rows at read time and a marker column would need a `where` clause in every reader.
-- **`NpmRegistryService.collect` is package-private and called by nobody**, exactly like
-  `BlobStore.delete`: it is the only way a version row is ever removed, it writes the tombstone in the
-  same transaction, and it refuses a version a dist-tag still names (a dist-tag pointing at a version
-  the packument no longer lists is a broken package to every npm client). GC is dry-run, so nothing
-  calls it yet — it ships first so the tombstone is never a step someone has to remember.
+- **`NpmRegistryService.collect` is package-private with exactly one caller**,
+  `NpmPackagesGcStrategy.apply`: it is the only way a version row is ever removed, it writes the
+  tombstone in the same transaction, and it refuses a version a dist-tag still names (a dist-tag
+  pointing at a version the packument no longer lists is a broken package to every npm client). It
+  shipped ahead of its caller so the tombstone was never a step someone had to remember.
+  `OciRegistryService.collectTag`/`collectManifest` are the OCI twins — package-private, called only
+  by `OciImageGcStrategy.apply`, and `collectManifest` refuses a manifest a tag still names.
 
 `oci-mirror` is claimed by a strategy whose whole rule is "nothing dies"
 (`append-only pending access tracking`, proxy-pulling-normal-images.md ⚖2), and the class exists

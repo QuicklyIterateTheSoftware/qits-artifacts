@@ -298,4 +298,77 @@ public class OciRegistryService {
       tagChecks.persist(check);
     }
   }
+
+  /**
+   * Deletes one tag row — the only way a tag ever leaves this registry.
+   *
+   * <p><b>Package-private and called only by {@code OciImageGcStrategy.apply}</b>, the same shape
+   * and the same reason as {@code NpmRegistryService.collect} and {@code BlobStore.delete}: the
+   * client-facing {@code 405} on {@code /v2} deletes stays exactly as it is, and no route reaches
+   * this. Which tags die is the strategy's rule; this only knows how a row is removed.
+   *
+   * <p>The manifest the tag named is not touched — whether it survives is a reachability question
+   * the strategy answers, and its blobs are the sweep's question after that.
+   *
+   * @throws IllegalStateException no such tag row — the store moved since the plan was computed,
+   *     and a plan that raced a re-push must surface rather than delete by coordinates alone
+   */
+  @ActivateRequestContext
+  @Transactional
+  void collectTag(String repository, String imageName, String tag) {
+    OciTag row =
+        tags.findOne(repository, imageName, tag)
+            .orElseThrow(
+                () ->
+                    new IllegalStateException(
+                        "no such tag "
+                            + imageName
+                            + ":"
+                            + tag
+                            + " to collect — the store moved since the plan was computed"));
+    tags.delete(row);
+  }
+
+  /**
+   * Deletes one manifest row — the untagged-manifest half of OCI garbage collection.
+   *
+   * <p>Package-private, same rule as {@link #collectTag}. One guarantee is the mechanism's rather
+   * than the policy's: <b>a manifest a tag still names is refused.</b> The strategy never condemns
+   * one — reachability from kept tags is its whole rule — so this firing means the plan was stale
+   * or wrong, and refusing beats serving a tag whose manifest row is gone.
+   *
+   * <p>The manifest's blobs — its own bytes included — are not touched. Blobs dedupe across every
+   * repository type, so what may be unlinked is never one type's question; the sweep answers it.
+   *
+   * @throws IllegalStateException no such manifest row, or a tag still names it
+   */
+  @ActivateRequestContext
+  @Transactional
+  void collectManifest(String repository, String imageName, String digest) {
+    OciManifest row =
+        manifests
+            .findOne(repository, imageName, digest)
+            .orElseThrow(
+                () ->
+                    new IllegalStateException(
+                        "no such manifest "
+                            + imageName
+                            + "@sha256:"
+                            + digest
+                            + " to collect — the store moved since the plan was computed"));
+    for (OciTag tag : tags.listByImage(repository, imageName)) {
+      if (tag.manifestDigest.equals(digest)) {
+        throw new IllegalStateException(
+            "refusing to collect "
+                + imageName
+                + "@sha256:"
+                + digest
+                + " — the "
+                + tag.tag
+                + " tag still names it, and a tag whose manifest row is gone is a broken"
+                + " coordinate to every client");
+      }
+    }
+    manifests.delete(row);
+  }
 }

@@ -34,6 +34,17 @@ public interface GcStrategy {
   RepositoryType type();
 
   /**
+   * A standing sentence the reports carry beside this strategy's line, or null.
+   *
+   * <p>Exists for the strategies whose whole plan needs a caption — the CI stubs use it to name the
+   * rule they intend and the fact that nothing has ever produced their content. A strategy with
+   * rules that speak for themselves returns null, which is what the default does.
+   */
+  default String note() {
+    return null;
+  }
+
+  /**
    * Reads the census and says what would die.
    *
    * <p>Pure and side-effect free: this is called for a dry-run report, and a report that changed the
@@ -44,6 +55,72 @@ public interface GcStrategy {
    *     failed and nothing of it is planned
    */
   Plan plan(LiveBlobCensus.Census census);
+
+  /**
+   * Deletes the identity rows of a plan this strategy produced <b>moments ago</b> — the execute
+   * half of the seam, called only by {@code GcSweepExecutor} and only on a plan computed in the
+   * same request. A stored or hand-edited plan must never reach this method: the store moves, and
+   * applying a stale plan is how the wrong identity dies.
+   *
+   * <p><b>The grace window gates identities here, not just blobs at the unlink.</b> The reason is
+   * structural and worth keeping in view: a blob may only be swept by <em>losing</em> its last
+   * identity row, so deleting a row while the blob's file is still inside the grace window would
+   * strand the blob forever — row-less, therefore untouchable, and never reclaimed. An identity
+   * whose released blobs include one still in grace is therefore <b>withheld whole</b>: its rows
+   * stay, the next run re-plans it, and the run after the window matures deletes row and file
+   * together.
+   *
+   * <p>Failures are collected per identity rather than thrown, because a half-applied type must
+   * report what it did — the rows already deleted are deleted, and hiding them behind an exception
+   * would leave their blobs unswept with nothing in the report to say why.
+   *
+   * <p>The default refuses a plan that condemns anything: a strategy whose rules can kill must own
+   * its deletion mechanics by overriding this. For the strategies that never condemn — the mirror,
+   * the CI stubs — the default is the correct implementation, applied to the empty set.
+   *
+   * @param plan this strategy's own freshly computed plan
+   * @param grace answers whether a blob's file is still inside the grace window
+   */
+  default Applied apply(Plan plan, GraceWindow grace) {
+    if (!plan.dead().isEmpty()) {
+      throw new IllegalStateException(
+          getClass().getSimpleName()
+              + " condemned "
+              + plan.dead().size()
+              + " identities but does not implement apply(); a strategy that can kill must own its"
+              + " deletion mechanics");
+    }
+    return Applied.nothing();
+  }
+
+  /** Whether a blob's file is younger than the sweep's grace window. Supplied by the executor. */
+  @FunctionalInterface
+  interface GraceWindow {
+    boolean withinGrace(String blobId);
+  }
+
+  /**
+   * What {@link #apply} actually did, identity by identity.
+   *
+   * @param deleted the identities whose rows are gone now
+   * @param withheldByGraceWindow identities left whole because a blob they release is still inside
+   *     the grace window — not lost, re-planned next run
+   * @param errors identities that could not be applied, each with its reason; the rest of the plan
+   *     was still applied
+   */
+  record Applied(
+      List<GcIdentity> deleted, List<GcIdentity> withheldByGraceWindow, List<String> errors) {
+
+    public Applied {
+      deleted = List.copyOf(deleted);
+      withheldByGraceWindow = List.copyOf(withheldByGraceWindow);
+      errors = List.copyOf(errors);
+    }
+
+    public static Applied nothing() {
+      return new Applied(List.of(), List.of(), List.of());
+    }
+  }
 
   /**
    * What a strategy hands back: the identities, and the two blob sets the reconciliation needs.
