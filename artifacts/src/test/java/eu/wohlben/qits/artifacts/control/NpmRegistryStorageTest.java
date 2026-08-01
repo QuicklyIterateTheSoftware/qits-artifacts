@@ -111,6 +111,63 @@ class NpmRegistryStorageTest extends ArtifactsTestSupport {
   }
 
   @Test
+  void aCollectedVersionKeepsItsNameForeverAndSaysSoRatherThanClaimingImmutability() {
+    // What the tombstone is for. Immutability is enforced by looking for the row, so deleting a row
+    // would re-open its name for a publish carrying DIFFERENT bytes — one coordinate, two tarballs
+    // over its lifetime, which is the mutability this registry exists to refuse. The version is gone
+    // from the packument and still unpublishable, and the message says which of the two it is.
+    repositoryService.ensure("npm", RepositoryType.NPM_PACKAGES);
+    npm.publish("npm", "@qits/ui", "1.0.0", BLOB_A, "sha512-a", "a", "{}", Map.of("latest", "1.0.0"));
+    npm.publish("npm", "@qits/ui", "1.0.1-main.gab854a1", BLOB_B, "sha512-b", "b", "{}", Map.of());
+
+    npm.collect("npm", "@qits/ui", "1.0.1-main.gab854a1");
+    // A version that was never published is untouched by any of this. Written before the refusal
+    // below, because that one rolls its transaction back and this suite shares one session.
+    npm.publish("npm", "@qits/ui", "1.0.2", BLOB_B, "sha512-d", "d", "{}", Map.of("latest", "1.0.2"));
+
+    assertTrue(
+        npm.findVersion("npm", "@qits/ui", "1.0.1-main.gab854a1").isEmpty(),
+        "the row is gone, so the assembled packument no longer lists the version");
+    assertEquals("1.0.2", npm.findVersion("npm", "@qits/ui", "1.0.2").orElseThrow().version());
+    NpmException refused =
+        assertThrows(
+            NpmException.class,
+            () ->
+                npm.publish(
+                    "npm", "@qits/ui", "1.0.1-main.gab854a1", BLOB_A, "sha512-c", "c", "{}",
+                    Map.of()));
+    assertEquals(403, refused.statusCode());
+    assertTrue(
+        refused.getMessage().contains("removed by garbage collection"),
+        "not 'immutable' — there is no version to look at, and saying so sends a pusher looking for"
+            + " one: " + refused.getMessage());
+  }
+
+  @Test
+  void collectingRefusesAVersionADistTagStillNamesAndTouchesNoLiveRowsImmutability() {
+    // Two halves of "the mechanism, not the policy". A dist-tag naming a version the packument no
+    // longer lists is a broken package to every npm client, so the primitive refuses it rather than
+    // trusting the strategy that drives it never to ask. And a live row's 403 is the one it always
+    // was: the tombstone adds a second refusal, it does not reword the first.
+    repositoryService.ensure("npm", RepositoryType.NPM_PACKAGES);
+    npm.publish("npm", "left-pad", "1.0.0", BLOB_A, "sha512-a", "a", "{}", Map.of("latest", "1.0.0"));
+
+    NpmException tagged =
+        assertThrows(NpmException.class, () -> npm.collect("npm", "left-pad", "1.0.0"));
+    assertEquals(409, tagged.statusCode());
+    assertTrue(tagged.getMessage().contains("latest dist-tag names it"), tagged.getMessage());
+    assertTrue(npm.findVersion("npm", "left-pad", "1.0.0").isPresent(), "and nothing was deleted");
+
+    NpmException live =
+        assertThrows(
+            NpmException.class,
+            () ->
+                npm.publish(
+                    "npm", "left-pad", "1.0.0", BLOB_B, "sha512-b", "b", "{}", Map.of()));
+    assertTrue(live.getMessage().contains("published versions are immutable"), live.getMessage());
+  }
+
+  @Test
   void aBarePublishOfAPrereleaseCannotTakeLatestBackwards() {
     // The foot-gun this rule closes: a bare `npm publish` means --tag latest, so a main build
     // publishing <release>-main.g<sha> would move latest onto a prerelease permanently and every

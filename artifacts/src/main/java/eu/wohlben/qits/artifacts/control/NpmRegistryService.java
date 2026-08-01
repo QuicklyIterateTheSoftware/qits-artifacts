@@ -4,12 +4,14 @@ import eu.wohlben.qits.artifacts.entity.ArtifactRepository;
 import eu.wohlben.qits.artifacts.entity.NpmDistTag;
 import eu.wohlben.qits.artifacts.entity.NpmProxyPackument;
 import eu.wohlben.qits.artifacts.entity.NpmVersion;
+import eu.wohlben.qits.artifacts.entity.NpmVersionTombstone;
 import eu.wohlben.qits.artifacts.entity.RepositoryType;
 import eu.wohlben.qits.artifacts.error.NpmException;
 import eu.wohlben.qits.artifacts.persistence.ArtifactRepositoryRepository;
 import eu.wohlben.qits.artifacts.persistence.NpmDistTagRepository;
 import eu.wohlben.qits.artifacts.persistence.NpmProxyPackumentRepository;
 import eu.wohlben.qits.artifacts.persistence.NpmVersionRepository;
+import eu.wohlben.qits.artifacts.persistence.NpmVersionTombstoneRepository;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.context.control.ActivateRequestContext;
 import jakarta.inject.Inject;
@@ -50,6 +52,7 @@ public class NpmRegistryService {
   @Inject NpmVersionRepository versions;
   @Inject NpmDistTagRepository distTags;
   @Inject NpmProxyPackumentRepository packuments;
+  @Inject NpmVersionTombstoneRepository tombstones;
 
   /** A stored version, flattened for packument assembly and for serving its tarball. */
   public record StoredVersion(
@@ -119,8 +122,11 @@ public class NpmRegistryService {
    * <p>One of those tags is guarded: {@code latest} may not move backwards. See {@link
    * #requireLatestMayMoveTo}, including why that refusal takes the whole publish with it.
    *
-   * @throws NpmException {@code 403} if the version already exists, or if the publish would move
-   *     {@code latest} to a version sorting below the one it names
+   * <p>Immutability is checked <b>twice</b>, against the row and against the tombstone, because
+   * garbage collection makes "there is no row" mean two different things. See {@link #collect}.
+   *
+   * @throws NpmException {@code 403} if the version already exists, if it was collected, or if the
+   *     publish would move {@code latest} to a version sorting below the one it names
    */
   @ActivateRequestContext
   @Transactional
@@ -142,9 +148,90 @@ public class NpmRegistryService {
               + version
               + " — published versions are immutable; bump the version");
     }
+    // A collected version has no row, so the check above would wave it through as a fresh publish.
+    // Its own message matters as much as its refusal: "immutable" would send a pusher looking for a
+    // version they can see, and there is nothing to see.
+    tombstones
+        .findOne(repository, packageName, version)
+        .ifPresent(
+            collected -> {
+              throw new NpmException(
+                  403,
+                  "cannot publish "
+                      + packageName
+                      + "@"
+                      + version
+                      + " — that version was published here and later removed by garbage collection"
+                      + " on "
+                      + collected.collectedAt
+                      + "; a version name is never reused, even after its bytes are gone. Bump the"
+                      + " version");
+            });
     versions.persist(
         row(repository, packageName, version, tarballBlobId, integrity, shasum, manifestJson));
     tagsToMove.forEach((tag, target) -> moveTag(repository, packageName, tag, target));
+  }
+
+  /**
+   * Deletes one published version and leaves its identity behind — the only way a version ever
+   * leaves this registry.
+   *
+   * <p><b>Package-private and called by nobody today</b>, the same shape and the same reason as
+   * {@code BlobStore.delete}: the two guarantees below hold only while there is one way in. Garbage
+   * collection is dry-run — {@code NpmPackagesGcStrategy} reports what would go and deletes
+   * nothing — and this ships ahead of it so that the day a plan is applied, the tombstone is not a
+   * step someone has to remember.
+   *
+   * <p>The two guarantees:
+   *
+   * <ul>
+   *   <li><b>The row and the tombstone move together</b>, in one transaction. A delete that
+   *       committed without its tombstone would silently re-open the version's name for a publish
+   *       carrying different bytes — the mutability the 403 exists to refuse.
+   *   <li><b>A version a dist-tag names is refused.</b> Nothing here moves a tag: a dist-tag
+   *       pointing at a deleted version is a packument whose {@code dist-tags} names a version its
+   *       {@code versions} does not contain, which every npm client reads as a broken package. The
+   *       strategy already never condemns such a version; this makes that a property of the
+   *       mechanism rather than of the policy that happens to drive it.
+   * </ul>
+   *
+   * <p>The tarball blob is <em>not</em> touched. Blobs dedupe across every repository type, so what
+   * may be unlinked is never one type's question — the sweep answers it, from the census.
+   *
+   * @throws NpmException {@code 409} if a dist-tag still names the version
+   */
+  @ActivateRequestContext
+  @Transactional
+  void collect(String repository, String packageName, String version) {
+    NpmVersion row =
+        versions
+            .findOne(repository, packageName, version)
+            .orElseThrow(
+                () ->
+                    new NpmException(
+                        404, "no such version " + packageName + "@" + version + " to collect"));
+    for (NpmDistTag tag : distTags.listTags(repository, packageName)) {
+      if (tag.version.equals(version)) {
+        throw new NpmException(
+            409,
+            "refusing to collect "
+                + packageName
+                + "@"
+                + version
+                + " — the "
+                + tag.tag
+                + " dist-tag names it, and a dist-tag pointing at a version the packument no longer"
+                + " lists is a broken package");
+      }
+    }
+    NpmVersionTombstone tombstone = new NpmVersionTombstone();
+    tombstone.repository = repository;
+    tombstone.packageName = packageName;
+    tombstone.version = version;
+    tombstone.tarballBlobId = row.tarballBlobId;
+    tombstone.collectedAt = Instant.now();
+    tombstones.persist(tombstone);
+    versions.delete(row);
   }
 
   /**

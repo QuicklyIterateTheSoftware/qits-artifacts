@@ -5,6 +5,7 @@ import eu.wohlben.qits.artifacts.persistence.ArtifactRepositoryRepository;
 import eu.wohlben.qits.artifacts.persistence.NpmDistTagRepository;
 import eu.wohlben.qits.artifacts.persistence.NpmProxyPackumentRepository;
 import eu.wohlben.qits.artifacts.persistence.NpmVersionRepository;
+import eu.wohlben.qits.artifacts.persistence.NpmVersionTombstoneRepository;
 import eu.wohlben.qits.artifacts.persistence.OciManifestRepository;
 import eu.wohlben.qits.artifacts.persistence.OciTagRepository;
 import io.quarkus.narayana.jta.QuarkusTransaction;
@@ -36,6 +37,8 @@ abstract class ArtifactsTestSupport {
 
   @Inject NpmDistTagRepository npmDistTags;
 
+  @Inject NpmVersionTombstoneRepository npmVersionTombstones;
+
   @Inject NpmProxyPackumentRepository npmProxyPackuments;
 
   @Inject BlobDiskIndex diskIndex;
@@ -54,6 +57,7 @@ abstract class ArtifactsTestSupport {
               ociManifests.deleteAll();
               npmDistTags.deleteAll();
               npmVersions.deleteAll();
+              npmVersionTombstones.deleteAll();
               npmProxyPackuments.deleteAll();
               records.deleteAll();
               repositories.deleteAll();

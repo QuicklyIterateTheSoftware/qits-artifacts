@@ -27,9 +27,9 @@ import org.junit.jupiter.api.Test;
  * <p>The strategies here are fakes constructed in the test rather than beans, and that is
  * deliberate: the reconciliation is what these cases are about, and a real strategy would answer
  * with its own policy instead of the shape a case needs. Registering one as a bean would also take
- * away the "nobody collects this type" case, which four of the five types are still in. The one
- * registered bean — {@code OciImageGcStrategy} — is exercised on its own rules in {@code
- * OciImageGcStrategyTest} and appears here only in the first case, as the report's shape.
+ * away the "nobody collects this type" case, which three of the five types are still in. The two
+ * registered beans — {@code OciImageGcStrategy} and {@code NpmPackagesGcStrategy} — are exercised on
+ * their own rules in their own suites and appear here only in the first case, as the report's shape.
  */
 @QuarkusTest
 class GcPlanTest extends GcFixture {
@@ -37,28 +37,39 @@ class GcPlanTest extends GcFixture {
   @Inject GcPlanner planner;
 
   @Test
-  void theOnlyRegisteredStrategyIsOcisAndTheFourOtherTypesSaySoRatherThanGoMissing() throws Exception {
+  void twoTypesAreCollectedAndTheThreeOthersSaySoRatherThanGoMissing() throws Exception {
     // The report a reviewer sees first. "No plan", "nothing to collect" and "refused to plan" are
     // three different facts, so every type is listed with its own reason rather than omitted — and
     // oci-images demonstrates the third: this suite has no qits-cd, its pin fetch is refused at a
-    // closed port, and a keep-set that cannot be established reclaims nothing.
+    // closed port, and a keep-set that cannot be established reclaims nothing. npm-packages
+    // demonstrates the second: its rules run over the fixture's two released versions and condemn
+    // neither.
     Store store = seed();
 
     assertEquals(
-        List.of("OciImageGcStrategy"),
-        planner.registered().stream().map(s -> s.getClass().getSimpleName()).toList());
+        List.of("NpmPackagesGcStrategy", "OciImageGcStrategy"),
+        planner.registered().stream().map(GcPlanner::nameOf).sorted().toList());
     GcPlanReport report = planner.plan();
 
     assertTrue(report.dryRun());
     assertEquals(RepositoryType.values().length, report.types().size());
     for (GcTypePlan type : report.types()) {
-      if (type.type() == RepositoryType.OCI_IMAGES) {
-        assertEquals("OciImageGcStrategy", type.strategy());
-        assertNull(type.note());
-        assertNotNull(type.error(), "no qits-cd here, so the type must abort rather than plan");
-      } else {
-        assertNull(type.strategy());
-        assertEquals("no strategy registered for " + type.type().wireName(), type.note());
+      switch (type.type()) {
+        case OCI_IMAGES -> {
+          assertEquals("OciImageGcStrategy", type.strategy());
+          assertNull(type.note());
+          assertNotNull(type.error(), "no qits-cd here, so the type must abort rather than plan");
+        }
+        case NPM_PACKAGES -> {
+          assertEquals("NpmPackagesGcStrategy", type.strategy());
+          assertNull(type.note());
+          assertNull(type.error());
+          assertEquals(0, type.dead().size(), "both fixture versions are releases");
+        }
+        default -> {
+          assertNull(type.strategy());
+          assertEquals("no strategy registered for " + type.type().wireName(), type.note());
+        }
       }
       assertEquals(0, type.blobsSweepable());
       assertEquals(0L, type.reclaimableBytes());
@@ -68,6 +79,20 @@ class GcPlanTest extends GcFixture {
     assertEquals(List.of(store.rowless()), report.untouchable().blobIds());
     assertEquals(ROWLESS, report.untouchable().bytes());
     assertEquals("P7D", report.graceWindow());
+  }
+
+  @Test
+  void aStrategyIsNamedByItsOwnClassEvenWhenCdiHandsOverAClientProxy() {
+    // Both shipped strategies are @Singleton, so neither is proxied and the assertion above passes
+    // either way — which is exactly why this case exists: the next strategy will make that choice
+    // again, and a report reading "Something_ClientProxy" names a class that appears in no source
+    // file. The census stands in for a normal-scoped bean because it is one; injecting it gives a
+    // real proxy rather than a simulated one.
+    assertTrue(
+        census.getClass().getSimpleName().endsWith("_ClientProxy"),
+        "an @ApplicationScoped bean must be injected as a proxy, or this proves nothing: "
+            + census.getClass().getSimpleName());
+    assertEquals("LiveBlobCensus", GcPlanner.nameOf(census));
   }
 
   @Test

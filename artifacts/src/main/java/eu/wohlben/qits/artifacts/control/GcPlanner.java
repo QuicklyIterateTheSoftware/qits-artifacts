@@ -4,6 +4,7 @@ import eu.wohlben.qits.artifacts.dto.GcPlanReport;
 import eu.wohlben.qits.artifacts.dto.GcSweepPlan;
 import eu.wohlben.qits.artifacts.dto.GcTypePlan;
 import eu.wohlben.qits.artifacts.entity.RepositoryType;
+import io.quarkus.arc.ClientProxy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
@@ -72,7 +73,7 @@ public class GcPlanner {
         continue;
       }
       GcStrategy strategy = claiming.get(0);
-      String name = strategy.getClass().getSimpleName();
+      String name = nameOf(strategy);
       try {
         GcStrategy.Plan plan = strategy.plan(census);
         plans.put(type, plan);
@@ -123,8 +124,21 @@ public class GcPlanner {
   }
 
   private static String names(List<GcStrategy> claiming) {
-    return String.join(
-        ", ", claiming.stream().map(strategy -> strategy.getClass().getSimpleName()).sorted().toList());
+    return String.join(", ", claiming.stream().map(GcPlanner::nameOf).sorted().toList());
+  }
+
+  /**
+   * The class a reviewer would recognise, not the class CDI handed over.
+   *
+   * <p>A normal-scoped bean is injected as a client proxy, so {@code getClass().getSimpleName()}
+   * reads {@code SomeGcStrategy_ClientProxy} — a name that appears in no source file and sends
+   * whoever greps for it nowhere. Every strategy so far is {@code @Singleton} (a pseudo-scope, so no
+   * proxy) and the shipped names are asserted, but that is a choice each new strategy has to make
+   * correctly, and the report is the wrong place to find out it was made wrong. Unwrapping here
+   * costs one call and removes the question.
+   */
+  static String nameOf(Object strategy) {
+    return ClientProxy.unwrap(strategy).getClass().getSimpleName();
   }
 
   /**

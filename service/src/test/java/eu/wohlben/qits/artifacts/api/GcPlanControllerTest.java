@@ -15,10 +15,16 @@ import org.junit.jupiter.api.Test;
  * The GC plan on the wire, and the things it must say when there is nothing to say.
  *
  * <p>The report is all zeros here — and the whole point of this suite is that zeros arrive with
- * reasons attached: four types naming that nobody collects them, {@code oci-images} naming the
- * strategy that does and the reason it refused, a sweep that would unlink nothing, and the row-less
- * pool listed as untouchable. A report that answered {@code {}} would be indistinguishable from a
- * broken one.
+ * reasons attached: three types naming that nobody collects them, {@code oci-images} naming the
+ * strategy that does and the reason it refused, {@code npm-packages} naming the strategy that ran
+ * and found nothing to condemn, a sweep that would unlink nothing, and the row-less pool listed as
+ * untouchable. A report that answered {@code {}} would be indistinguishable from a broken one.
+ *
+ * <p>{@code npm-packages} planning <b>zero</b> reclaimable bytes is a fact about the npm suite, not
+ * a coincidence: every case there publishes under a uniquely generated package name and at most one
+ * {@code -main.g<sha>} build per name, so no build is ever superseded. A new npm case that published
+ * two builds of one package would condemn one of them and land here — which is the right place to
+ * find that out.
  *
  * <p>{@code oci-images} refusing is the deployed behaviour under a broken dependency, not a test
  * artefact: its keep-set is fetched from qits-cd at plan time, this repository has no qits-cd, and
@@ -46,12 +52,14 @@ class GcPlanControllerTest {
             "types.type",
             org.hamcrest.Matchers.containsInAnyOrder(
                 "ci-screenshots", "ci-videos", "oci-images", "npm-packages", "npm-proxy"))
+        .body("types.find { it.type == 'oci-images' }.strategy", is("OciImageGcStrategy"))
+        .body("types.find { it.type == 'npm-packages' }.strategy", is("NpmPackagesGcStrategy"))
         .body(
-            "types.find { it.type == 'oci-images' }.strategy", is("OciImageGcStrategy"))
-        .body(
-            "types.findAll { it.type != 'oci-images' }.note",
+            "types.findAll { !(it.type in ['oci-images', 'npm-packages']) }.note",
             everyItem(org.hamcrest.Matchers.startsWith("no strategy registered")))
-        .body("types.findAll { it.type != 'oci-images' }.strategy", everyItem(nullValue()))
+        .body(
+            "types.findAll { !(it.type in ['oci-images', 'npm-packages']) }.strategy",
+            everyItem(nullValue()))
         .body("types.reclaimableBytes", everyItem(is(0)));
   }
 
@@ -68,6 +76,26 @@ class GcPlanControllerTest {
         .body("types.find { it.type == 'oci-images' }.dead", hasSize(0))
         .body("types.find { it.type == 'oci-images' }.kept", hasSize(0))
         .body("types.find { it.type == 'oci-images' }.blobsSweepable", is(0));
+  }
+
+  @Test
+  void npmPackagesPlansForItselfAndLeavesTheProxyToItsOwnDecision() {
+    // The scope, on the wire. npm-proxy shares the npm_version table with the hosted registry and is
+    // deliberately unclaimed — its content is a cache, so its policy is eviction and the plan parks
+    // it. "No strategy registered" is the honest report of a decision nobody has taken yet, and a
+    // strategy quietly claiming the type to answer "nothing to do" would erase it.
+    given()
+        .when()
+        .get("/artifacts/api/gc/plan")
+        .then()
+        .statusCode(200)
+        .body("types.find { it.type == 'npm-packages' }.error", nullValue())
+        .body("types.find { it.type == 'npm-packages' }.note", nullValue())
+        .body("types.find { it.type == 'npm-packages' }.dead", hasSize(0))
+        .body("types.find { it.type == 'npm-proxy' }.strategy", nullValue())
+        .body(
+            "types.find { it.type == 'npm-proxy' }.note",
+            is("no strategy registered for npm-proxy"));
   }
 
   @Test

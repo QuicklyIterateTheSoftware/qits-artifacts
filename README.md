@@ -450,7 +450,8 @@ that needed a field we dropped.
 does not hash to its name is not a blob". The bytes then go through `BlobStore` like everything
 else, so a tarball's *storage* key is its sha256 while npm's two hashes are stored columns
 re-emitted in packuments; the store stays sha256-only. **Versions are immutable**: re-publishing one
-is `403`. Only `npm_dist_tag` mutates.
+is `403`, and so is publishing over a version garbage collection removed — a version name is never
+reused, even after its row is gone (see "Garbage collection"). Only `npm_dist_tag` mutates.
 
 **`latest` only moves forward.** It is the one dist-tag with an ordering rule: a publish may not
 point it at a version sorting below the one it names, by semver precedence — and a prerelease sorts
@@ -787,7 +788,7 @@ is the substrate's job. A strategy that cannot establish its keep-set safely **t
 reports the type as failed and treats every blob the census attributes to it as live, so an
 unreachable dependency reclaims nothing instead of guessing.
 
-### `oci-images`, the one strategy that exists
+### `oci-images`, the first of the two strategies that exist
 
 `OciImageGcStrategy` implements the row the table above gives it. Five rules, each named in the
 report beside the identity it saved:
@@ -811,6 +812,38 @@ policy, listing environments and then each environment's deployments, and the ke
 over **all** environments rather than one configured id — over-keeping is safe here and under-keeping
 ends in `IMAGE_MISSING`. Any failure aborts that type with nothing planned.
 
+### `npm-packages`, the second — and the tombstone only it needs
+
+`NpmPackagesGcStrategy` implements its own row of the table. It shares no code with the strategy
+above beyond the seam, and the resemblance stops as soon as the rules are spelled out:
+
+| Kept because | Spelled |
+|---|---|
+| it is a release | the version has **no prerelease part** — `0.0.1` through `2026.801.85149`. Consumers pin ranges, and `^2026.801.85149` has to keep resolving. Never eligible: not by age, not because a newer release exists |
+| it is the current main build | the newest `-main.g<sha7>` per package, by **semver precedence** (`NpmSemver`), which is what `@main` resolves to. `…85149-main.gd43d710` outranks `…85149-main.g21655ba` because prerelease identifiers compare as ASCII |
+| a pointer names it | belt and braces: any version a dist-tag currently names. Today it changes no outcome, which is exactly when a backstop is worth having — a packument naming a version its `versions` does not list is a broken package |
+| nobody modelled it | a prerelease of an unrecognised shape (an `-rc.1`), or a version that is not semver at all and so cannot be proved superseded. Only main builds are ever condemned |
+
+`npm-proxy` is **not** claimed, though it shares the `npm_version` table: its content is a cache of
+upstream, so its policy is eviction rather than retention and the design parks it. "No strategy
+registered for npm-proxy" is the honest report of a decision nobody has taken.
+
+**The tombstone is npm's alone, and docker needs nothing like it.** Version immutability is enforced
+by looking for the row (publish over an existing version is `403`), so deleting a row would quietly
+re-open that version's name for a publish carrying different bytes — one coordinate resolving to two
+tarballs over its lifetime, the mutability this registry exists to refuse. Immutability's meaning
+narrows honestly from *"a version row is never touched"* to *"a version, once published, is never
+republished"*, and `npm_version_tombstone` (V6) carries the second half after the first stops being
+true. `publish` consults it and answers a `403` that says **garbage-collected**, not *immutable*: a
+pusher told "immutable" goes looking for a version that is not there. An OCI tag is a movable pointer
+by design and re-pushing one has always been legal, so there is no promise for a deletion to weaken
+on that side.
+
+`NpmRegistryService.collect` is the only way a version row ever leaves, it writes the tombstone in the
+same transaction, and it refuses a version a dist-tag still names. It is package-private and called
+by nobody — collection is dry-run — and it ships ahead of its caller so the tombstone can never be a
+step someone forgets.
+
 ### What the plan says
 
 ```jsonc
@@ -826,8 +859,15 @@ ends in `IMAGE_MISSING`. Any failure aborts that type with nothing planned.
       "kept": [{ "repository": "qits", "identity": "qits-stt:2026.801.85448",
                  "rule": "calver release tag — releases are never eligible" }],
       "blobsReleased": 0, "blobsSweepable": 0, "reclaimableBytes": 0 },
-    { "type": "npm-packages", "strategy": null,
-      "note": "no strategy registered for npm-packages", "error": null,
+    { "type": "npm-packages", "strategy": "NpmPackagesGcStrategy",
+      "note": null, "error": null,
+      "dead": [{ "repository": "npm", "identity": "@qits/ui-components@2026.801.63140-main.gab854a1",
+                 "rule": "superseded main build: a newer one exists and no dist-tag names it" }],
+      "kept": [{ "repository": "npm", "identity": "@qits/ui-components@2026.801.85149",
+                 "rule": "release version — no prerelease part, so consumers' ranges resolve to it; releases are never eligible" }],
+      "blobsReleased": 1, "blobsSweepable": 1, "reclaimableBytes": 17904 },
+    { "type": "npm-proxy", "strategy": null,
+      "note": "no strategy registered for npm-proxy", "error": null,
       "dead": [], "kept": [],
       "blobsReleased": 0, "blobsSweepable": 0, "reclaimableBytes": 0 }
   ],
@@ -840,8 +880,8 @@ ends in `IMAGE_MISSING`. Any failure aborts that type with nothing planned.
 Three details a reader trips over otherwise:
 
 - **A type with no strategy says so.** "Nothing to collect" and "nobody is collecting" are different
-  answers, and only one of them is fine. One type is collected today (`oci-images`); the other four
-  report their reason rather than going missing.
+  answers, and only one of them is fine. Two types are collected today (`oci-images`,
+  `npm-packages`); the other three report their reason rather than going missing.
 - **`sweep` is not the sum of the per-type figures.** A blob dies once, and two types releasing the
   same content free it once. The per-type numbers answer "what does this rule buy on its own"; the
   sweep answers "what would a run free tonight".

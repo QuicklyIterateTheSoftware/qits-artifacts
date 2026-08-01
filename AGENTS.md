@@ -272,21 +272,43 @@ anyway. Pack GC is its own later workstream and needs the DFS migration first.
   reuse the other's policy is the wrong change. Two beans claiming one type is reported as a
   collision, never merged.
 
-One strategy exists: `OciImageGcStrategy` (`oci-images`). Three things about it cost time otherwise.
+Two strategies exist: `OciImageGcStrategy` (`oci-images`) and `NpmPackagesGcStrategy`
+(`npm-packages`). Three things they share cost time otherwise.
 
-- **It is `@Singleton`, not `@ApplicationScoped`, and the reason is the report.** `GcPlanner` names a
-  strategy by `getClass().getSimpleName()`, and a normal-scoped bean answers that through its client
-  proxy — the report would read `OciImageGcStrategy_ClientProxy`. `@Singleton` is a pseudo-scope, so
-  there is no proxy and still one instance. `GcPlanTest` asserts the name; every future strategy has
-  the same choice to make.
-- **It reads the census for nothing.** The census carries blobs, not identities, so the rules are
-  computed from `oci_tag` / `oci_manifest` rows and `OciManifestFootprints` directly. The two blob
-  sets it returns are in the census's vocabulary, which is what the substrate reconciles over — and
-  a test asserts `blobsRetained` equals the census's own OCI live set when nothing dies.
-- **Its `plan()` performs an HTTP call**, which the seam's javadoc anticipates. See "Adding a
-  dependency on another context" above; the suites point `qits.artifacts.gc.oci.cd-base-url` at a
-  closed port, so both `GcPlanTest` and `GcPlanControllerTest` assert the fail-closed path rather
-  than avoiding it.
+- **Both are `@Singleton`, not `@ApplicationScoped`, and the reason is the report.** `GcPlanner`
+  names a strategy by its class's simple name, and a normal-scoped bean would answer that through its
+  client proxy — `OciImageGcStrategy_ClientProxy`, a name in no source file. `@Singleton` is a
+  pseudo-scope, so there is no proxy and still one instance. `GcPlanner.nameOf` also unwraps a proxy
+  if it gets one, so a strategy that forgets is merely inconsistent rather than misreported; both
+  names are asserted.
+- **Neither reads the census.** The census carries blobs, not identities, so the rules are computed
+  from the type's own rows — `oci_tag`/`oci_manifest` plus `OciManifestFootprints` for one,
+  `npm_version`/`npm_dist_tag` for the other. The two blob sets they return are in the census's
+  vocabulary, which is what the substrate reconciles over, and each suite asserts `blobsRetained`
+  equals the census's own live set for the type when nothing dies.
+- **`OciImageGcStrategy.plan()` performs an HTTP call**, which the seam's javadoc anticipates. See
+  "Adding a dependency on another context" above; the suites point `qits.artifacts.gc.oci.cd-base-url`
+  at a closed port, so both `GcPlanTest` and `GcPlanControllerTest` assert the fail-closed path rather
+  than avoiding it. `NpmPackagesGcStrategy` has no such dependency and therefore never fails closed —
+  a plan of its type carrying an `error` means something else is wrong.
+
+Two things are npm's alone, and the plan is explicit that docker needs neither:
+
+- **The republish tombstone (V6, `npm_version_tombstone`).** Version immutability is enforced by
+  looking for the row, so deleting a version re-opens its name for a publish with different bytes.
+  `NpmRegistryService.publish` checks the tombstone as well as the row and answers a 403 that says
+  *garbage-collected*, not *immutable* — a pusher told "immutable" goes looking for a version that is
+  not there. A separate table rather than a flag on `npm_version`, because the packument is assembled
+  from those rows at read time and a marker column would need a `where` clause in every reader.
+- **`NpmRegistryService.collect` is package-private and called by nobody**, exactly like
+  `BlobStore.delete`: it is the only way a version row is ever removed, it writes the tombstone in the
+  same transaction, and it refuses a version a dist-tag still names (a dist-tag pointing at a version
+  the packument no longer lists is a broken package to every npm client). GC is dry-run, so nothing
+  calls it yet — it ships first so the tombstone is never a step someone has to remember.
+
+`npm-proxy` is deliberately unclaimed. It shares `npm_version` with the hosted registry, so the scope
+is asserted rather than assumed (`NpmPackagesGcStrategyTest`); the planner's "no strategy registered
+for npm-proxy" is the honest report of a decision nobody has taken.
 
 `BlobStore.delete` is package-private for the same reason `promote` is the one write funnel: the
 constraints (grace window off the file mtime, the pre-unlink guard inside the write lock `promote`
@@ -308,7 +330,7 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 
 ## Tests
 
-- `mvn verify` runs 305 tests (113 in `artifacts/`, 18 in `git-storage/`, 174 in `service/`) in about
+- `mvn verify` runs 317 tests (124 in `artifacts/`, 18 in `git-storage/`, 175 in `service/`) in about
   a minute. Nothing here
   needs docker — and that is the constraint that shapes the registry suite: `docker`, `podman` and
   `skopeo` may not be assumed present, so `registry/OciClient` + `registry/TinyImage` synthesise a

@@ -475,10 +475,13 @@ class PackagedProcessIT {
     // nothing references. The store here holds blobs pushed by the cases above, so the row-less
     // figures are a real reading rather than a zero that would pass either way.
     //
-    // Four of the five types have no strategy and must say so. The fifth, oci-images, must name the
-    // one that does — and, with no qits-cd to answer, must report the refusal rather than a plan.
-    // That fail-closed path only exists in the binary if the JDK HttpClient survived the compile, so
-    // this is the one assertion here that a JVM test cannot make on its behalf.
+    // Three of the five types have no strategy and must say so. oci-images must name the one that
+    // does — and, with no qits-cd to answer, must report the refusal rather than a plan. That
+    // fail-closed path only exists in the binary if the JDK HttpClient survived the compile, so this
+    // is the one assertion here that a JVM test cannot make on its behalf. npm-packages is the
+    // opposite case, and worth its own line for it: its rules read rows this process really
+    // published, run with no outbound call at all, and condemn nothing — both packages above are
+    // releases, and releases are never eligible.
     given()
         .when()
         .get("/artifacts/api/gc/plan")
@@ -491,10 +494,13 @@ class PackagedProcessIT {
         .body("types.find { it.type == 'oci-images' }.error", containsString("qits-cd"))
         .body("types.find { it.type == 'oci-images' }.dead", hasSize(0))
         .body(
-            "types.find { it.type == 'npm-packages' }.note",
-            containsString("no strategy registered"))
-        .body("types.find { it.type == 'npm-packages' }.strategy", nullValue())
+            "types.find { it.type == 'npm-packages' }.strategy", equalTo("NpmPackagesGcStrategy"))
+        .body("types.find { it.type == 'npm-packages' }.error", nullValue())
+        .body("types.find { it.type == 'npm-packages' }.dead", hasSize(0))
         .body("types.find { it.type == 'npm-packages' }.reclaimableBytes", equalTo(0))
+        .body(
+            "types.find { it.type == 'npm-proxy' }.note", containsString("no strategy registered"))
+        .body("types.find { it.type == 'npm-proxy' }.strategy", nullValue())
         .body("sweep.blobCount", equalTo(0))
         .body("sweep.blobIds", hasSize(0))
         .body("untouchable.blobCount", greaterThanOrEqualTo(0))
