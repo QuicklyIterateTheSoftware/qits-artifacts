@@ -16,7 +16,6 @@ import eu.wohlben.qits.artifacts.error.NotFoundException;
 import eu.wohlben.qits.artifacts.persistence.ArtifactRecordRepository;
 import eu.wohlben.qits.artifacts.persistence.ArtifactRepositoryRepository;
 import eu.wohlben.qits.artifacts.persistence.NpmDistTagRepository;
-import eu.wohlben.qits.artifacts.persistence.NpmProxyPackumentRepository;
 import eu.wohlben.qits.artifacts.persistence.NpmVersionRepository;
 import eu.wohlben.qits.artifacts.persistence.OciManifestRepository;
 import eu.wohlben.qits.artifacts.persistence.OciTagRepository;
@@ -58,9 +57,9 @@ public class ArtifactExplorerService {
   @Inject OciTagRepository tags;
   @Inject NpmVersionRepository versions;
   @Inject NpmDistTagRepository distTags;
-  @Inject NpmProxyPackumentRepository packuments;
   @Inject OciManifestFootprints footprints;
   @Inject BlobDiskIndex diskIndex;
+  @Inject LiveBlobCensus census;
 
   /** Every repository, with the one count and the one size its type can answer. */
   public List<RepositorySummary> listRepositories() {
@@ -170,56 +169,22 @@ public class ArtifactExplorerService {
   /**
    * The seven figures that do not reconcile, and the gaps between them.
    *
-   * <p>One disk walk and one pass over the manifests answers all of it: the referenced set is what
-   * the OCI union and the npm tarballs name, and the orphans are what is left on disk after
-   * removing it.
+   * <p>One disk walk and one pass over the manifests answers all of it, and that pass is {@link
+   * LiveBlobCensus} — the same reading garbage collection plans from. Deliberately not a second
+   * computation of the same thing: the set this panel calls live and the set a sweep protects have
+   * to be one set, or the day they drift is the day a sweep deletes something this page called
+   * referenced.
    */
   public StoreSummary storeSummary() {
-    Map<String, Long> onDisk = diskIndex.sizes();
-    Set<String> referenced = new HashSet<>();
-
-    long perImageSum = 0;
-    Map<String, Long> ociUnion = new HashMap<>();
-    for (ArtifactRepository repository : repositories.listAll()) {
-      if (repository.type != RepositoryType.OCI_IMAGES) {
-        continue;
-      }
-      for (String image : manifests.listImageNames(repository.name)) {
-        Map<String, Long> perImage = footprints.union(manifests.listByImage(repository.name, image));
-        perImageSum += OciManifestFootprints.sum(perImage);
-        perImage.forEach(ociUnion::putIfAbsent);
-      }
-    }
-    referenced.addAll(ociUnion.keySet());
-
-    List<String> hosted = namesOfType(RepositoryType.NPM_PACKAGES);
-    List<String> proxied = namesOfType(RepositoryType.NPM_PROXY);
-    long npmPublished = tarballBytes(hosted, onDisk, referenced);
-    long npmProxyTarballs = tarballBytes(proxied, onDisk, referenced);
-
-    for (ArtifactRepository repository : repositories.listAll()) {
-      for (Object[] blob : records.listDistinctBlobs(repository.name)) {
-        referenced.add((String) blob[0]);
-      }
-    }
-
-    long orphans = 0;
-    long diskTotal = 0;
-    for (Map.Entry<String, Long> file : onDisk.entrySet()) {
-      diskTotal += file.getValue();
-      if (!referenced.contains(file.getKey())) {
-        orphans += file.getValue();
-      }
-    }
-
+    LiveBlobCensus.Census taken = census.take();
     return new StoreSummary(
-        perImageSum,
-        OciManifestFootprints.sum(ociUnion),
-        orphans,
-        npmPublished,
-        npmProxyTarballs,
-        packuments.totalDocLength(proxied),
-        diskTotal);
+        taken.ociPerImageSumBytes(),
+        taken.liveBytes(RepositoryType.OCI_IMAGES),
+        taken.rowlessBytes(),
+        taken.liveBytes(RepositoryType.NPM_PACKAGES),
+        taken.liveBytes(RepositoryType.NPM_PROXY),
+        taken.npmProxyPackumentBytes(),
+        taken.diskTotalBytes());
   }
 
   /**
@@ -296,12 +261,5 @@ public class ArtifactExplorerService {
       distinct.putIfAbsent((String) blob[0], (Long) blob[1]);
     }
     return OciManifestFootprints.sum(distinct);
-  }
-
-  private List<String> namesOfType(RepositoryType type) {
-    return repositories.listAll().stream()
-        .filter(repository -> repository.type == type)
-        .map(repository -> repository.name)
-        .toList();
   }
 }

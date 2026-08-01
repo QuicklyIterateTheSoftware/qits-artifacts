@@ -16,6 +16,7 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
+import java.time.Duration;
 import java.util.HexFormat;
 import org.junit.jupiter.api.Test;
 
@@ -128,6 +129,57 @@ class BlobStoreTest extends ArtifactsTestSupport {
   @Test
   void unknownButWellShapedIdIsNotFound() {
     assertThrows(NotFoundException.class, () -> blobStore.open("a".repeat(64)));
+  }
+
+  @Test
+  void deleteRefusesABlobWhoseFileIsInsideTheGraceWindow() {
+    // The upload race, closed by arithmetic rather than by hope: a blob written moments ago may be
+    // the one a manifest is about to name, and the sweep's census cannot see a request in flight.
+    String blobId = stored(21);
+
+    assertEquals(BlobStore.DeleteResult.WITHIN_GRACE_WINDOW, blobStore.delete(blobId, id -> true));
+    assertTrue(blobStore.exists(blobId), "refused means the bytes are still there");
+  }
+
+  @Test
+  void deleteRefusesWhenTheRecensusStillFindsAReference() throws Exception {
+    // A plan is a photograph. Between the census it was built from and this unlink, a push may have
+    // made the blob live again — so the last word is the guard's, inside the store's write lock.
+    String blobId = stored(22);
+    backdate(blobId, Duration.ofDays(30));
+
+    assertEquals(BlobStore.DeleteResult.STILL_REFERENCED, blobStore.delete(blobId, id -> false));
+    assertTrue(blobStore.exists(blobId));
+  }
+
+  @Test
+  void deleteUnlinksAnAgedUnreferencedBlobAndInvalidatesTheDiskIndex() throws Exception {
+    // The one path that removes bytes. It sends the same write signal promote does, or the store
+    // summary would keep reporting a file that is gone until the index's age ceiling expired.
+    String blobId = stored(23);
+    backdate(blobId, Duration.ofDays(30));
+    assertTrue(diskIndex.sizes().containsKey(blobId));
+
+    assertEquals(BlobStore.DeleteResult.DELETED, blobStore.delete(blobId, id -> true));
+
+    assertFalse(blobStore.exists(blobId));
+    assertFalse(diskIndex.sizes().containsKey(blobId), "the summary must not still count it");
+  }
+
+  @Test
+  void deleteAnswersRatherThanThrowsForAMissingFileAndAMalformedId() {
+    // Every outcome here is normal. A sweep runs against a store that moved under it, and a
+    // primitive that threw on "already gone" would make the ordinary case look like a failure.
+    assertEquals(BlobStore.DeleteResult.ALREADY_GONE, blobStore.delete("a".repeat(64), id -> true));
+    assertEquals(
+        BlobStore.DeleteResult.NOT_A_BLOB_ID, blobStore.delete("../../etc/passwd", id -> true));
+  }
+
+  private String stored(int seed) {
+    BlobStore.StagedBlob staged =
+        blobStore.stage(new ByteArrayInputStream(TestMedia.png(2, 2, seed)), 1024);
+    blobStore.promote(staged);
+    return staged.sha256();
   }
 
   private static String sha256(byte[] bytes) throws IOException {

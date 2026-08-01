@@ -227,7 +227,7 @@ in `service` and not in the jar's `microprofile-config.properties` because that 
 ### We do not garbage collect git
 
 Not "we have not got round to it" — a recorded decision with a number beside it
-(`git-host-storage-unification-plan.md`, ⚖2). `BlobStore` has no delete, so a repack does not reclaim
+(`git-host-storage-unification-plan.md`, ⚖2). Nothing frees a blob, so a repack does not reclaim
 space, it **duplicates**: `DfsGarbageCollector` writes the new pack, the packs it replaced lose their
 catalog rows, and their bytes stay forever. Measured on the platform's largest real repository, one
 run took it from **7.8 MB to 15 MB** — against 8.4 MB for the bare it replaced.
@@ -237,6 +237,35 @@ repository per year** at the measured rate, against a blob store already past 5 
 down because the one thing that must never happen is someone running a repack to save space. The
 posture is repeated in `V4__git_pack_catalog.sql`, in `GitPack`'s javadoc and in
 `git-storage/README.md`, and `GarbageCollectionTest` asserts the amplification rather than hiding it.
+
+`BlobStore` **now has a delete** and this paragraph still holds, which is worth being precise about:
+it is package-private, its only permitted caller is `BlobSweep`, and `BlobSweep` does not call it —
+the sweep ships dry-run (see "Garbage collection" below). So a repack still duplicates, the measured
+7.8 MB → 15 MB stands, and the git pack blobs are row-less to the census and therefore untouchable
+anyway. Pack GC is its own later workstream and needs the DFS migration first.
+
+## Garbage collection
+
+`README.md`'s "Garbage collection" section is the contract; these are the three rules that get
+"helpfully" refactored away.
+
+- **One census.** `LiveBlobCensus` is what the store summary reads *and* what a GC plan reads. A
+  second computation of "what is live" is a set the UI reports and a set a sweep protects, drifting
+  until a sweep deletes something the page called referenced. `ArtifactExplorerService.storeSummary`
+  delegates to it; the explorer's own tests are the byte-exactness proof.
+- **Row-less blobs are untouchable, structurally.** A blob becomes a candidate only by *losing* its
+  last identity row to a strategy's own deletion, so one that never had a row cannot be reached. This
+  is not an allowlist and must not become one: 124 MiB of this store has no row, and one of those
+  blobs is the CI daemon binary every build downloads by digest.
+- **Five strategies, no shared policy.** `GcStrategy` is the only thing they share — no base class,
+  no retention framework. Docker's and npm's rules look alike by coincidence; a change that lets one
+  reuse the other's policy is the wrong change. Two beans claiming one type is reported as a
+  collision, never merged.
+
+`BlobStore.delete` is package-private for the same reason `promote` is the one write funnel: the
+constraints (grace window off the file mtime, the pre-unlink guard inside the write lock `promote`
+also takes, `BlobDiskIndex` invalidation) only hold if there is one way in. Adding a second caller,
+or widening it to public, removes them without failing anything.
 
 ## Authentication
 
@@ -253,7 +282,7 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 
 ## Tests
 
-- `mvn verify` runs 277 tests (89 in `artifacts/`, 18 in `git-storage/`, 170 in `service/`) in about
+- `mvn verify` runs 295 tests (104 in `artifacts/`, 18 in `git-storage/`, 173 in `service/`) in about
   a minute. Nothing here
   needs docker — and that is the constraint that shapes the registry suite: `docker`, `podman` and
   `skopeo` may not be assumed present, so `registry/OciClient` + `registry/TinyImage` synthesise a
@@ -272,8 +301,8 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   than by touching its fields, and the reason is worth knowing before writing another one: Quarkus
   instantiates a `QuarkusTestProfile` in **two** classloaders, so a static singleton exists twice
   and the application ends up talking to a different instance than the test configures.
-- `mvn verify -Dnative` runs those, then 18 more against the compiled binary: `PackagedProcessIT`
-  (16) and `ProtectedGitHostIT` (2). They are two classes because they are two process
+- `mvn verify -Dnative` runs those, then 19 more against the compiled binary: `PackagedProcessIT`
+  (17) and `ProtectedGitHostIT` (2). They are two classes because they are two process
   configurations — `PackagedProcessIT` asserts the SHIPPED defaults leave the default branch
   unprotected, and the seatbelt cases need it on — and `@TestProfile` is per class. The protection
   cases used to turn it on per repository with one `git config` on the served bare; the override is

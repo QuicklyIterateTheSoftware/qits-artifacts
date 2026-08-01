@@ -12,6 +12,9 @@ import jakarta.inject.Inject;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Map;
@@ -65,6 +68,19 @@ abstract class ArtifactsTestSupport {
     // but this wipes the directory from outside it, which is exactly the out-of-band change its age
     // ceiling exists for. Saying so here rather than waiting a minute for it.
     diskIndex.invalidate();
+  }
+
+  /**
+   * Ages a blob file past the sweep's grace window.
+   *
+   * <p>The window is read off the file's mtime, and a test's blobs are always seconds old — so
+   * without this every GC case would assert on what was withheld rather than on the reconciliation.
+   * Backdating is also the honest way round: it exercises the same clock comparison production runs
+   * instead of configuring the window away.
+   */
+  void backdate(String blobId, Duration age) throws IOException {
+    Path path = Path.of(blobsDir, blobId.substring(0, 2), blobId);
+    Files.setLastModifiedTime(path, FileTime.from(Instant.now().minus(age)));
   }
 
   /** The full required-key set for a ci-screenshots upload of the given dimensions. */
