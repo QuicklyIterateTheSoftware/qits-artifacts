@@ -338,8 +338,9 @@ or widening it to public, removes them without failing anything.
 
 ## Authentication
 
-Authentication happens at `qits-gateway`. This service resolves a principal from a trusted header
-(`X-Qits-User`, read by `artifacts/security/ForwardAuthMechanism`) and authenticates nothing.
+User authentication happens at `qits-gateway`. This service resolves a principal from a trusted
+header (`X-Qits-User`, read by `ForwardAuthMechanism` in the `qits-auth-core` jar — the nested
+`qits-integrations-quarkus` submodule) and authenticates no user itself.
 
 **`identity.isAnonymous()` is not a security state** — it means "no name for the audit row". A check
 of the form `if (identity.isAnonymous()) deny` would look like a security control and be worth

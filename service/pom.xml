@@ -56,6 +56,14 @@
             <artifactId>qits-artifacts-git-storage</artifactId>
         </dependency>
         <dependency>
+            <!-- The platform's shared auth jar (integrations/qits-integrations-quarkus, built here
+                 as a nested submodule): forward-auth for user traffic — the ForwardAuthMechanism
+                 pair this module used to carry its own copy of — plus MachineAuth, the claim checks
+                 and the one gate that turns machine-token enforcement on. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-auth-core</artifactId>
+        </dependency>
+        <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-arc</artifactId>
         </dependency>
@@ -67,10 +75,10 @@
             <artifactId>quarkus-opentelemetry</artifactId>
         </dependency>
         <dependency>
-            <!-- SecurityIdentity + the HttpAuthenticationMechanism SPI, for the single thing this
-                 service does about auth: read qits-gateway's X-Qits-User header into an identity
-                 (see security/ForwardAuthMechanism). NOT an auth variant and NOT an authorization
-                 policy — the monolith's -Dqits.variant auth/* modules do not come here at all;
+            <!-- SecurityIdentity + the HttpAuthenticationMechanism SPI. qits-auth-core needs both
+                 and declares them itself; named here too because this module's own code reads a
+                 SecurityIdentity. NOT an auth variant and NOT an authorization policy — the
+                 monolith's -Dqits.variant auth/* modules do not come here at all; user
                  authentication terminates at the gateway (migration-auth-plan.md). -->
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-security</artifactId>
