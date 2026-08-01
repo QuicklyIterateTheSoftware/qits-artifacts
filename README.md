@@ -443,6 +443,16 @@ else, so a tarball's *storage* key is its sha256 while npm's two hashes are stor
 re-emitted in packuments; the store stays sha256-only. **Versions are immutable**: re-publishing one
 is `403`. Only `npm_dist_tag` mutates.
 
+**`latest` only moves forward.** It is the one dist-tag with an ordering rule: a publish may not
+point it at a version sorting below the one it names, by semver precedence — and a prerelease sorts
+below its own release. The rule exists because a bare `npm publish` means `--tag latest`, so a main
+build publishing `<release>-main.g<sha>` would take `latest` backwards permanently and every
+consumer installing without a range would get a main build. Publish prereleases under their own tag
+(`npm publish --tag main`); every tag other than `latest` moves anywhere. A first `latest` is always
+allowed, an equal one is a no-op, and a version that does not parse as semver is refused rather than
+passed through. The refusal is a `403` that takes the whole publish with it, exactly as the
+immutability one does.
+
 `dist.tarball` **must be absolute** — npm refuses a relative one, so the OCI registry's
 path-form-`Location` trick does not transfer. It is built from `X-Forwarded-Host`/`X-Forwarded-Proto`
 when present and from the request's own authority otherwise, and **no config key names it**: the

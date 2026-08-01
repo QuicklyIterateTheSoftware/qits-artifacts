@@ -111,6 +111,95 @@ class NpmRegistryStorageTest extends ArtifactsTestSupport {
   }
 
   @Test
+  void aBarePublishOfAPrereleaseCannotTakeLatestBackwards() {
+    // The foot-gun this rule closes: a bare `npm publish` means --tag latest, so a main build
+    // publishing <release>-main.g<sha> would move latest onto a prerelease permanently and every
+    // consumer installing without a range would get a main build.
+    repositoryService.ensure("npm", RepositoryType.NPM_PACKAGES);
+    npm.publish("npm", "@qits/ui", "2026.801.63140", BLOB_A, "sha512-a", "a", "{}",
+        Map.of("latest", "2026.801.63140"));
+
+    NpmException refused =
+        assertThrows(
+            NpmException.class,
+            () ->
+                npm.publish(
+                    "npm", "@qits/ui", "2026.801.63140-main.g0fe7780", BLOB_B, "sha512-b", "b", "{}",
+                    Map.of("latest", "2026.801.63140-main.g0fe7780")));
+    assertEquals(403, refused.statusCode());
+    assertTrue(refused.getMessage().contains("--tag main"), refused.getMessage());
+
+    // The refusal takes the whole publish with it — it is thrown inside publish()'s transaction,
+    // which is the same shape the immutability refusal has and the reason nothing half-lands.
+    assertTrue(npm.findVersion("npm", "@qits/ui", "2026.801.63140-main.g0fe7780").isEmpty());
+    assertEquals(Map.of("latest", "2026.801.63140"), npm.distTags("npm", "@qits/ui"));
+  }
+
+  @Test
+  void everyOtherTagMovesFreelyAndANewerReleaseStillMovesLatest() {
+    // Every write first, then ONE read — the shape the rest of this suite already keeps, and here
+    // it is load-bearing rather than tidy. A @QuarkusTest already has a request context, so all
+    // these calls share one Hibernate session; a read between two writes creates that session
+    // outside any transaction, and a dist-tag row it loaded is then never flushed by the
+    // transaction that moves it. That is a property of the test — a route handler activates a fresh
+    // context, and therefore a fresh session, per call — but it looks exactly like a lost update.
+    repositoryService.ensure("npm", RepositoryType.NPM_PACKAGES);
+    npm.publish("npm", "@qits/ui", "2026.801.63140", BLOB_A, "sha512-a", "a", "{}",
+        Map.of("latest", "2026.801.63140"));
+
+    // The prerelease under its own tag is exactly what the pipelines should be doing, and it is
+    // unguarded: only `latest` has an ordering rule.
+    npm.publish("npm", "@qits/ui", "2026.801.63140-main.g0fe7780", BLOB_B, "sha512-b", "b", "{}",
+        Map.of("main", "2026.801.63140-main.g0fe7780"));
+
+    // And the next release moves latest forward, as it always did.
+    npm.publish("npm", "@qits/ui", "2026.802.100000", BLOB_A, "sha512-c", "c", "{}",
+        Map.of("latest", "2026.802.100000"));
+
+    assertEquals(
+        Map.of("latest", "2026.802.100000", "main", "2026.801.63140-main.g0fe7780"),
+        npm.distTags("npm", "@qits/ui"));
+  }
+
+  @Test
+  void theFirstLatestIsAlwaysAllowedHoweverItIsSpelled() {
+    // There is nothing to move backwards from, so a package whose very first publish is a
+    // prerelease still gets a resolvable `latest` — refusing that would make a package nobody can
+    // install by name.
+    repositoryService.ensure("npm", RepositoryType.NPM_PACKAGES);
+    npm.publish("npm", "first-pre", "0.0.1-main.gabc1234", BLOB_A, "sha512-a", "a", "{}",
+        Map.of("latest", "0.0.1-main.gabc1234"));
+    assertEquals(Map.of("latest", "0.0.1-main.gabc1234"), npm.distTags("npm", "first-pre"));
+  }
+
+  @Test
+  void theLatestRuleAllowsEqualAndRefusesWhatItCannotOrder() {
+    // Called directly: the equal case is unreachable through publish(), because a second publish of
+    // the same version dies on immutability first — which is precisely why equal is allowed here
+    // rather than guarded.
+    NpmRegistryService.requireLatestMayMoveTo("p", "1.2.3", "1.2.3");
+    NpmRegistryService.requireLatestMayMoveTo("p", "1.2.3", "1.2.4");
+    NpmRegistryService.requireLatestMayMoveTo("p", "1.2.3-rc.1", "1.2.3");
+
+    assertThrows(
+        NpmException.class, () -> NpmRegistryService.requireLatestMayMoveTo("p", "1.2.3", "1.2.2"));
+    // Strict beats silent: a version that cannot be ordered cannot be proved not to be a step
+    // backwards, and this platform publishes semver only.
+    NpmException candidate =
+        assertThrows(
+            NpmException.class,
+            () -> NpmRegistryService.requireLatestMayMoveTo("p", "1.2.3", "nightly"));
+    assertTrue(candidate.getMessage().contains("nightly is not a semver version"),
+        candidate.getMessage());
+    NpmException current =
+        assertThrows(
+            NpmException.class,
+            () -> NpmRegistryService.requireLatestMayMoveTo("p", "nightly", "1.2.3"));
+    assertTrue(current.getMessage().contains("nightly is not a semver version"),
+        current.getMessage());
+  }
+
+  @Test
   void aProxiedVersionIsRecordedOnceAndIsIdempotentAfterThat() {
     // Two concurrent installs of the same dependency are the normal case rather than the edge.
     repositoryService.ensure("npmjs", RepositoryType.NPM_PROXY);

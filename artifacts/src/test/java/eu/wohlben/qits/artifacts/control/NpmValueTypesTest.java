@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.artifacts.error.NpmException;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
@@ -122,6 +123,120 @@ class NpmValueTypesTest {
       // are npm's, re-emitted on the wire. A proxied version carries UPSTREAM's values, so they can
       // never be derived from what is on disk.
       assertEquals(40, NpmIntegrity.shasum(new byte[0]).length(), "sha1 hex is 40 chars, not 64");
+    }
+  }
+
+  @Nested
+  class Precedence {
+
+    @Test
+    void aPrereleaseSortsBelowTheReleaseItWasBuiltFrom() {
+      // The case the latest guard exists for, in the exact shape this platform publishes: a main
+      // build stamped <lastReleasedVersion>-main.g<sha> must never outrank that release.
+      assertBelow("2026.801.63140-main.g0fe7780", "2026.801.63140");
+      assertBelow("1.0.0-rc.1", "1.0.0");
+      // ...and it still outranks everything below that release, which is what makes it usable.
+      assertBelow("2026.731.193059", "2026.801.63140-main.g0fe7780");
+    }
+
+    @Test
+    void theCoreVersionComparesNumericallyRatherThanAsText() {
+      assertBelow("0.0.4", "2026.801.63140");
+      assertBelow("2.0.0", "10.0.0", "as text 10 sorts first");
+      assertBelow("1.9.0", "1.10.0");
+      assertBelow("1.0.9", "1.0.10");
+      // Nothing is converted to a number, so a calver patch of any width orders correctly.
+      assertBelow("2026.801.63140", "2026.801.99999999999999999999");
+    }
+
+    @Test
+    void theSpecsOwnExampleChainHolds() {
+      // semver.org §11, verbatim.
+      List<String> ascending =
+          List.of(
+              "1.0.0-alpha",
+              "1.0.0-alpha.1",
+              "1.0.0-alpha.beta",
+              "1.0.0-beta",
+              "1.0.0-beta.2",
+              "1.0.0-beta.11",
+              "1.0.0-rc.1",
+              "1.0.0");
+      for (int i = 1; i < ascending.size(); i++) {
+        assertBelow(ascending.get(i - 1), ascending.get(i));
+      }
+    }
+
+    @Test
+    void aNumericIdentifierAlwaysSortsBelowAnAlphanumericOne() {
+      assertBelow("1.0.0-2", "1.0.0-alpha", "numeric identifiers rank lower, whatever their value");
+      assertBelow("1.0.0-999999", "1.0.0-a");
+      // Which is also why the `g` prefix on the sha is load-bearing: it keeps the identifier
+      // alphanumeric no matter how many digits the abbreviated sha happens to be.
+      assertBelow("1.0.0-main.1", "1.0.0-main.g0fe7780");
+    }
+
+    @Test
+    void aLongerPrereleaseOutranksAPrefixOfItself() {
+      assertBelow("1.0.0-alpha", "1.0.0-alpha.1");
+      assertBelow("1.0.0-main.g0fe7780", "1.0.0-main.g0fe7780.1");
+    }
+
+    @Test
+    void buildMetadataIsParsedAndThenIgnored() {
+      assertEquals(
+          0,
+          NpmSemver.parse("1.0.0+build.1").orElseThrow()
+              .compareTo(NpmSemver.parse("1.0.0+build.2").orElseThrow()),
+          "two versions differing only in build metadata have equal precedence");
+      assertEquals(
+          0,
+          NpmSemver.parse("1.0.0").orElseThrow()
+              .compareTo(NpmSemver.parse("1.0.0+anything").orElseThrow()));
+    }
+
+    @Test
+    void aLeadingZeroMeansTheStringIsNotAVersionAtAll() {
+      // Not a synonym for the unpadded form: refusing to parse is what stops "01" and "1" being
+      // ordered against each other at all, which no digit comparison could do correctly.
+      assertTrue(NpmSemver.parse("01.0.0").isEmpty());
+      assertTrue(NpmSemver.parse("1.00.0").isEmpty());
+      assertTrue(NpmSemver.parse("1.0.0-01").isEmpty(), "a numeric prerelease identifier too");
+      assertTrue(NpmSemver.parse("1.0.0-0a").isPresent(), "but 0a is alphanumeric, so it is legal");
+    }
+
+    @Test
+    void whatIsNotSemverDoesNotParse() {
+      assertTrue(NpmSemver.parse(null).isEmpty());
+      assertTrue(NpmSemver.parse("").isEmpty());
+      assertTrue(NpmSemver.parse("1.0").isEmpty(), "npm requires all three parts");
+      assertTrue(NpmSemver.parse("v1.0.0").isEmpty(), "no coercion: a v prefix is not a version");
+      assertTrue(NpmSemver.parse("1.0.0-").isEmpty(), "an empty prerelease part");
+      assertTrue(NpmSemver.parse("1.0.0-alpha..1").isEmpty(), "an empty identifier");
+      assertTrue(NpmSemver.parse("1.0.0_1").isEmpty());
+    }
+
+    @Test
+    void aPrereleaseIsRecognisableWithoutComparingIt() {
+      assertTrue(NpmSemver.parse("2026.801.63140-main.g0fe7780").orElseThrow().isPrerelease());
+      assertFalse(NpmSemver.parse("2026.801.63140").orElseThrow().isPrerelease());
+    }
+
+    /** Asserts strict ordering in both directions, so an antisymmetric comparator cannot pass. */
+    private static void assertBelow(String lower, String higher) {
+      assertBelow(lower, higher, "");
+    }
+
+    private static void assertBelow(String lower, String higher, String why) {
+      NpmSemver low = NpmSemver.parse(lower).orElseThrow(() -> unparseable(lower));
+      NpmSemver high = NpmSemver.parse(higher).orElseThrow(() -> unparseable(higher));
+      assertTrue(low.compareTo(high) < 0, lower + " should sort below " + higher + " " + why);
+      assertTrue(high.compareTo(low) > 0, higher + " should sort above " + lower + " " + why);
+      assertEquals(0, low.compareTo(low), lower + " should equal itself");
+    }
+
+    private static AssertionError unparseable(String version) {
+      return new AssertionError("should have parsed: " + version);
     }
   }
 }

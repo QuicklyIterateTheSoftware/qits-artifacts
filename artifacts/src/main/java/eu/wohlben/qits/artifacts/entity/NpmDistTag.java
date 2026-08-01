@@ -15,6 +15,11 @@ import java.time.Instant;
  * <p>{@code latest} moves on every publish; the version it used to name stays installable by exact
  * version, because {@link NpmVersion} rows are append-only. Nothing else the npm side writes can
  * change after it is written.
+ *
+ * <p>Movable is not unordered: {@code latest} may only ever move <b>forward</b> by semver
+ * precedence, so a prerelease can never claim it. Every other tag moves freely. The rule lives in
+ * {@code NpmRegistryService.requireLatestMayMoveTo}, not here — it is registry policy rather than a
+ * property of the row.
  */
 @Entity
 @Table(name = "npm_dist_tag")

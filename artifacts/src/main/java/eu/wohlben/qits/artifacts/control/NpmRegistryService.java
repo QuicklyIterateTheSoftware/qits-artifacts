@@ -39,6 +39,13 @@ import java.util.Optional;
 @ApplicationScoped
 public class NpmRegistryService {
 
+  /**
+   * The one dist-tag with an ordering rule. It is npm's default for a bare {@code npm install
+   * <name>} and for a bare {@code npm publish}, which is exactly what makes it the foot-gun: a
+   * publish that names no tag names this one.
+   */
+  private static final String LATEST = "latest";
+
   @Inject ArtifactRepositoryRepository repositories;
   @Inject NpmVersionRepository versions;
   @Inject NpmDistTagRepository distTags;
@@ -109,7 +116,11 @@ public class NpmRegistryService {
    * same transaction as the insert — checking outside it would make two concurrent publishes of the
    * same version a race that both sides win.
    *
-   * @throws NpmException {@code 403} if the version already exists
+   * <p>One of those tags is guarded: {@code latest} may not move backwards. See {@link
+   * #requireLatestMayMoveTo}, including why that refusal takes the whole publish with it.
+   *
+   * @throws NpmException {@code 403} if the version already exists, or if the publish would move
+   *     {@code latest} to a version sorting below the one it names
    */
   @ActivateRequestContext
   @Transactional
@@ -213,6 +224,9 @@ public class NpmRegistryService {
   private void moveTag(String repository, String packageName, String tag, String version) {
     NpmDistTag row = distTags.findOne(repository, packageName, tag).orElseGet(NpmDistTag::new);
     boolean fresh = row.tag == null;
+    if (!fresh && LATEST.equals(tag)) {
+      requireLatestMayMoveTo(packageName, row.version, version);
+    }
     row.repository = repository;
     row.packageName = packageName;
     row.tag = tag;
@@ -221,6 +235,68 @@ public class NpmRegistryService {
     if (fresh) {
       distTags.persist(row);
     }
+  }
+
+  /**
+   * The {@code latest} rule: it may never name a version sorting below the one it names today.
+   *
+   * <p>Why the registry enforces this rather than the pipelines: a bare {@code npm publish} means
+   * {@code --tag latest}, so a main build publishing {@code <release>-main.g<sha>} would move {@code
+   * latest} onto a prerelease and every consumer installing without a range would get a main build.
+   * Convention in a pipeline file nobody lints is not a guard; this is, and it protects every future
+   * pipeline rather than the ones that exist today.
+   *
+   * <p>Three edges, all deliberate:
+   *
+   * <ul>
+   *   <li><b>Only {@code latest}.</b> Every other dist-tag — {@code main}, {@code next}, whatever a
+   *       repository invents — moves anywhere, which is the whole point of having them.
+   *   <li><b>Equal is allowed.</b> Re-naming the version {@code latest} already names is a no-op, and
+   *       a real republish dies on version immutability long before it reaches here.
+   *   <li><b>Unparseable is refused, in either direction.</b> This platform publishes valid semver
+   *       only, and a version that cannot be ordered cannot be proved not to be a step backwards.
+   *       Refusing says so; passing it through would be the silent failure this exists to remove.
+   * </ul>
+   *
+   * <p>The refusal aborts the whole publish, because it is thrown inside {@link #publish}'s
+   * transaction — the same shape the immutability refusal has, and the same reason: a publish that
+   * half-happened and answered 201 is the outcome nobody can debug. The pusher gets one npm error
+   * naming both versions and the flag that makes the publish correct.
+   *
+   * @throws NpmException {@code 403} if the move is backwards or cannot be ordered
+   */
+  static void requireLatestMayMoveTo(String packageName, String current, String candidate) {
+    Optional<NpmSemver> from = NpmSemver.parse(current);
+    Optional<NpmSemver> to = NpmSemver.parse(candidate);
+    if (from.isEmpty() || to.isEmpty()) {
+      throw new NpmException(
+          403,
+          "cannot move the latest dist-tag of "
+              + packageName
+              + " from "
+              + current
+              + " to "
+              + candidate
+              + " — "
+              + (from.isEmpty() ? current : candidate)
+              + " is not a semver version, so the two cannot be ordered; this registry publishes"
+              + " semver only");
+    }
+    if (to.get().compareTo(from.get()) >= 0) {
+      return;
+    }
+    throw new NpmException(
+        403,
+        "cannot move the latest dist-tag of "
+            + packageName
+            + " back from "
+            + current
+            + " to "
+            + candidate
+            + " — latest only ever moves forward"
+            + (to.get().isPrerelease()
+                ? "; publish a prerelease under its own dist-tag instead (npm publish --tag main)"
+                : "; publish a higher version, or move a dist-tag other than latest"));
   }
 
   private static NpmVersion row(

@@ -334,6 +334,15 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   `theShippedDefaultsLeaveTheDefaultBranchUnprotected` asserts it against the packaged binary with
   no overrides; flipping the default
   here rather than in a deployment's env would be the one change that can strand this repo.
+- **npm's `latest` dist-tag only moves forward**, by semver precedence
+  (`NpmRegistryService.requireLatestMayMoveTo`, ordering in `NpmSemver`). A bare `npm publish` means
+  `--tag latest`, so without this a main build publishing `<release>-main.g<sha>` would move
+  `latest` onto a prerelease permanently. Three edges are deliberate: only `latest` is ordered, the
+  first assignment is always allowed, and a version that does not parse as semver is **refused**
+  rather than passed through. The refusal is thrown inside `publish()`'s transaction, so it takes
+  the whole publish with it — the same shape the immutability refusal has, and the reason a publish
+  never half-lands. A pipeline publishing prereleases needs `npm publish --tag main`; the message
+  says so.
 - **`NpmUpstream`'s `HttpClient` is an instance field, not a static one** — the same constraint
   `CiPostReceiveNotifier` carries, and the reason the table above lists it. It is also this process'
   only outbound TLS, which no test can exercise (no network); a deployment smokes it once by hand.

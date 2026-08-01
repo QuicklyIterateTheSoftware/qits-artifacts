@@ -224,6 +224,66 @@ class NpmRegistryTest {
   }
 
   @Test
+  void aBarePublishOfAPrereleaseCannotStealLatest() {
+    // The live foot-gun, over the wire: a main build publishes <release>-main.g<sha> with no --tag,
+    // npm turns that into --tag latest, and every consumer installing without a range would get a
+    // main build from then on. The registry refuses the whole publish rather than the tag move
+    // alone, so the pipeline goes red with a message telling it what to do instead.
+    String name = scopedName();
+    TinyPackage release = TinyPackage.of(name, "2026.801.63140");
+    TinyPackage mainBuild = TinyPackage.of(name, "2026.801.63140-main.g0fe7780");
+
+    try (NpmClient npm = client()) {
+      assertEquals(201, npm.publish("npm", encoded(name), release.publishDocument("latest"))
+          .statusCode());
+
+      HttpResponse<String> refused =
+          npm.publish("npm", encoded(name), mainBuild.publishDocument("latest"));
+      assertEquals(403, refused.statusCode(), refused.body());
+      String message = NpmClient.parse(refused.body()).path("error").asText();
+      assertTrue(message.contains("2026.801.63140"), message);
+      assertTrue(message.contains("2026.801.63140-main.g0fe7780"), message);
+      assertTrue(message.contains("--tag main"), "the message says how to publish it: " + message);
+
+      JsonNode packument = npm.packumentJson("npm", encoded(name));
+      assertEquals("2026.801.63140", packument.path("dist-tags").path("latest").asText());
+      assertTrue(
+          packument.path("versions").path("2026.801.63140-main.g0fe7780").isMissingNode(),
+          "the refusal rolls the version back too: " + packument.path("versions"));
+    }
+  }
+
+  @Test
+  void thePrereleaseIsPublishableUnderItsOwnTagAndTheNextReleaseStillMovesLatest() {
+    // The other half of the same rule, and the one the release pipelines rely on: only `latest` is
+    // ordered, so `main` takes the prerelease with no argument, and a higher release moves `latest`
+    // forward exactly as it always did.
+    String name = scopedName();
+    TinyPackage release = TinyPackage.of(name, "2026.801.63140");
+    TinyPackage mainBuild = TinyPackage.of(name, "2026.801.63140-main.g0fe7780");
+    TinyPackage next = TinyPackage.of(name, "2026.802.100000");
+
+    try (NpmClient npm = client()) {
+      assertEquals(201, npm.publish("npm", encoded(name), release.publishDocument("latest"))
+          .statusCode());
+      assertEquals(
+          201,
+          npm.publish("npm", encoded(name), mainBuild.publishDocument("main")).statusCode(),
+          "npm publish --tag main");
+      assertEquals(201, npm.publish("npm", encoded(name), next.publishDocument("latest"))
+          .statusCode());
+
+      JsonNode packument = npm.packumentJson("npm", encoded(name));
+      assertEquals("2026.802.100000", packument.path("dist-tags").path("latest").asText());
+      assertEquals(
+          "2026.801.63140-main.g0fe7780", packument.path("dist-tags").path("main").asText());
+      assertTrue(
+          packument.path("versions").path("2026.801.63140-main.g0fe7780").isObject(),
+          "the prerelease is installable by exact version and by its own tag");
+    }
+  }
+
+  @Test
   void aTarballThatDoesNotMatchItsClaimedIntegrityIsRefused() {
     // The npm restatement of "a blob that does not hash to its name is not a blob". Both hashes are
     // recomputed from the decoded attachment and compared with the client's claim.
