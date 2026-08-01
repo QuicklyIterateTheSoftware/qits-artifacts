@@ -35,6 +35,8 @@ abstract class ArtifactsTestSupport {
 
   @Inject NpmProxyPackumentRepository npmProxyPackuments;
 
+  @Inject BlobDiskIndex diskIndex;
+
   @ConfigProperty(name = "qits.artifacts.blobs-dir")
   String blobsDir;
 
@@ -59,6 +61,10 @@ abstract class ArtifactsTestSupport {
         walk.sorted(Comparator.reverseOrder()).forEach(ArtifactsTestSupport::deleteQuietly);
       }
     }
+    // The disk index is invalidated by BlobStore.promote, which is every write the service makes —
+    // but this wipes the directory from outside it, which is exactly the out-of-band change its age
+    // ceiling exists for. Saying so here rather than waiting a minute for it.
+    diskIndex.invalidate();
   }
 
   /** The full required-key set for a ci-screenshots upload of the given dimensions. */

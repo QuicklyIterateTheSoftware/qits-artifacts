@@ -7,6 +7,7 @@ import eu.wohlben.qits.artifacts.error.OciException;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -65,6 +66,78 @@ public class OciManifestParser {
     String mediaType = resolveMediaType(root, contentType);
     boolean index = OciMediaTypes.isIndex(mediaType);
     return new ParsedManifest(mediaType, index, index ? children(root) : blobs(root));
+  }
+
+  /**
+   * What a manifest points at, <b>with the size it declares for each reference</b> — the read side,
+   * as opposed to {@link #parse}, which is the write side's validation.
+   *
+   * @param index whether the references are child manifests (an index) or blobs (an image manifest)
+   * @param references digest (bare hex) to declared size, in document order
+   */
+  public record SizedReferences(boolean index, Map<String, Long> references) {}
+
+  /**
+   * Re-reads a stored manifest for its declared sizes.
+   *
+   * <p>Deliberately <b>lenient</b> where {@link #parse} is strict: this runs over content that is
+   * already stored and already served, so anything it cannot read is skipped rather than thrown. A
+   * browse endpoint that 500s because one manifest of a hundred is unusual would be worse than one
+   * that reports a size short by that manifest's layers.
+   *
+   * <p>The declared sizes are the ones to trust: a manifest's digest covers them, so a wrong number
+   * would mean a manifest the registry never accepted. Reading them beats stat'ing the blob
+   * directory, which the store summary does once and no per-image view has to.
+   *
+   * @param mediaType the manifest's own type, from its {@code oci_manifest} row — not guessed from
+   *     the document, because that is the field a document may omit
+   * @return null if the bytes are not a manifest this can read
+   */
+  public SizedReferences sizedReferences(byte[] bytes, String mediaType) {
+    JsonNode root;
+    try {
+      root = objectMapper.readTree(bytes);
+    } catch (Exception unreadable) {
+      return null;
+    }
+    if (root == null || !root.isObject()) {
+      return null;
+    }
+    boolean index = OciMediaTypes.isIndex(mediaType);
+    Map<String, Long> references = new LinkedHashMap<>();
+    if (index) {
+      for (JsonNode child : root.path("manifests")) {
+        put(references, child);
+      }
+      return new SizedReferences(true, references);
+    }
+    if (!OciMediaTypes.isImageManifest(mediaType)) {
+      return null;
+    }
+    put(references, root.path("config"));
+    for (JsonNode layer : root.path("layers")) {
+      if (OciMediaTypes.isForeignLayer(layer.path("mediaType").asText(null))) {
+        continue;
+      }
+      put(references, layer);
+    }
+    return new SizedReferences(false, references);
+  }
+
+  /** A descriptor's {@code digest} + {@code size}, skipped unless both are usable. */
+  private static void put(Map<String, Long> references, JsonNode descriptor) {
+    if (!descriptor.isObject()) {
+      return;
+    }
+    String hex = OciDigest.hexOrNull(descriptor.path("digest").asText(null));
+    if (hex == null) {
+      return;
+    }
+    long size = descriptor.path("size").asLong(-1L);
+    if (size < 0) {
+      return;
+    }
+    references.putIfAbsent(hex, size);
   }
 
   /**

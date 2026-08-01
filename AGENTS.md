@@ -172,7 +172,7 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 
 ## Tests
 
-- `mvn verify` runs 216 tests (78 in `artifacts/`, 138 in `service/`) in about a minute. Nothing here
+- `mvn verify` runs 235 tests (89 in `artifacts/`, 146 in `service/`) in about a minute. Nothing here
   needs docker — and that is the constraint that shapes the registry suite: `docker`, `podman` and
   `skopeo` may not be assumed present, so `registry/OciClient` + `registry/TinyImage` synthesise a
   real image in memory and drive a full push/pull over the JDK `HttpClient`. It uses that rather than
@@ -190,7 +190,7 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   than by touching its fields, and the reason is worth knowing before writing another one: Quarkus
   instantiates a `QuarkusTestProfile` in **two** classloaders, so a static singleton exists twice
   and the application ends up talking to a different instance than the test configures.
-- `mvn verify -Dnative` runs those, then 17 more: `PackagedProcessIT` against the compiled binary.
+- `mvn verify -Dnative` runs those, then 18 more: `PackagedProcessIT` against the compiled binary.
   It is the only suite that starts a **process** rather than an in-JVM Quarkus, so it is where the
   route stacks are proved to coexist and where JGit is proved to have survived the compile.
   It is also the **only** place the web UI can be tested at all: Quinoa logs "Quinoa is disabled by
@@ -246,18 +246,26 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   — that is exactly the "a resolver is present" configuration production runs in.
 - `ArtifactsTestSupport` (in `artifacts/`) and `ArtifactsTestMedia` (in `service/`) are separate on
   purpose: the two modules share no test classpath, the same way they do not in the monorepo.
+- **The explorer's size math is proved in `artifacts/`, its wire behaviour in `service/`, and the
+  split is not cosmetic.** `ArtifactExplorerServiceTest` builds two images over five content blobs
+  arranged so per-tag, per-image and store-wide unions all give *different* answers over the same
+  content, plus one blob no row references — because a bug that sums where it should merge produces a
+  number that still looks plausible, and only arithmetic that names the double-counted layer catches
+  it. `ArtifactBrowseControllerTest` proves the two names in this service that contain a slash (an
+  OCI image name, a scoped npm package) resolve in both spellings, encoded and literal, which is a
+  property of the path templates and of nothing else. Both must hold; neither implies the other.
 - The suite points `qits.ci.intake-url` at a closed port. The notifier is fire-and-forget, so a push
   test still passes; nothing asserts the event arrives, because the receiver is another repo's.
 
 ## What not to "fix"
 
-- `ArtifactsTokenFilter` matches on `getUriInfo().getPath()` starting with `repositories` — the
-  path relative to the JAX-RS base, so it holds whatever `quarkus.rest.path` is. It was `artifacts`
-  until the resource `@Path`s dropped that segment (the gateway segment carries it now); every
-  JAX-RS resource this service ships is under `repositories/`, so the match is still the whole write
-  surface. **A resource added outside `repositories/` is unguarded** — extend the prefix set, do not
-  assume it is covered. It guards writes only, by design, and is a no-op when `qits.artifacts.token`
-  is blank.
+- `ArtifactsTokenFilter` matches on `getUriInfo().getPath()` against a **set** of prefixes —
+  `repositories` and `store` — relative to the JAX-RS base, so it holds whatever `quarkus.rest.path`
+  is. It was `artifacts` until the resource `@Path`s dropped that segment (the gateway segment
+  carries it now). **A resource added outside those prefixes is unguarded** — extend the set, do not
+  assume it is covered. `store` holds only the read-only store summary today and is listed so that
+  stays a choice rather than an accident. It guards writes only, by design, and is a no-op when
+  `qits.artifacts.token` is blank.
 - `service` ships `quarkus.http.limits.max-body-size=1088M`, which is a **global** ceiling — every
   route in the process, not just the upload. Tracked as an open tradeoff in
   `docs/issues/2026-07-19_artifacts-global-max-body-size-widens-public-ingest-dos.md`, which now
@@ -343,6 +351,19 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   the whole publish with it — the same shape the immutability refusal has, and the reason a publish
   never half-lands. A pipeline publishing prereleases needs `npm publish --tag main`; the message
   says so.
+- **`quarkus.http.enable-compression=true` lives in `application.properties` and cannot move to a
+  deployment's env.** It is `BUILD_AND_RUN_TIME_FIXED`, so an env var is read, accepted and ignored
+  with no warning anywhere — the quietest kind of misconfiguration. And
+  `quarkus.http.compress-media-types` must stay **unset**: setting it REPLACES Quarkus' default list
+  rather than extending it, so naming one type silently stops compressing the other seven.
+- **The explorer's caches are two different things and only one of them is invalidated.**
+  `OciManifestFootprints` is keyed by `(repository, image, digest)` and is content-addressed, so an
+  entry can never become wrong and nothing clears it; the *aggregates* built from it are deliberately
+  not cached at all. `BlobDiskIndex` is the one that needs a write signal, and it gets it from
+  `BlobStore.promote` — the single funnel every stored byte passes through, which is why the call
+  sits there and not in each of the four write paths. Adding a fifth way to write a blob without
+  going through `promote` would break the summary silently; there is no such path today and there
+  should not be one.
 - **`NpmUpstream`'s `HttpClient` is an instance field, not a static one** — the same constraint
   `CiPostReceiveNotifier` carries, and the reason the table above lists it. It is also this process'
   only outbound TLS, which no test can exercise (no network); a deployment smokes it once by hand.

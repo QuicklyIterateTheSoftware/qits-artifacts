@@ -3,7 +3,9 @@ package eu.wohlben.qits.artifacts.persistence;
 import eu.wohlben.qits.artifacts.entity.OciManifest;
 import eu.wohlben.qits.artifacts.entity.OciManifestId;
 import io.quarkus.hibernate.orm.panache.PanacheRepositoryBase;
+import io.quarkus.panache.common.Sort;
 import jakarta.enterprise.context.ApplicationScoped;
+import java.util.List;
 import java.util.Optional;
 
 /** Panache DAO for {@link OciManifest}, keyed by {@code (repository, imageName, digest)}. */
@@ -24,5 +26,42 @@ public class OciManifestRepository
     return count(
             "repository = ?1 and imageName = ?2 and digest = ?3", repository, imageName, digest)
         > 0;
+  }
+
+  /**
+   * The images a repository holds, lexically. There is no image table — an image exists exactly as
+   * long as a manifest names it — so this distinct scan <em>is</em> the enumeration, and it rides
+   * {@code idx_oci_manifest_image}.
+   */
+  public List<String> listImageNames(String repository) {
+    return getEntityManager()
+        .createQuery(
+            "select distinct m.imageName from OciManifest m where m.repository = :repository"
+                + " order by m.imageName",
+            String.class)
+        .setParameter("repository", repository)
+        .getResultList();
+  }
+
+  public long countImages(String repository) {
+    return getEntityManager()
+        .createQuery(
+            "select count(distinct m.imageName) from OciManifest m where m.repository = :repository",
+            Long.class)
+        .setParameter("repository", repository)
+        .getSingleResult();
+  }
+
+  public List<OciManifest> listByImage(String repository, String imageName) {
+    return find(
+            "repository = ?1 and imageName = ?2",
+            Sort.ascending("digest"),
+            repository,
+            imageName)
+        .list();
+  }
+
+  public List<OciManifest> listByRepository(String repository) {
+    return find("repository = ?1", Sort.ascending("imageName", "digest"), repository).list();
   }
 }

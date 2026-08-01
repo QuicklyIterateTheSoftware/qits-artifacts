@@ -519,6 +519,145 @@ collector, so unpublish has no meaning here yet. `/-/v1/search`, `/-/npm/v1/secu
 instead of Vert.x' HTML page. Dist-tag mutation APIs (`npm dist-tag add`) are absent too:
 publish-if-absent is the versioning convention, so a tag only ever moves as part of a publish.
 
+## The explorer API
+
+Six `GET`s under `/artifacts/api` that answer the one question this service could not: **what is in
+here, and what does it cost.**
+
+None of the protocol surfaces can answer it, and that is by design in each case. `/v2/_catalog` is
+refused here; `tags/list` returns `200` with an empty array for an image that does not exist, so
+discovery by probing is impossible. npm's `/-/all` and `/-/v1/search` are absent. And
+`GET /artifacts/api/repositories/{repo}/blobs` answers `{"records":[]}` for every protocol
+repository, because those paths never write `artifact_record` — it looks like an empty registry and
+is not. So these routes are new machinery rather than a view over an existing one.
+
+All six are reads and all six are **unguarded**, like their neighbours: `ArtifactsTokenFilter`
+covers write methods only, and `/artifacts/api` is already on qits-gateway's public paths. Every
+operation carries `@Operation(hidden = true)` as everything here does, so `docs/openapi.yml` stays
+`paths: {}` and the contract is written out below instead.
+
+```
+GET /artifacts/api/repositories                                    every repository
+GET /artifacts/api/repositories/{repo}/images                      an oci-images repository
+GET /artifacts/api/repositories/{repo}/images/{image}/tags         one image's tags
+GET /artifacts/api/repositories/{repo}/packages                    an npm repository, either type
+GET /artifacts/api/repositories/{repo}/packages/{package}/versions one package's versions
+GET /artifacts/api/store/summary                                   the whole store, seven ways
+```
+
+| Route | Body |
+|---|---|
+| `repositories` | `{"repositories":[{"name","type","createdAt","itemCount","sizeBytes"}]}` |
+| `images` | `{"images":[{"name","tagCount","manifestCount","sizeBytes"}]}` |
+| `tags` | `{"tags":[{"tag","digest","sizeBytes","createdAt"}]}` |
+| `packages` | `{"packages":[{"name","versionCount","latest"}]}` |
+| `versions` | `{"versions":[{"version","tarballSizeBytes","publishedAt","distTags"}]}` |
+| `store/summary` | `{"ociPerImageSumBytes","ociUnionBytes","orphanBytes","npmPublishedBytes","npmProxyTarballBytes","npmProxyPackumentBytes","diskTotalBytes"}` |
+
+Details a client trips over if it does not know them:
+
+- **`itemCount` means something different per type**, on purpose: images for `oci-images`, packages
+  for either npm type, `artifact_record` rows for the two CI types. One number with a
+  type-dependent meaning beats four that are always null.
+- **404 is an unknown repository; 400 is a repository of the wrong type.** An npm repository has no
+  images and never will, and reporting that as an empty list would read as an image registry that
+  lost its images.
+- **An unknown *image* is `200` with an empty list**, not a 404 — an image is not a row, so there is
+  nothing to be absent. The same answer `tags/list` gives.
+- **`{image}` and `{package}` may contain slashes**, and both spellings resolve: `build-images%2Fci-base`
+  and `build-images/ci-base`, `@qits%2Fui-components` and `@qits/ui-components`. `qits/build-images/ci-base`
+  is repository `qits`, image `build-images/ci-base`; every scoped npm name has a slash in it too.
+- **`digest` is the wire form** `sha256:<hex>`, not the bare hex the database stores — it is what a
+  person pastes into a pull by digest.
+- **`createdAt` on a tag is `oci_tag.updated_at`**, when the tag last came to name that digest. A tag
+  is the registry's one movable pointer and has no other timestamp; for a tag that never moves —
+  which is every commit-sha tag this platform pushes — it is when the image was pushed.
+- **`latest` is null for every proxied package**, and `distTags` is empty for every proxied version.
+  A proxy caches tarballs and documents and stores no dist-tag rows.
+- **A proxied package appears only once its tarball has been pulled.** The listing comes from
+  `npm_version`, not from `npm_proxy_packument`, whose only index is its primary key — listing that
+  table is a full scan of hundreds of CLOBs. The cost is that a cached document with no cached bytes
+  is missing from the list, which is the honest thing for a store view to omit.
+- **`tarballSizeBytes` may be null.** There is no size column on `npm_version`; the figure is the
+  file's size on disk, and a row can outlive its bytes. Zero would read as an empty tarball.
+
+### Sizes, which are the only new machinery
+
+**A size on this store is a set union, never a sum.** Blobs are content-addressed and deduped
+globally — across types and across repositories — so adding two overlapping figures overstates the
+store. Measured three ways over the same content:
+
+```
+sum over all 155 manifest ROWS  (per-tag sizes, added up) : 10.63 GiB
+sum over 10 IMAGES              (per-image unions, added) :  4.36 GiB
+TRUE UNION across everything OCI                          :  4.04 GiB over 564 blobs
+```
+
+The inflation is almost entirely *within* an image: every rebuild shares its base layers with the
+previous tag. So the **per-image union is the headline number** (1.08× the truth), a per-tag figure
+is never shown as if it were additive (2.63×), and the true union and the orphan bytes are named on
+the store summary beside it. An unlabelled byte count over a deduped store is a lie with a number
+in it.
+
+Where the numbers come from, given that **96.3% of the stored bytes have no database row** — OCI
+layers and configs get none by design, and `oci_manifest.size_bytes` is the size of the manifest
+*JSON*, three thousandths of the store:
+
+- **`OciManifestFootprints`** parses the stored manifest documents and reads the `size` fields
+  inside them. Those are the numbers a manifest's digest covers, so they cannot drift; parsing all
+  155 of this store's manifests found zero mismatches and zero missing referenced blobs. An index
+  recurses into its children. There is no `oci_blob(digest, size)` table, and that is the deliberate
+  first cut — it is what survives a registry ten times this size, and it is not needed at this one.
+- **`BlobDiskIndex`** walks the blob directory (1450 files, two levels) for what is actually there.
+  It is the only thing that can see the orphans, and the only source of an npm tarball's size.
+
+**Caching and invalidation**, which are two different problems here:
+
+- A **footprint is cached forever and never invalidated**, and that is a property of the key rather
+  than an oversight: a manifest is content-addressed, so the bytes behind `(repository, image,
+  digest)` cannot change. A push adds a key; it can never make an existing one wrong.
+- The **aggregates are not cached at all** — per-image, per-repository and store-wide unions are
+  recomputed from the manifest rows on every request. That is a few thousand map merges over an
+  index scan, and it is cheaper than being wrong after a push.
+- The **disk index is invalidated by the write.** Every byte this service stores lands through
+  `BlobStore.promote` — the registry's layers, npm's tarballs and publishes, the proxy's
+  pull-throughs, the JSON API's uploads — so that one call is the complete set of events that can
+  make a directory listing stale, and it is where `invalidate()` is called from. A 60-second age
+  ceiling is a second belt for what a process cannot see: a volume restored under it, or a sibling
+  writing the same directory. A test that wipes the directory says so explicitly.
+
+`npmProxyPackumentBytes` is the one figure that comes from neither: it is
+`sum(length(npm_proxy_packument.doc))`, summed in SQL rather than in the JVM because those documents
+total ~650 MB — **85% of the H2 file**, and 3.8× the tarballs they index. A UI reporting only the
+proxy's disk usage is off by nearly 4×. It is counted in characters; the documents are ASCII JSON.
+
+The seven figures reconcile in exactly one way, which is the panel's whole claim:
+
+```
+diskTotalBytes = ociUnionBytes + npmPublishedBytes + npmProxyTarballBytes + orphanBytes
+```
+
+`ociPerImageSumBytes` sits above `ociUnionBytes` by whatever images share, and
+`npmProxyPackumentBytes` is outside the identity because those bytes are rows, not files.
+
+**`orphanBytes` is not a rounding error.** This store holds 124 MiB in three ELF binaries — the
+ci-daemon — uploaded through the OCI blob-upload session with no manifest, no tag and no row of any
+kind. They are servable, because `serveBlob` validates the repository rather than that the digest
+belongs to the image. There is no garbage collector to reclaim them. Report it; do not sweep it.
+
+### Deliberately not here
+
+- **The git host.** It shares a process and a URL segment with the registries and nothing else:
+  separate volume, no blob store, no rows, no `artifact_repository` entry. Its refs are readable
+  only as pkt-line and its object counts need JGit calls nobody has written.
+- **Any link to a project.** Not one column in any of the six tables joins to one. `oci_manifest.repository`
+  is `"qits"` for every row — that is the image namespace, equal to the project slug by naming
+  accident — and `npm_version.package_name` does not even coincide. The one genuine cross-store link
+  is `oci_tag.tag`, which is a git commit SHA, and it is undeclared.
+- **Writes of any kind**, and "what is actually used". A tarball `GET` is a `sendFile` with zero
+  database writes; last-accessed is `artifact-access-tracking.md`, which is the prerequisite for
+  cleanup and is not started.
+
 ## The boundary
 
 Everything this context needs from the rest of qits goes through a port it declares and the
@@ -558,6 +697,7 @@ app's `application.properties` overrides them.
 | `qits.repositories.git.protect-default-branch` | `false` | refuse a direct update/delete of a repo's default branch — see "The default branch's seatbelt" |
 | `qits.repositories.git.push-token` | **unset** | the value `-o qits.token=<value>` must equal; unset and empty both match nothing |
 | `quarkus.http.limits.max-body-size` | `1088M` | **global**; above the largest upload cap |
+| `quarkus.http.enable-compression` | `true` | gzip on the way out — **build-time fixed**, see below |
 
 The last one is a global ceiling, but not the single hard gate this section used to claim. Quarkus
 enforces it in two places: a route at order −2 that 413s a declared `Content-Length` over the limit
@@ -583,6 +723,18 @@ knob covers both directions — it also caps a tarball streamed in from upstream
 because it answers one question, how large an npm tarball this deployment is willing to hold. A
 deployment that pulls large prebuilt binaries (the `@next/swc-*` shape of package) raises it once
 and both paths follow.
+
+`quarkus.http.enable-compression` is in the shipped `application.properties` and **cannot be moved to
+a deployment's environment**: it is `BUILD_AND_RUN_TIME_FIXED`, so an env var on the container is
+read, accepted and ignored, with no warning anywhere. The value that ships is the value that runs.
+The SPA bundle is 206 kB uncompressed and about 60 kB gzipped, and the explorer's JSON compresses
+harder still.
+
+`quarkus.http.compress-media-types` is deliberately **left unset**. Setting it *replaces* Quarkus'
+default list rather than extending it, so naming one type would silently stop compressing the rest —
+and the default is already right: `text/*`, `application/json`, `application/javascript` and the XML
+family, none of which is an image layer, a tarball or a git packfile. Those are already-compressed
+bytes served with `sendFile`, and re-compressing them would cost CPU to grow them.
 
 `quarkus.rest.path=/artifacts/api` and `quarkus.http.non-application-root-path=/artifacts/q` are
 **not** shipped from the jar's defaults: they are the deployable's own decision and live in

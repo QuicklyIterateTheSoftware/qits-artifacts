@@ -5,6 +5,7 @@ import eu.wohlben.qits.artifacts.entity.NpmVersionId;
 import io.quarkus.hibernate.orm.panache.PanacheRepositoryBase;
 import io.quarkus.panache.common.Sort;
 import jakarta.enterprise.context.ApplicationScoped;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 
@@ -28,5 +29,72 @@ public class NpmVersionRepository implements PanacheRepositoryBase<NpmVersion, N
             repository,
             packageName)
         .list();
+  }
+
+  /**
+   * The packages a repository holds, lexically — the leading-column scan of {@code (repository,
+   * package_name)}.
+   *
+   * <p>This is the enumeration for a <b>proxy</b> repository too, and it is deliberately not {@code
+   * npm_proxy_packument}: that table's only index is its primary key, so listing it is a full scan
+   * of CLOBs. The cost is that a package whose packument was cached but whose tarball was never
+   * pulled has no row here and is missing from the list — a cached document with no cached bytes,
+   * which is the honest thing for a store view to omit.
+   */
+  public List<String> listPackageNames(String repository) {
+    return getEntityManager()
+        .createQuery(
+            "select distinct v.packageName from NpmVersion v where v.repository = :repository"
+                + " order by v.packageName",
+            String.class)
+        .setParameter("repository", repository)
+        .getResultList();
+  }
+
+  public long countPackages(String repository) {
+    return getEntityManager()
+        .createQuery(
+            "select count(distinct v.packageName) from NpmVersion v"
+                + " where v.repository = :repository",
+            Long.class)
+        .setParameter("repository", repository)
+        .getSingleResult();
+  }
+
+  public long countVersions(String repository, String packageName) {
+    return count("repository = ?1 and packageName = ?2", repository, packageName);
+  }
+
+  /**
+   * {@code (version, tarballBlobId, createdAt)} for one package.
+   *
+   * <p>A projection rather than the entities, and that is the point: {@code manifest_json} is a
+   * {@code @Lob}, so listing rows to read three short columns would drag every version's whole
+   * manifest through the JVM.
+   */
+  public List<Object[]> listVersionRows(String repository, String packageName) {
+    return getEntityManager()
+        .createQuery(
+            "select v.version, v.tarballBlobId, v.createdAt from NpmVersion v"
+                + " where v.repository = :repository and v.packageName = :packageName"
+                + " order by v.version",
+            Object[].class)
+        .setParameter("repository", repository)
+        .setParameter("packageName", packageName)
+        .getResultList();
+  }
+
+  /** The distinct tarball blobs a set of repositories references — the npm half of a size union. */
+  public List<String> listTarballBlobIds(Collection<String> repositories) {
+    if (repositories.isEmpty()) {
+      return List.of();
+    }
+    return getEntityManager()
+        .createQuery(
+            "select distinct v.tarballBlobId from NpmVersion v"
+                + " where v.repository in :repositories",
+            String.class)
+        .setParameter("repositories", repositories)
+        .getResultList();
   }
 }

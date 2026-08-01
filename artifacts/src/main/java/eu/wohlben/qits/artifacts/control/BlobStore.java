@@ -4,6 +4,7 @@ import eu.wohlben.qits.artifacts.error.InternalServerErrorException;
 import eu.wohlben.qits.artifacts.error.NotFoundException;
 import eu.wohlben.qits.artifacts.error.PayloadTooLargeException;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
@@ -32,6 +33,13 @@ public class BlobStore {
 
   @ConfigProperty(name = "qits.artifacts.blobs-dir", defaultValue = "data/artifacts/blobs")
   String blobsDir;
+
+  /**
+   * The store's one write funnel is {@link #promote}, so it is also the complete set of events that
+   * can make a directory listing stale — see {@link BlobDiskIndex}. Injected rather than the other
+   * way round: the index reads the config key itself and knows nothing about this class.
+   */
+  @Inject BlobDiskIndex diskIndex;
 
   /** A blob staged in the temp area, not yet promoted to its content-addressed path. */
   public record StagedBlob(String sha256, long size, Path tempPath) {}
@@ -169,6 +177,7 @@ public class BlobStore {
       deleteQuietly(staged.tempPath());
       return true;
     }
+    diskIndex.invalidate();
     try {
       Files.createDirectories(dest.getParent());
       try {

@@ -25,4 +25,24 @@ public class ArtifactRecordRepository implements PanacheRepositoryBase<ArtifactR
       String repository, String blobId) {
     return find("repository = ?1 and blobId = ?2", repository, blobId).firstResultOptional();
   }
+
+  public long countByRepository(String repository) {
+    return count("repository = ?1", repository);
+  }
+
+  /**
+   * The distinct content a repository references, with each blob's size — the record table is the
+   * one place a size is stored beside the id, so a union costs no filesystem call. Two records may
+   * share a blob (two branches may produce pixel-identical goldens), which is exactly why this is
+   * distinct rather than a sum over rows.
+   */
+  public List<Object[]> listDistinctBlobs(String repository) {
+    return getEntityManager()
+        .createQuery(
+            "select distinct r.blobId, r.size from ArtifactRecord r"
+                + " where r.repository = :repository",
+            Object[].class)
+        .setParameter("repository", repository)
+        .getResultList();
+  }
 }

@@ -36,4 +36,18 @@ public class OciTagRepository implements PanacheRepositoryBase<OciTag, OciTagId>
         .map(tag -> tag.tag)
         .toList();
   }
+
+  /**
+   * Every tag of one image, with the digest each names — the explorer's read, as opposed to {@link
+   * #listTagNames}, which is the Distribution spec's paged name-only listing.
+   */
+  public List<OciTag> listByImage(String repository, String imageName) {
+    return find(
+            "repository = ?1 and imageName = ?2", Sort.ascending("tag"), repository, imageName)
+        .list();
+  }
+
+  public long countByImage(String repository, String imageName) {
+    return count("repository = ?1 and imageName = ?2", repository, imageName);
+  }
 }

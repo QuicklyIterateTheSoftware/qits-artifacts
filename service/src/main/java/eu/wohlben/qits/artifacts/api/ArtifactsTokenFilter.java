@@ -35,6 +35,13 @@ public class ArtifactsTokenFilter implements ContainerRequestFilter {
 
   private static final Set<String> WRITE_METHODS = Set.of("POST", "PUT", "DELETE", "PATCH");
 
+  /**
+   * The JAX-RS base-relative prefixes this filter claims. A resource served outside them is
+   * <b>unguarded</b>, so this set is extended when one is added rather than assumed to cover it.
+   * {@code store} holds only the read-only store summary today and is listed so that stays a choice.
+   */
+  private static final Set<String> GUARDED_PREFIXES = Set.of("repositories", "store");
+
   @Inject ArtifactsToken token;
 
   @Override
@@ -51,7 +58,9 @@ public class ArtifactsTokenFilter implements ContainerRequestFilter {
     if (path.startsWith("/")) {
       path = path.substring(1);
     }
-    if (!path.startsWith("repositories") || !WRITE_METHODS.contains(requestContext.getMethod())) {
+    String guardedPath = path;
+    if (GUARDED_PREFIXES.stream().noneMatch(guardedPath::startsWith)
+        || !WRITE_METHODS.contains(requestContext.getMethod())) {
       return;
     }
     if (!token.matches(requestContext.getHeaderString(TOKEN_HEADER))) {

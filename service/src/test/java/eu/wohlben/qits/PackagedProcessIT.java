@@ -3,7 +3,10 @@ package eu.wohlben.qits;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.greaterThan;
+import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.hasItems;
+import static org.hamcrest.Matchers.notNullValue;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -483,6 +486,90 @@ class PackagedProcessIT {
         runGitExpectingFailure(clone, "git", "push", "origin", second + ":refs/tags/v2026.801.63140");
     assertTrue(duplicate.contains("already exists"), duplicate);
     assertEquals(tagObject, runGit(origin, "git", "rev-parse", "refs/tags/v2026.801.63140").trim());
+  }
+
+  @Test
+  void theBrowseEndpointsSurviveTheCompileOverContentPushedThroughTheWire() {
+    // Six new response shapes, every one of them a Jackson-serialised record — which is the
+    // dto/UploadResult trap restated: a bound type reaches the native build only through the
+    // provider chain that discovers it, and a gap there is a green `mvn verify` and a 500 in the
+    // binary. Asserting the FIELDS is what catches it; a status code would not.
+    //
+    // The subjects are pushed through the registry and the npm registry rather than written into
+    // the database, because the sizes are the point: they are read out of the stored manifest
+    // document and off the blob files, so a fixture that skipped the wire would not prove the
+    // parse happens in the binary at all.
+    ensureOciRepository();
+    try (OciClient client = new OciClient(URI.create(root.toString()))) {
+      client.push("qits/browse-it", "v1", TinyImage.of("browse-it"));
+    }
+    TinyPackage subject = TinyPackage.of("@qits/browse-it", "1.0.0");
+    try (NpmClient npm = new NpmClient(URI.create(root.toString()))) {
+      assertEquals(
+          201, npm.publish("npm", "@qits%2fbrowse-it", subject.publishDocument("latest")).statusCode());
+    }
+
+    given()
+        .when()
+        .get("/artifacts/api/repositories")
+        .then()
+        .statusCode(200)
+        .body("repositories.find { it.name == 'qits' }.type", equalTo("oci-images"))
+        .body("repositories.find { it.name == 'qits' }.itemCount", greaterThanOrEqualTo(1))
+        .body("repositories.find { it.name == 'qits' }.sizeBytes", greaterThan(0));
+
+    given()
+        .when()
+        .get("/artifacts/api/repositories/qits/images")
+        .then()
+        .statusCode(200)
+        .body("images.find { it.name == 'browse-it' }.tagCount", equalTo(1))
+        .body("images.find { it.name == 'browse-it' }.sizeBytes", greaterThan(0));
+
+    given()
+        .when()
+        .get("/artifacts/api/repositories/qits/images/browse-it/tags")
+        .then()
+        .statusCode(200)
+        .body("tags.find { it.tag == 'v1' }.digest", containsString("sha256:"))
+        .body("tags.find { it.tag == 'v1' }.sizeBytes", greaterThan(0))
+        .body("tags.find { it.tag == 'v1' }.createdAt", notNullValue());
+
+    // The percent-encoded scoped name, on the JAX-RS surface this time. The npm routes prove it for
+    // a Vert.x regex route; a path template is different machinery and needs its own case.
+    given()
+        .urlEncodingEnabled(false)
+        .when()
+        .get("/artifacts/api/repositories/npm/packages/@qits%2fbrowse-it/versions")
+        .then()
+        .statusCode(200)
+        .body("versions[0].version", equalTo("1.0.0"))
+        .body("versions[0].tarballSizeBytes", greaterThan(0))
+        .body("versions[0].distTags", hasItems("latest"));
+
+    given()
+        .when()
+        .get("/artifacts/api/repositories/npm/packages")
+        .then()
+        .statusCode(200)
+        .body("packages.find { it.name == '@qits/browse-it' }.latest", equalTo("1.0.0"));
+
+    // The seven figures, from a process that has really walked its own blob directory.
+    given()
+        .when()
+        .get("/artifacts/api/store/summary")
+        .then()
+        .statusCode(200)
+        .body("ociUnionBytes", greaterThan(0))
+        .body("diskTotalBytes", greaterThan(0))
+        .body("npmPublishedBytes", greaterThan(0))
+        .body("ociPerImageSumBytes", greaterThanOrEqualTo(0))
+        .body("orphanBytes", greaterThanOrEqualTo(0))
+        .body("npmProxyTarballBytes", greaterThanOrEqualTo(0))
+        .body("npmProxyPackumentBytes", greaterThanOrEqualTo(0));
+
+    given().when().get("/artifacts/api/repositories/no-such-repo/images").then().statusCode(404);
+    given().when().get("/artifacts/api/repositories/npm/images").then().statusCode(400);
   }
 
   /**

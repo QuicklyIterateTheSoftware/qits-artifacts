@@ -1,7 +1,9 @@
 package eu.wohlben.qits.artifacts.api;
 
+import eu.wohlben.qits.artifacts.control.ArtifactExplorerService;
 import eu.wohlben.qits.artifacts.control.ArtifactRepositoryService;
 import eu.wohlben.qits.artifacts.dto.ArtifactRepositoryDto;
+import eu.wohlben.qits.artifacts.dto.RepositorySummary;
 import eu.wohlben.qits.artifacts.entity.RepositoryType;
 import eu.wohlben.qits.artifacts.mapper.ArtifactRepositoryMapper;
 import jakarta.inject.Inject;
@@ -33,6 +35,8 @@ public class RepositoryController {
 
   @Inject ArtifactRepositoryService repositoryService;
 
+  @Inject ArtifactExplorerService explorer;
+
   @Inject ArtifactRepositoryMapper mapper;
 
   public record EnsureRepositoryRequest(@NotNull RepositoryType type) {
@@ -51,12 +55,16 @@ public class RepositoryController {
     return new EnsureRepositoryRequest.Response(mapper.toDto(entity));
   }
 
-  public record ListRepositoriesResponse(List<ArtifactRepositoryDto> repositories) {}
+  public record ListRepositoriesResponse(List<RepositorySummary> repositories) {}
 
+  /**
+   * The explorer's top level: every repository, with the one count and the one size its type can
+   * answer. The rows carry more than the ensure response's {@link ArtifactRepositoryDto} because
+   * this is the only place that enumerates anything — see {@code ArtifactExplorerService}.
+   */
   @GET
   @Operation(hidden = true)
   public ListRepositoriesResponse list() {
-    return new ListRepositoriesResponse(
-        repositoryService.list().stream().map(mapper::toDto).toList());
+    return new ListRepositoriesResponse(explorer.listRepositories());
   }
 }
