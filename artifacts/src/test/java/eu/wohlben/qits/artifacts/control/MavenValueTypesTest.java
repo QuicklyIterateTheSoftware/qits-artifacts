@@ -72,6 +72,54 @@ class MavenValueTypesTest {
       assertNull(MavenLayout.checksumAlgorithm("a-1.0.0.jar"));
       assertNull(MavenLayout.checksumAlgorithm("a-1.0.0.jar.asc"), "signatures are not checksums");
     }
+
+    @Test
+    void aTimestampedSnapshotNameParsesBackIntoItsParts() {
+      MavenLayout.SnapshotFileName timestamped =
+          MavenLayout.parseTimestampedSnapshot(
+              "qits-eventstream", "1.0.1-SNAPSHOT", "qits-eventstream-1.0.1-20260802.123456-3.jar");
+      assertEquals("jar", timestamped.extension());
+      assertNull(timestamped.classifier());
+      assertEquals("20260802.123456", timestamped.timestamp());
+      assertEquals(3, timestamped.buildNumber());
+      assertEquals("1.0.1-20260802.123456-3", timestamped.value("1.0.1"));
+
+      MavenLayout.SnapshotFileName classified =
+          MavenLayout.parseTimestampedSnapshot(
+              "qits-eventstream",
+              "1.0.1-SNAPSHOT",
+              "qits-eventstream-1.0.1-20260802.124501-4-sources.jar");
+      assertEquals("sources", classified.classifier());
+      assertEquals("jar", classified.extension());
+    }
+
+    @Test
+    void theLiteralSnapshotNameIsNotATimestampedOne() {
+      assertNull(
+          MavenLayout.parseTimestampedSnapshot(
+              "qits-eventstream", "1.0.1-SNAPSHOT", "qits-eventstream-1.0.1-SNAPSHOT.jar"));
+      assertNull(
+          MavenLayout.parseTimestampedSnapshot(
+              "qits-eventstream",
+              "1.0.1-SNAPSHOT",
+              "qits-eventstream-1.0.1-SNAPSHOT-sources.jar"));
+      // And a timestamp-shaped name under a RELEASE version is not a snapshot at all.
+      assertNull(
+          MavenLayout.parseTimestampedSnapshot(
+              "qits-eventstream", "1.0.1", "qits-eventstream-1.0.1-20260802.123456-3.jar"));
+    }
+
+    @Test
+    void mutabilityIsAPropertyOfThePathClass() {
+      assertTrue(
+          MavenLayout.isMutablePath(
+              "g/a/1.0.1-SNAPSHOT/a-1.0.1-SNAPSHOT.jar"), "the literal name is the moving target");
+      assertFalse(
+          MavenLayout.isMutablePath(
+              "g/a/1.0.1-SNAPSHOT/a-1.0.1-20260802.123456-3.jar"), "timestamped is unique");
+      assertFalse(MavenLayout.isMutablePath("g/a/1.0.0/a-1.0.0.jar"), "a release is immutable");
+      assertFalse(MavenLayout.isMutablePath("g/a/1.0.0/a-1.0.0.pom"), "and so is its pom");
+    }
   }
 
   @Nested

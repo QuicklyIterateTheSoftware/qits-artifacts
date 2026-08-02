@@ -24,6 +24,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -52,8 +53,13 @@ import org.jboss.logging.Logger;
  *   <li>Checksums are <b>derived at GET</b> and <b>verified at PUT</b>, never stored — a PUT
  *       checksum that does not match the blob is a {@code 400}, the npm {@code
  *       requireClaimMatches} restated: a blob that does not hash to its name is not a blob.
- *   <li>Release paths are <b>immutable</b>: a re-PUT of identical bytes is an idempotent
- *       {@code 201}, a re-PUT of different bytes is a {@code 403} naming the version and the rule.
+ *   <li>Release paths and timestamped snapshot files are <b>immutable</b>: a re-PUT of identical
+ *       bytes is an idempotent {@code 201}, a re-PUT of different bytes is a {@code 403} naming
+ *       the rule. A literal {@code -SNAPSHOT} filename is the one mutable path, and the
+ *       version-level {@code maven-metadata.xml} of a snapshot directory is derived from the
+ *       timestamped filenames — the whole of the server's snapshot machinery, because the client
+ *       computes the timestamped names. A snapshot directory with nothing but literal files
+ *       answers 404 there, so the resolver's defined fallback survives.
  * </ul>
  *
  * <p><b>There is no authentication here, at all</b> — not a token, not a guard, nothing. The OCI
@@ -162,7 +168,10 @@ public class MavenRoutes {
   private void serveDocument(
       RoutingContext rc, String repository, String path, String checksumAlgorithm, boolean withBody) {
     String prefix = MavenLayout.directoryOf(path);
-    String document = deriveArtifactMetadata(repository, prefix);
+    String document =
+        MavenLayout.isSnapshotVersion(MavenLayout.fileOf(prefix))
+            ? deriveSnapshotMetadata(repository, prefix)
+            : deriveArtifactMetadata(repository, prefix);
     if (checksumAlgorithm != null) {
       byte[] hex =
           MavenChecksums.hexDigest(document.getBytes(StandardCharsets.UTF_8), checksumAlgorithm)
@@ -182,8 +191,8 @@ public class MavenRoutes {
    * Artifact-level derivation: the distinct version directories under the prefix.
    *
    * <p>A version-level request for a release directory derives nothing and 404s, which is the
-   * resolver's defined signal to fall back to the literal filename. (Snapshot version directories
-   * get their own document — see the snapshot workstream.)
+   * resolver's defined signal to fall back to the literal filename. Snapshot version directories
+   * get their own document — {@link #deriveSnapshotMetadata}.
    */
   private String deriveArtifactMetadata(String repository, String prefix) {
     if (prefix.isEmpty()) {
@@ -214,6 +223,47 @@ public class MavenRoutes {
   }
 
   /**
+   * Version-level derivation: the snapshot directory's timestamped filenames, read back into the
+   * {@code <snapshotVersions>} a resolver maps the {@code -SNAPSHOT} coordinate through.
+   *
+   * <p>A directory holding <b>only</b> literal {@code -SNAPSHOT} files (a non-unique deploy) has
+   * nothing to derive and answers <b>404, deliberately</b>: the resolver's defined fallback for a
+   * missing version-level document is exactly that literal filename, and serving an empty document
+   * would pre-empt the fallback with nothing in it.
+   */
+  private String deriveSnapshotMetadata(String repository, String prefix) {
+    List<MavenRegistryService.StoredPath> rows = registry.listUnder(repository, prefix);
+    String version = MavenLayout.fileOf(prefix);
+    String artifactId = MavenLayout.fileOf(MavenLayout.directoryOf(prefix));
+    String groupId = MavenLayout.directoryOf(MavenLayout.directoryOf(prefix)).replace('/', '.');
+
+    List<MavenLayout.SnapshotFileName> files = new ArrayList<>();
+    Instant lastUpdated = null;
+    for (MavenRegistryService.StoredPath row : rows) {
+      String file = row.path().substring(prefix.length() + 1);
+      if (file.contains("/")) {
+        continue;
+      }
+      MavenLayout.SnapshotFileName parsed =
+          MavenLayout.parseTimestampedSnapshot(artifactId, version, file);
+      if (parsed != null) {
+        files.add(parsed);
+        if (lastUpdated == null || row.createdAt().isAfter(lastUpdated)) {
+          lastUpdated = row.createdAt();
+        }
+      }
+    }
+    if (files.isEmpty()) {
+      throw new MavenException(
+          404,
+          "no timestamped snapshots under "
+              + prefix
+              + " — resolve the literal -SNAPSHOT filename instead");
+    }
+    return MavenMetadata.snapshotDocument(groupId, artifactId, version, files, lastUpdated);
+  }
+
+  /**
    * The derived checksum of a stored file — computed from the blob bytes at read time, never
    * stored: all four algorithms are one pass each at platform jar sizes, and a stored copy is a
    * second source of truth that can only ever disagree.
@@ -226,9 +276,10 @@ public class MavenRoutes {
   }
 
   /**
-   * A stored file, served zero-copy. Content-addressed underneath and immutable on top, so the
-   * bytes behind this URL can never mean something else — the same stance as the npm tarball route
-   * and the OCI blob route.
+   * A stored file, served zero-copy. Immutable paths are content-addressed underneath and immutable
+   * on top, so the bytes behind their URL can never mean something else — the same stance as the
+   * npm tarball route and the OCI blob route. A literal {@code -SNAPSHOT} file is the one moving
+   * target, and says so in its cache header.
    */
   private void serveFile(RoutingContext rc, String repository, String path, boolean withBody) {
     MavenRegistryService.StoredArtifact stored =
@@ -248,8 +299,16 @@ public class MavenRoutes {
         rc.response()
             .putHeader(HttpHeaders.CONTENT_TYPE, "application/octet-stream")
             .putHeader(HttpHeaders.CONTENT_LENGTH, Long.toString(size))
-            .putHeader(HttpHeaders.ETAG, "\"" + stored.blobId() + "\"")
-            .putHeader(HttpHeaders.CACHE_CONTROL, "public, max-age=31536000, immutable");
+            .putHeader(HttpHeaders.ETAG, "\"" + stored.blobId() + "\"");
+    if (MavenLayout.isMutablePath(path)) {
+      // The one moving target: a literal -SNAPSHOT file may be redeployed, so the bytes behind this
+      // URL CAN change. The ETag stays, so a revalidation is a cheap 304 when they have not.
+      response.putHeader(HttpHeaders.CACHE_CONTROL, "no-cache");
+    } else {
+      // Content-addressed underneath and immutable on top, so the bytes behind this URL can never
+      // mean something else — the same stance as the npm tarball route and the OCI blob route.
+      response.putHeader(HttpHeaders.CACHE_CONTROL, "public, max-age=31536000, immutable");
+    }
     if (!withBody) {
       // HEAD must carry the same Content-Length as GET, and sendFile writes the file region
       // unconditionally, so it must not be reached here.

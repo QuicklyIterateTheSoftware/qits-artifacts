@@ -78,6 +78,10 @@ public final class MavenLayout {
    * <p>A null here is a {@code 400} on a PUT, not a {@code 404}: a store that accepts unparseable
    * paths serves unanswerable metadata later, so the refusal happens at the door. A GET needs no
    * parse at all — an unknown path is simply a row that does not exist.
+   *
+   * <p>The version directory may be a release version or end in {@code -SNAPSHOT}; both are
+   * ordinary directories here. What differs is the file's rule underneath — see {@link
+   * #isMutablePath(ArtifactPath)}.
    */
   public static ArtifactPath parse(String path) {
     String[] segments = path.split("/");
@@ -100,5 +104,74 @@ public final class MavenLayout {
       }
     }
     return new ArtifactPath(path, String.join(".", group), artifact, version, file);
+  }
+
+  public static boolean isSnapshotVersion(String version) {
+    return version.endsWith("-SNAPSHOT");
+  }
+
+  /**
+   * A timestamped snapshot filename, parsed: {@code
+   * <artifact>-<baseVersion>-<yyyyMMdd>.<HHmmss>-<buildNo>[-<classifier>].<ext>}.
+   *
+   * <p>These are what every modern client deploys for a {@code -SNAPSHOT} version (maven-3's
+   * {@code uniqueVersion} default, and Gradle likewise): one deploy, one filename, unique by
+   * construction. The server computes none of this — the client does — but it reads the names back
+   * to derive the version-level {@code maven-metadata.xml} a resolver maps {@code 1.0.1-SNAPSHOT}
+   * through.
+   */
+  public record SnapshotFileName(
+      String extension, String classifier, String timestamp, int buildNumber) {
+
+    /** The coordinate a resolver downloads: {@code 1.0.1-20260802.123456-3}. */
+    public String value(String baseVersion) {
+      return baseVersion + "-" + timestamp + "-" + buildNumber;
+    }
+  }
+
+  private static final java.util.regex.Pattern TIMESTAMPED_SNAPSHOT =
+      java.util.regex.Pattern.compile("(\\d{8}\\.\\d{6})-(\\d+)(?:-(.+))?\\.([A-Za-z0-9]+)");
+
+  /**
+   * Parses {@code file} as a timestamped snapshot of {@code artifactId:…:version}, or null when it
+   * is not one — including when the version is not a {@code -SNAPSHOT} at all.
+   */
+  public static SnapshotFileName parseTimestampedSnapshot(
+      String artifactId, String version, String file) {
+    if (!isSnapshotVersion(version)) {
+      return null;
+    }
+    String baseVersion = version.substring(0, version.length() - "-SNAPSHOT".length());
+    String prefix = artifactId + "-" + baseVersion + "-";
+    if (!file.startsWith(prefix)) {
+      return null;
+    }
+    java.util.regex.Matcher matcher =
+        TIMESTAMPED_SNAPSHOT.matcher(file.substring(prefix.length()));
+    if (!matcher.matches()) {
+      return null;
+    }
+    return new SnapshotFileName(
+        matcher.group(4), matcher.group(3), matcher.group(1), Integer.parseInt(matcher.group(2)));
+  }
+
+  /**
+   * The one mutable path class: a <b>literal</b> {@code -SNAPSHOT} filename ({@code
+   * a-1.0.1-SNAPSHOT.jar}), what a client with {@code uniqueVersion=false} deploys.
+   *
+   * <p>The coordinate is a moving target by definition, so a redeploy rewrites the row — a {@code
+   * 403} here would break a legitimate redeploy while buying nothing, since the timestamped form is
+   * what every modern client sends. Release paths and timestamped snapshot files are both
+   * immutable: the release rule, and uniqueness by construction.
+   */
+  public static boolean isMutablePath(ArtifactPath parsed) {
+    return isSnapshotVersion(parsed.version())
+        && parseTimestampedSnapshot(parsed.artifactId(), parsed.version(), parsed.file()) == null;
+  }
+
+  /** The same answer for a raw path, for the serve side which never needed the parse to resolve. */
+  public static boolean isMutablePath(String path) {
+    ArtifactPath parsed = parse(path);
+    return parsed != null && isMutablePath(parsed);
   }
 }

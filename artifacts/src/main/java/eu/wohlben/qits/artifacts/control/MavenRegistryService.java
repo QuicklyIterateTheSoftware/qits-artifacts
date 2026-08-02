@@ -76,18 +76,26 @@ public class MavenRegistryService {
    *
    * <p>The immutability check lives here rather than in the route because it has to be inside the
    * same transaction as the insert — checking outside it would make two concurrent deploys of the
-   * same path a race that both sides win. Three answers:
+   * same path a race that both sides win. The path space has three classes (maven-repository-plan.md
+   * §3.6) and each gets the honest rule:
    *
    * <ul>
-   *   <li><b>No row</b> — the file deploys.
-   *   <li><b>A row with the same blob</b> — an idempotent no-op: deploy retries are normal, and
-   *       content addressing makes the retry free.
-   *   <li><b>A row with different bytes</b> — {@code 403}, naming the version and the rule: a
+   *   <li><b>Release paths</b> are immutable: a re-deploy of identical bytes is an idempotent
+   *       no-op (deploy retries are normal, and content addressing makes the retry free); a
+   *       re-deploy of different bytes is {@code 403}, naming the version and the rule — a
    *       coordinate that resolved to two different jars over its lifetime is the mutability this
    *       registry exists to refuse.
+   *   <li><b>Timestamped snapshot files</b> are unique by construction — one deploy, one filename —
+   *       so they take the release rule: identical is a no-op, different bytes at the same
+   *       timestamped name is a {@code 403} that means the client's clock or build counter
+   *       collided, which is worth saying loudly rather than absorbing.
+   *   <li><b>Literal {@code -SNAPSHOT} filenames</b> are mutable: the coordinate is a moving target
+   *       by definition, and a {@code 403} here would break a legitimate redeploy while buying
+   *       nothing — the timestamped form is what every modern client sends, so this class exists
+   *       for compatibility, not as the platform's own convention.
    * </ul>
    *
-   * @throws MavenException {@code 403} on a re-deploy with different bytes
+   * @throws MavenException {@code 403} on a re-deploy of an immutable path with different bytes
    */
   @ActivateRequestContext
   @Transactional
@@ -108,13 +116,28 @@ public class MavenRegistryService {
     if (row.blobId.equals(blobId)) {
       return;
     }
-    throw new MavenException(
-        403,
-        "cannot deploy over the existing "
-            + parsed.path()
-            + " — version "
-            + parsed.version()
-            + " is immutable here; bump the version");
+    if (MavenLayout.parseTimestampedSnapshot(parsed.artifactId(), parsed.version(), parsed.file())
+        != null) {
+      throw new MavenException(
+          403,
+          "cannot deploy over the existing "
+              + parsed.path()
+              + " — a timestamped snapshot name is unique by construction; different bytes at the"
+              + " same name means the client's clock or build counter collided");
+    }
+    if (!MavenLayout.isMutablePath(parsed)) {
+      throw new MavenException(
+          403,
+          "cannot deploy over the existing "
+              + parsed.path()
+              + " — version "
+              + parsed.version()
+              + " is immutable here; bump the version");
+    }
+    // The one mutable class: a literal -SNAPSHOT filename is a moving target by definition.
+    row.blobId = blobId;
+    row.sizeBytes = sizeBytes;
+    row.createdAt = Instant.now();
   }
 
   /**
