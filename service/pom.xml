@@ -56,8 +56,8 @@
             <artifactId>qits-artifacts-git-storage</artifactId>
         </dependency>
         <dependency>
-            <!-- The platform's shared auth jar (integrations/qits-integrations-quarkus, built here
-                 as a nested submodule): forward-auth for user traffic — the ForwardAuthMechanism
+            <!-- The platform's shared auth jar, resolved from the platform Maven repository:
+                 forward-auth for user traffic — the ForwardAuthMechanism
                  pair this module used to carry its own copy of — plus MachineAuth, the claim checks
                  and the one gate that turns machine-token enforcement on. -->
             <groupId>${project.groupId}</groupId>
