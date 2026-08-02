@@ -5,7 +5,8 @@ import io.vertx.ext.web.RoutingContext;
 import java.io.InputStream;
 
 /**
- * The request-body half of the registry's raw Vert.x routes: the one thing that must happen on the
+ * The request-body half of the raw Vert.x wire routes that stream an upload to disk — the OCI
+ * registry's, and the maven repository's deploy PUT. It is the one thing that must happen on the
  * event loop, and the one class that changes if Quarkus ever moves {@link VertxInputStream}.
  *
  * <p><b>Why not our own stream.</b> {@code VertxInputStream} is the same implementation RESTEasy
@@ -21,8 +22,10 @@ import java.io.InputStream;
  * <p>It lives in {@code io.quarkus.vertx.http.runtime}, which carries no compatibility promise. That
  * is the acceptable kind of risk here: an upgrade that moves it breaks <em>this file</em> at compile
  * time, which is the failure mode this repo prefers over a green build that fails in production.
+ * Public since the maven wire grew a second streaming route — one wrapper, so both routes behave
+ * identically at the ceiling.
  */
-final class OciRequestBody {
+public final class OciRequestBody {
 
   private OciRequestBody() {}
 
@@ -40,7 +43,7 @@ final class OciRequestBody {
    * <p>The symptom of omitting this is a digest mismatch on finalize, intermittently, under load
    * only. It is worth the extra line.
    */
-  static void pauseForWorker(RoutingContext rc) {
+  public static void pauseForWorker(RoutingContext rc) {
     rc.request().pause();
     rc.next();
   }
@@ -52,7 +55,7 @@ final class OciRequestBody {
    * @param idleTimeoutMillis how long to wait for the <b>next chunk</b>, not for the whole upload;
    *     on expiry the connection is closed and the read throws {@code IOException}
    */
-  static InputStream open(RoutingContext rc, long idleTimeoutMillis) {
+  public static InputStream open(RoutingContext rc, long idleTimeoutMillis) {
     return new VertxInputStream(rc, idleTimeoutMillis);
   }
 }

@@ -46,4 +46,19 @@ public class MavenArtifactRepository implements PanacheRepositoryBase<MavenArtif
         .setParameter("repository", repository)
         .getResultList();
   }
+
+  /**
+   * {@code (path, createdAt)} for every row under a prefix — the whole of what the derived
+   * {@code maven-metadata.xml} reads. A prefix scan on the primary key's leading columns.
+   */
+  public List<Object[]> listPathsAndCreatedAtStartingWith(String repository, String prefix) {
+    return getEntityManager()
+        .createQuery(
+            "select a.path, a.createdAt from MavenArtifact a"
+                + " where a.repository = :repository and a.path like :prefix",
+            Object[].class)
+        .setParameter("repository", repository)
+        .setParameter("prefix", prefix + "/%")
+        .getResultList();
+  }
 }
