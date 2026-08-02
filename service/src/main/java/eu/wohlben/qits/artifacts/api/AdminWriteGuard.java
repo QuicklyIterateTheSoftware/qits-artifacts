@@ -1,37 +1,39 @@
 package eu.wohlben.qits.artifacts.api;
 
-import eu.wohlben.qits.artifacts.control.ArtifactsToken;
+import eu.wohlben.qits.auth.MachineAuth;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ContainerRequestFilter;
-import jakarta.ws.rs.core.MediaType;
-import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.ext.Provider;
-import java.util.Map;
 import java.util.Set;
 
 /**
- * Guards the artifacts <b>write</b> surface (POST upload + PUT repository ensure under {@code
- * /artifacts/api/repositories/}) with a single static token — this is a pure system API
- * (docs/epics/qits-artifacts/). The paths are on {@code auth-core}'s token-free {@code PublicPaths}
- * allowlist (their callers are CI processes in containers with no user session), so this filter is
- * the write protection.
+ * Guards the artifacts <b>write</b> surface — the JSON admin API under {@code /artifacts/api} — with
+ * a machine token from qits-idp. This is a pure system API (docs/epics/qits-artifacts/); its callers
+ * are CI processes and platform services, never a browser session.
  *
- * <p>The header is {@code X-Artifacts-Token}. When {@code qits.artifacts.token} is blank (the
- * dev/test default) the guard is a no-op, keeping dev and the suites friction-free. Reads (GET) are
- * never guarded — a blob must be usable directly as an {@code <img>}/{@code <video>} src.
+ * <p>{@link MachineAuth#require()} is the whole check, and {@code qits.auth.machine.audience} is
+ * {@code qits-artifacts}, so it reads as "a validated bearer minted for this service". No claim is
+ * inspected: nothing under this API belongs to one project, and a token that reaches here at all was
+ * issued to a client qits-idp trusts with the blob store.
+ *
+ * <p><b>The rollout gate decides whether it does anything.</b> With {@code
+ * qits.auth.machine.required} off — the shipped default — every call returns at once and the write
+ * surface is open exactly as it was before qits-idp existed. That is the same posture the retired
+ * {@code X-Artifacts-Token} filter had with a blank secret, and it is why this can ship before the
+ * idp is deployed. Reads (GET) are never guarded either way — a blob must stay usable directly as an
+ * {@code <img>}/{@code <video>} src.
  *
  * <p>This filter is JAX-RS, so it sees only what RESTEasy dispatches. It does <b>not</b> run on the
- * raw Vert.x routes — neither {@code /artifacts/git/*} nor the registry's {@code /v2/*}, and both
- * are unguarded <b>on purpose</b>: the git host trades on capability-url repo ids, and the registry
- * is deliberately tokenless (trusted producers on qits-net; external writes die on the gateway's
- * session policy — see {@code RegistryRoutes.init}). Setting this token guards the JSON API and
- * nothing else.
+ * raw Vert.x routes — neither {@code /artifacts/git/*} nor the registry's {@code /v2/*} nor the npm
+ * paths — and all of them stay unguarded <b>on purpose</b> in phase 1: the git host trades on
+ * capability-url repo ids and its own {@code ProtectedRefHook}, and the registry is deliberately
+ * tokenless (trusted producers on qits-net; external writes die on the gateway's session policy —
+ * see {@code RegistryRoutes.init}). Turning the gate on guards the JSON API and nothing else;
+ * {@code RegistryOpenPushTest} pins that.
  */
 @Provider
-public class ArtifactsTokenFilter implements ContainerRequestFilter {
-
-  static final String TOKEN_HEADER = "X-Artifacts-Token";
+public class AdminWriteGuard implements ContainerRequestFilter {
 
   private static final Set<String> WRITE_METHODS = Set.of("POST", "PUT", "DELETE", "PATCH");
 
@@ -50,18 +52,14 @@ public class ArtifactsTokenFilter implements ContainerRequestFilter {
   private static final Set<String> GUARDED_PREFIXES =
       Set.of("repositories", "store", "gc", "mirror-upstreams");
 
-  @Inject ArtifactsToken token;
+  @Inject MachineAuth machineAuth;
 
   @Override
   public void filter(ContainerRequestContext requestContext) {
-    if (!token.enforced()) {
-      return; // open in dev/test — no token configured
-    }
     // getPath() is relative to the JAX-RS base (quarkus.rest.path, /artifacts/api); normalize any
     // leading slash. A write to /artifacts/api/repositories/... lands here as "repositories/...".
     // The prefix is "repositories" and not "artifacts" because the segment carries that now — the
-    // resource @Paths dropped it. Every JAX-RS resource this service ships is under repositories/,
-    // so the match is the whole write surface, exactly as it was.
+    // resource @Paths dropped it.
     String path = requestContext.getUriInfo().getPath();
     if (path.startsWith("/")) {
       path = path.substring(1);
@@ -71,12 +69,8 @@ public class ArtifactsTokenFilter implements ContainerRequestFilter {
         || !WRITE_METHODS.contains(requestContext.getMethod())) {
       return;
     }
-    if (!token.matches(requestContext.getHeaderString(TOKEN_HEADER))) {
-      requestContext.abortWith(
-          Response.status(Response.Status.UNAUTHORIZED)
-              .entity(Map.of("message", "Missing or invalid " + TOKEN_HEADER))
-              .type(MediaType.APPLICATION_JSON)
-              .build());
-    }
+    // Throws UnauthorizedException (401) with no machine token, ForbiddenException (403) with one
+    // addressed elsewhere. Quarkus REST maps both, so there is nothing to abortWith here.
+    machineAuth.require();
   }
 }

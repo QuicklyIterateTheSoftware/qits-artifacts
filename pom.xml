@@ -41,6 +41,14 @@
     <name>qits-artifacts</name>
 
     <modules>
+        <!-- The shared auth jar, built in place from a nested submodule (the same shape qits-ci
+             uses for qits-eventstream). The directory is that repo's own aggregator pom, so Maven
+             picks up qits-auth-core — and anything added there later — on its own. It comes first
+             because `service` depends on it.
+
+             A fresh clone needs `git submodule update` with `init` before `./mvnw verify`; without
+             it Maven stops at "Child module ... does not exist" before a line compiles. -->
+        <module>qits-integrations-quarkus</module>
         <!-- Both libraries before the app: `service` depends on `artifacts` today and on
              `git-storage` once the git host is wired to it. The two libraries do NOT depend on each
              other — they are different contexts — which is why `git-storage` declares its own ports
@@ -120,6 +128,13 @@
             <dependency>
                 <groupId>${project.groupId}</groupId>
                 <artifactId>qits-artifacts-git-storage</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <!-- The nested submodule's one module. Same groupId and version as this reactor,
+                     so ${project.*} spells it. -->
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-auth-core</artifactId>
                 <version>${project.version}</version>
             </dependency>
         </dependencies>

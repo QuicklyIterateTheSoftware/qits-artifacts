@@ -129,7 +129,8 @@ Two outbound/inbound addresses are contracts other repos hold:
   qits-workspace-daemon's `Provisioner`.
 - `qits.ci.intake-url` → `/ci/api/events/post-receive` — qits-ci's path, not ours. The notifier
   swallows delivery failures at debug, so a wrong value here produces no error anywhere and CI
-  simply never runs.
+  simply never runs. It carries a bearer for `aud=qits-ci` when this deployment has client
+  credentials, and nothing when it does not.
 
 ## Package and module conventions
 
@@ -361,8 +362,9 @@ or widening it to public, removes them without failing anything.
 
 ## Authentication
 
-Authentication happens at `qits-gateway`. This service resolves a principal from a trusted header
-(`X-Qits-User`, read by `artifacts/security/ForwardAuthMechanism`) and authenticates nothing.
+User authentication happens at `qits-gateway`. This service resolves a principal from a trusted
+header (`X-Qits-User`, read by `ForwardAuthMechanism` in the `qits-auth-core` jar — the nested
+`qits-integrations-quarkus` submodule) and authenticates no user itself.
 
 **`identity.isAnonymous()` is not a security state** — it means "no name for the audit row". A check
 of the form `if (identity.isAnonymous()) deny` would look like a security control and be worth
@@ -505,18 +507,21 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   it. `ArtifactBrowseControllerTest` proves the two names in this service that contain a slash (an
   OCI image name, a scoped npm package) resolve in both spellings, encoded and literal, which is a
   property of the path templates and of nothing else. Both must hold; neither implies the other.
-- The suite points `qits.ci.intake-url` at a closed port. The notifier is fire-and-forget, so a push
-  test still passes; nothing asserts the event arrives, because the receiver is another repo's.
+- The suite points `qits.ci.intake-url` at a closed port, so a push test passes without a receiver;
+  the notifier is fire-and-forget and swallows the failure. `CiPostReceiveNotifierTest` and
+  `CiPostReceiveBearerTest` are the two that do assert the delivery, against `StubCiIntake` — which
+  plays qits-ci's intake and qits-idp's token endpoint at once, and passes everything it observed
+  through system properties because a `QuarkusTestProfile` is built in two classloaders.
 
 ## What not to "fix"
 
-- `ArtifactsTokenFilter` matches on `getUriInfo().getPath()` against a **set** of prefixes —
+- `AdminWriteGuard` matches on `getUriInfo().getPath()` against a **set** of prefixes —
   `repositories`, `store`, `gc` and `mirror-upstreams` — relative to the JAX-RS base, so it holds
   whatever `quarkus.rest.path` is. It was `artifacts` until the resource `@Path`s dropped that segment (the gateway segment
   carries it now). **A resource added outside those prefixes is unguarded** — extend the set, do not
   assume it is covered. `store` holds only the read-only store summary today and is listed so that
-  stays a choice rather than an accident. It guards writes only, by design, and is a no-op when
-  `qits.artifacts.token` is blank.
+  stays a choice rather than an accident. It guards writes only, by design, and is a no-op while the
+  rollout gate `qits.auth.machine.required` is off.
 - `service` ships `quarkus.http.limits.max-body-size=1088M`, which is a **global** ceiling — every
   route in the process, not just the upload. Tracked as an open tradeoff in
   `docs/issues/2026-07-19_artifacts-global-max-body-size-widens-public-ingest-dos.md`, which now
