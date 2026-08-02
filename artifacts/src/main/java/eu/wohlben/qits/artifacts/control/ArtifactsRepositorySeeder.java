@@ -8,8 +8,9 @@ import jakarta.inject.Inject;
 /**
  * Idempotently ensures the default repository rows exist: the two CI types ({@code ci-screenshots},
  * {@code ci-videos}), the platform image repository ({@code qits}, type {@code oci-images}), the
- * two npm roots ({@code npm} hosted, {@code npmjs} proxy) and the three OCI mirror namespaces
- * ({@code hub}, {@code quay}, {@code redhat}, each paired with its upstream row). Invoked by the
+ * two npm roots ({@code npm} hosted, {@code npmjs} proxy), the maven root ({@code maven}, hosted)
+ * and the three OCI mirror namespaces ({@code hub}, {@code quay}, {@code redhat}, each paired with
+ * its upstream row). Invoked by the
  * service-side startup gate
  * ({@code ArtifactsStartupSeed}); also usable directly (e.g. the standalone deployable's own boot).
  * Purely additive — re-running is a no-op via {@link ArtifactRepositoryService#ensure}.
@@ -44,6 +45,14 @@ public class ArtifactsRepositorySeeder {
    */
   public static final String NPM_PROXY = "npmjs";
 
+  /**
+   * The hosted maven repository, at {@code /artifacts/maven/maven/}. Same argument as {@link #NPM}:
+   * a pipeline's {@code mvn deploy} names this root by its {@code distributionManagement} url alone,
+   * so the one namespace nobody chooses must not also be a manual step. The {@code central} proxy
+   * row is deliberately not seeded yet — its type lands with the pull-through workstream.
+   */
+  public static final String MAVEN = "maven";
+
   @Inject ArtifactRepositoryService repositoryService;
 
   @Inject OciMirrorUpstreams mirrorUpstreams;
@@ -55,6 +64,7 @@ public class ArtifactsRepositorySeeder {
     repositoryService.ensure(IMAGES, RepositoryType.OCI_IMAGES);
     repositoryService.ensure(NPM, RepositoryType.NPM_PACKAGES);
     repositoryService.ensure(NPM_PROXY, RepositoryType.NPM_PROXY);
+    repositoryService.ensure(MAVEN, RepositoryType.MAVEN_PACKAGES);
     // The mirror namespaces (hub, quay, redhat) and the upstream row each of them fronts. Written
     // as a PAIR by OciMirrorUpstreams, which is why they are not five more lines above: a
     // repository row with no upstream is a namespace nothing can be fetched into, and an upstream

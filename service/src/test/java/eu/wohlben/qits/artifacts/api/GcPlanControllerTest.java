@@ -50,7 +50,7 @@ class GcPlanControllerTest {
         .body("dryRun", is(true))
         .body("generatedAt", notNullValue())
         .body("graceWindow", is("P7D"))
-        .body("types", hasSize(6))
+        .body("types", hasSize(7))
         .body(
             "types.type",
             org.hamcrest.Matchers.containsInAnyOrder(
@@ -59,13 +59,19 @@ class GcPlanControllerTest {
                 "oci-images",
                 "npm-packages",
                 "npm-proxy",
-                "oci-mirror"))
+                "oci-mirror",
+                "maven-packages"))
         .body("types.find { it.type == 'oci-images' }.strategy", is("OciImageGcStrategy"))
         .body("types.find { it.type == 'npm-packages' }.strategy", is("NpmPackagesGcStrategy"))
         .body("types.find { it.type == 'oci-mirror' }.strategy", is("OciMirrorGcStrategy"))
         .body(
             "types.find { it.type == 'ci-screenshots' }.strategy", is("CiScreenshotsGcStrategy"))
         .body("types.find { it.type == 'ci-videos' }.strategy", is("CiVideosGcStrategy"))
+        .body(
+            "types.find { it.type == 'maven-packages' }.strategy", is("MavenPackagesGcStrategy"))
+        .body("types.find { it.type == 'maven-packages' }.dead", hasSize(0))
+        .body("types.find { it.type == 'maven-packages' }.note",
+            org.hamcrest.Matchers.containsString("snapshot"))
         .body("types.find { it.type == 'npm-proxy' }.note", is("no strategy registered for npm-proxy"))
         .body("types.find { it.type == 'npm-proxy' }.strategy", nullValue())
         .body("types.reclaimableBytes", everyItem(is(0)));
@@ -73,7 +79,7 @@ class GcPlanControllerTest {
 
   @Test
   void theStubsClaimTheirTypesAndSayEitherTheirRuleOrTheirRefusal() {
-    // The five-type table is complete: both CI types are claimed by stubs. Their wire state depends
+    // The claimed set is complete: both CI types are claimed by stubs. Their wire state depends
     // on suite order — BlobControllerTest uploads real screenshot records into this shared process —
     // so both honest answers are accepted and pinned: at zero rows, a note naming the intended rule
     // (branch-scoped for screenshots, byte-budgeted for videos) and that the loop has never
@@ -191,7 +197,7 @@ class GcPlanControllerTest {
             .body("dryRun", is(false))
             .body("executedAt", notNullValue())
             .body("graceWindow", is("P7D"))
-            .body("types", hasSize(6))
+            .body("types", hasSize(7))
             .body(
                 "types.find { it.type == 'oci-images' }.error",
                 org.hamcrest.Matchers.containsString("qits-cd"))

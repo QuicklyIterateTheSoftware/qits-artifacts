@@ -51,8 +51,30 @@ class LiveBlobCensusTest extends GcFixture {
         sorted(taken.live(RepositoryType.NPM_PACKAGES).keySet()));
     assertEquals(Set.of(), taken.live(RepositoryType.NPM_PROXY).keySet());
     assertEquals(Set.of(), taken.live(RepositoryType.OCI_MIRROR).keySet());
+    assertEquals(Set.of(), taken.live(RepositoryType.MAVEN_PACKAGES).keySet());
     assertEquals(Set.of(), taken.live(RepositoryType.CI_SCREENSHOTS).keySet());
     assertEquals(Set.of(), taken.live(RepositoryType.CI_VIDEOS).keySet());
+  }
+
+  @Test
+  void whatMavenDeployedIsLiveUnderItsOwnTypeRatherThanOrphaned() throws Exception {
+    // The pin the maven type's first landing asks for: a deployed jar unknown to the census would
+    // be misreported as an ORPHAN — servable, row-less-looking, untouchable. Attribution runs off
+    // the repository row's type, so both maven types' sets fill from maven_artifact and the
+    // pull-through workstream adds no census code when its constant lands.
+    MavenStore maven = seedMaven();
+
+    LiveBlobCensus.Census taken = census.take();
+
+    assertEquals(
+        Set.of(maven.jar(), maven.pom()), taken.live(RepositoryType.MAVEN_PACKAGES).keySet());
+    assertEquals(
+        (long) MAVEN_JAR + MAVEN_POM,
+        taken.liveBytes(RepositoryType.MAVEN_PACKAGES),
+        "sized from the rows — the one protocol table that has the size, so no disk read");
+    assertTrue(
+        taken.rowless().stream().noneMatch(Set.of(maven.jar(), maven.pom())::contains),
+        "nothing maven deployed may be classified as an orphan");
   }
 
   @Test
@@ -138,6 +160,7 @@ class LiveBlobCensusTest extends GcFixture {
     assertEquals(taken.liveBytes(RepositoryType.OCI_MIRROR), summary.ociMirrorBytes());
     assertEquals(taken.liveBytes(RepositoryType.NPM_PACKAGES), summary.npmPublishedBytes());
     assertEquals(taken.liveBytes(RepositoryType.NPM_PROXY), summary.npmProxyTarballBytes());
+    assertEquals(taken.liveBytes(RepositoryType.MAVEN_PACKAGES), summary.mavenPublishedBytes());
     assertEquals(taken.rowlessBytes(), summary.orphanBytes());
     assertEquals(taken.diskTotalBytes(), summary.diskTotalBytes());
     assertEquals(taken.ociPerImageSumBytes(), summary.ociPerImageSumBytes());

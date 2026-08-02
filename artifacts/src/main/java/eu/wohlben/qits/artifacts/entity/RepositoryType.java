@@ -132,7 +132,25 @@ public enum RepositoryType {
    * jdk-25} is neither a calver release nor a build sha, and would otherwise be kept by docker's
    * unclassified-means-keep rule and reported as if somebody had decided something.
    */
-  OCI_MIRROR(Set.of(), Set.of(), 0L);
+  OCI_MIRROR(Set.of(), Set.of(), 0L),
+
+  /**
+   * A <b>hosted</b> maven repository, served at {@code /artifacts/maven/<repository>} by {@code
+   * eu.wohlben.qits.maven}.
+   *
+   * <p>A protocol type on the {@link #OCI_IMAGES} pattern, and everything that javadoc says about
+   * empty profiles and a zero cap holds verbatim: a jar or a pom arrives on the maven wire routes
+   * and goes straight to {@code BlobStore}, so there is no media type to sniff and no metadata to
+   * require, and the empty media-type set is what makes the zero cap safe rather than merely unused.
+   * The real cap is {@code qits.artifacts.maven.max-artifact-size}.
+   *
+   * <p>Release paths are immutable — a re-deploy with different bytes is {@code 403}, the maven
+   * analog of the registry's append-only stance. A re-deploy of <em>identical</em> bytes is an
+   * idempotent no-op, which content addressing makes free; timestamped snapshot files are unique by
+   * construction and take the release rule, and a literal {@code -SNAPSHOT} filename is the one
+   * mutable path (maven-repository-plan.md §3.6).
+   */
+  MAVEN_PACKAGES(Set.of(), Set.of(), 0L);
 
   private final Set<String> allowedMediaTypes;
   private final Set<String> requiredMetadataKeys;

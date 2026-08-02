@@ -12,6 +12,7 @@ import eu.wohlben.qits.artifacts.dto.PackageSummary;
 import eu.wohlben.qits.artifacts.dto.PackageVersionSummary;
 import eu.wohlben.qits.artifacts.dto.RepositorySummary;
 import eu.wohlben.qits.artifacts.dto.StoreSummary;
+import eu.wohlben.qits.artifacts.entity.MavenArtifact;
 import eu.wohlben.qits.artifacts.entity.NpmDistTag;
 import eu.wohlben.qits.artifacts.entity.NpmProxyPackument;
 import eu.wohlben.qits.artifacts.entity.NpmVersion;
@@ -131,11 +132,13 @@ class ArtifactExplorerServiceTest extends ArtifactsTestSupport {
   }
 
   @Test
-  void theEightStoreFiguresAccountForEveryByteOnDisk() {
-    // The panel's whole claim: disk = both OCI unions + both npm tarball figures + the orphans. The
-    // packument total is deliberately outside that sum — those bytes are H2 CLOBs, not files.
+  void theTenStoreFiguresAccountForEveryByteOnDisk() {
+    // The panel's whole claim: disk = both OCI unions + both npm tarball figures + both maven
+    // figures + the orphans. The packument total is deliberately outside that sum — those bytes are
+    // H2 CLOBs, not files.
     Fixture fixture = seedImages();
     seedNpm();
+    seedMaven();
     store(filled(ORPHAN, (byte) 9));
 
     StoreSummary summary = explorer.storeSummary();
@@ -145,6 +148,8 @@ class ArtifactExplorerServiceTest extends ArtifactsTestSupport {
             + summary.ociMirrorBytes()
             + summary.npmPublishedBytes()
             + summary.npmProxyTarballBytes()
+            + summary.mavenPublishedBytes()
+            + summary.mavenProxyBytes()
             + summary.orphanBytes());
     assertEquals(
         0L,
@@ -153,6 +158,11 @@ class ArtifactExplorerServiceTest extends ArtifactsTestSupport {
     assertEquals(40 + 60, summary.npmPublishedBytes());
     assertEquals(70, summary.npmProxyTarballBytes());
     assertEquals(PACKUMENT_DOC.length(), summary.npmProxyPackumentBytes());
+    assertEquals(80 + 25, summary.mavenPublishedBytes(), "the jar and the pom, sized from the rows");
+    assertEquals(
+        0L,
+        summary.mavenProxyBytes(),
+        "no maven-proxy repository can exist before the pull-through workstream lands the type");
     assertTrue(fixture.ma1() > 0);
   }
 
@@ -200,6 +210,7 @@ class ArtifactExplorerServiceTest extends ArtifactsTestSupport {
   void theRepositoryListCarriesATypeACountAndAUnion() {
     Fixture fixture = seedImages();
     seedNpm();
+    seedMaven();
 
     Map<String, RepositorySummary> byName = byName(explorer.listRepositories());
     assertEquals(RepositoryType.OCI_IMAGES, byName.get("qits").type());
@@ -211,6 +222,9 @@ class ArtifactExplorerServiceTest extends ArtifactsTestSupport {
     assertEquals(1, byName.get("npm").itemCount(), "packages, for an npm repository");
     assertEquals(100L, byName.get("npm").sizeBytes());
     assertEquals(1, byName.get("npmjs").itemCount());
+    assertEquals(RepositoryType.MAVEN_PACKAGES, byName.get("maven").type());
+    assertEquals(2, byName.get("maven").itemCount(), "deployed files, for a maven repository");
+    assertEquals(80L + 25L, byName.get("maven").sizeBytes(), "the union over distinct blob ids");
   }
 
   @Test
@@ -269,6 +283,34 @@ class ArtifactExplorerServiceTest extends ArtifactsTestSupport {
   }
 
   private static final String PACKUMENT_DOC = "{\"name\":\"left-pad\",\"versions\":{}}";
+
+  /** One deployed release under the hosted maven repository: an 80-byte jar and a 25-byte pom. */
+  private void seedMaven() {
+    repositoryService.ensure("maven", RepositoryType.MAVEN_PACKAGES);
+    String jar = store(filled(80, (byte) 21));
+    String pom = store(filled(25, (byte) 22));
+
+    QuarkusTransaction.requiringNew()
+        .run(
+            () -> {
+              mavenArtifacts.persist(
+                  mavenArtifact(
+                      "eu/wohlben/qits/qits-eventstream/1.0.0/qits-eventstream-1.0.0.jar", jar, 80));
+              mavenArtifacts.persist(
+                  mavenArtifact(
+                      "eu/wohlben/qits/qits-eventstream/1.0.0/qits-eventstream-1.0.0.pom", pom, 25));
+            });
+  }
+
+  private static MavenArtifact mavenArtifact(String path, String blobId, long size) {
+    MavenArtifact row = new MavenArtifact();
+    row.repository = "maven";
+    row.path = path;
+    row.blobId = blobId;
+    row.sizeBytes = size;
+    row.createdAt = Instant.now();
+    return row;
+  }
 
   /** One hosted package with two versions and two dist-tags, and one proxied package with neither. */
   private void seedNpm() {

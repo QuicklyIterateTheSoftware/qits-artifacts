@@ -1,5 +1,6 @@
 package eu.wohlben.qits.artifacts.control;
 
+import eu.wohlben.qits.artifacts.entity.MavenArtifact;
 import eu.wohlben.qits.artifacts.entity.NpmVersion;
 import eu.wohlben.qits.artifacts.entity.OciManifest;
 import eu.wohlben.qits.artifacts.entity.OciTag;
@@ -151,6 +152,46 @@ abstract class GcFixture extends ArtifactsTestSupport {
 
   static final String MIRROR_REPO = "quay";
   static final String MIRROR_IMAGE = "quarkus/ubi9-quarkus-mandrel-builder-image";
+
+  /** What {@link #seedMaven()} built. */
+  record MavenStore(String jar, String pom) {}
+
+  static final String MAVEN_REPO = "maven";
+  static final String MAVEN_JAR_PATH = "eu/wohlben/qits/qits-eventstream/1.0.0/qits-eventstream-1.0.0.jar";
+  static final String MAVEN_POM_PATH = "eu/wohlben/qits/qits-eventstream/1.0.0/qits-eventstream-1.0.0.pom";
+  static final int MAVEN_JAR = 60;
+  static final int MAVEN_POM = 30;
+
+  /**
+   * One deployed release — a jar and its pom — under the hosted maven repository. The rows are what
+   * the maven GC strategy lists as kept identities and what the census attributes to the type; the
+   * sizes ride on the rows, which is the whole reason this type needs no disk read.
+   */
+  MavenStore seedMaven() throws IOException {
+    repositoryService.ensure(MAVEN_REPO, RepositoryType.MAVEN_PACKAGES);
+    String jar = store(filled(MAVEN_JAR, (byte) 8));
+    String pom = store(filled(MAVEN_POM, (byte) 10));
+    QuarkusTransaction.requiringNew()
+        .run(
+            () -> {
+              mavenArtifacts.persist(mavenArtifact(MAVEN_JAR_PATH, jar, MAVEN_JAR));
+              mavenArtifacts.persist(mavenArtifact(MAVEN_POM_PATH, pom, MAVEN_POM));
+            });
+    for (String blobId : List.of(jar, pom)) {
+      backdate(blobId, Duration.ofDays(30));
+    }
+    return new MavenStore(jar, pom);
+  }
+
+  private static MavenArtifact mavenArtifact(String path, String blobId, long size) {
+    MavenArtifact row = new MavenArtifact();
+    row.repository = MAVEN_REPO;
+    row.path = path;
+    row.blobId = blobId;
+    row.sizeBytes = size;
+    row.createdAt = Instant.now();
+    return row;
+  }
 
   private static OciManifest mirrorManifest(String digest, long size, String mediaType) {
     OciManifest row = new OciManifest();

@@ -4,6 +4,7 @@ import eu.wohlben.qits.artifacts.entity.ArtifactRepository;
 import eu.wohlben.qits.artifacts.entity.RepositoryType;
 import eu.wohlben.qits.artifacts.persistence.ArtifactRecordRepository;
 import eu.wohlben.qits.artifacts.persistence.ArtifactRepositoryRepository;
+import eu.wohlben.qits.artifacts.persistence.MavenArtifactRepository;
 import eu.wohlben.qits.artifacts.persistence.NpmProxyPackumentRepository;
 import eu.wohlben.qits.artifacts.persistence.NpmVersionRepository;
 import eu.wohlben.qits.artifacts.persistence.OciManifestRepository;
@@ -27,7 +28,8 @@ import java.util.Set;
  * implementation of it would be a set the UI reports and a set the sweep protects, drifting silently
  * until a sweep deletes something the summary called live. So the explorer's summary and every GC
  * plan are built from this one class, and its byte-exactness is proved by the explorer's own tests:
- * {@code diskTotal = ociUnion + npmPublished + npmProxyTarballs + orphans}.
+ * {@code diskTotal = ociUnion + npmPublished + npmProxyTarballs + mavenPublished + mavenProxy +
+ * orphans}.
  *
  * <p>The type split is what makes per-type strategies safe. A blob dedupes globally, so "is this
  * blob garbage" is never a question one type can answer — but "which blobs does <em>my</em> type
@@ -47,6 +49,11 @@ import java.util.Set;
  *       own miss.
  *   <li>{@code npm-packages} / {@code npm-proxy} — {@code npm_version.tarball_blob_id}, sized from
  *       disk because there is no size column.
+ *   <li>{@code maven-packages} — {@code maven_artifact.blob_id}, sized from the row: that table is
+ *       the one protocol table whose size was free at stage time, so no disk read and no null size
+ *       like npm's. Attribution runs off the repository row's type, exactly like the CI records
+ *       below, so both maven types' live sets fill from this one table and the pull-through
+ *       workstream adds no census code when its constant lands.
  *   <li>{@code ci-screenshots} / {@code ci-videos} — {@code artifact_record.blob_id}, sized from the
  *       row, the one place a size sits beside an id.
  * </ul>
@@ -71,6 +78,7 @@ public class LiveBlobCensus {
   @Inject OciManifestRepository manifests;
   @Inject NpmVersionRepository versions;
   @Inject NpmProxyPackumentRepository packuments;
+  @Inject MavenArtifactRepository mavenArtifacts;
   @Inject OciManifestFootprints footprints;
   @Inject BlobDiskIndex diskIndex;
 
@@ -186,6 +194,14 @@ public class LiveBlobCensus {
       Map<String, Long> recordBlobs = live.get(repository.type);
       for (Object[] blob : records.listDistinctBlobs(repository.name)) {
         recordBlobs.putIfAbsent((String) blob[0], (Long) blob[1]);
+      }
+      // The maven half, on the records pattern: attributed by the row's repository type rather than
+      // by a hardcoded constant, so BOTH maven types' live sets fill from maven_artifact and the
+      // pull-through workstream adds no census code when MAVEN_PROXY lands. Sized from the row, the
+      // one protocol table that has the size.
+      Map<String, Long> mavenBlobs = live.get(repository.type);
+      for (Object[] blob : mavenArtifacts.listDistinctBlobs(repository.name)) {
+        mavenBlobs.putIfAbsent((String) blob[0], (Long) blob[1]);
       }
     }
 

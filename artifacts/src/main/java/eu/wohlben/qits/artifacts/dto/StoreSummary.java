@@ -4,7 +4,7 @@ package eu.wohlben.qits.artifacts.dto;
  * The honesty panel: every way of saying how big this store is, named rather than reconciled.
  *
  * <p>They do not add up, and the gaps are large enough to look like a bug — which is the reason all
- * eight are reported together instead of one being picked. An unlabelled byte count over a
+ * ten are reported together instead of one being picked. An unlabelled byte count over a
  * content-addressed, globally deduped store is a lie with a number in it.
  *
  * @param ociPerImageSumBytes the per-image unions, added. What the image list's column sums to, and
@@ -26,8 +26,14 @@ package eu.wohlben.qits.artifacts.dto;
  *     nearly four times the tarballs they index, and the store's largest cost after image layers. A
  *     view reporting only the proxy's disk usage is off by that much. Counted in characters; the
  *     documents are ASCII JSON.
+ * @param mavenPublishedBytes jars, poms and everything else deployed to the hosted maven
+ *     repositories, deduped and sized from the rows — {@code maven_artifact} is the one protocol
+ *     table that carries its size.
+ * @param mavenProxyBytes bytes cached from an upstream maven repository. Zero until the
+ *     pull-through workstream lands the type: no {@code maven-proxy} repository can exist before
+ *     its constraint does, so zero is the honest figure rather than a placeholder.
  * @param diskTotalBytes every blob file under the blob root, which is the number the filesystem
- *     agrees with. It exceeds the two OCI unions plus the npm figures by exactly {@link
+ *     agrees with. It exceeds the two OCI unions plus the npm and maven figures by exactly {@link
  *     #orphanBytes} — provided no blob is reached by two types at once, which content addressing
  *     permits and nothing forbids. That is the one way these figures can over-count, and it is the
  *     reason the census, not this record, is what a sweep reconciles over.
@@ -40,4 +46,6 @@ public record StoreSummary(
     long npmPublishedBytes,
     long npmProxyTarballBytes,
     long npmProxyPackumentBytes,
+    long mavenPublishedBytes,
+    long mavenProxyBytes,
     long diskTotalBytes) {}

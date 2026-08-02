@@ -27,7 +27,7 @@ class ArtifactsRepositorySeederTest extends ArtifactsTestSupport {
   @Inject OciMirrorUpstreams upstreams;
 
   @Test
-  void seedsTheTwoCiTypesThePlatformImageRepositoryTheTwoNpmRootsAndTheThreeMirrorNamespaces() {
+  void seedsTheTwoCiTypesThePlatformImageRepositoryTheTwoNpmRootsTheMavenRootAndTheThreeMirrorNamespaces() {
     seeder.ensureDefaults();
     assertEquals(
         Map.of(
@@ -36,6 +36,7 @@ class ArtifactsRepositorySeederTest extends ArtifactsTestSupport {
             ArtifactsRepositorySeeder.IMAGES, RepositoryType.OCI_IMAGES,
             ArtifactsRepositorySeeder.NPM, RepositoryType.NPM_PACKAGES,
             ArtifactsRepositorySeeder.NPM_PROXY, RepositoryType.NPM_PROXY,
+            ArtifactsRepositorySeeder.MAVEN, RepositoryType.MAVEN_PACKAGES,
             "hub", RepositoryType.OCI_MIRROR,
             "quay", RepositoryType.OCI_MIRROR,
             "redhat", RepositoryType.OCI_MIRROR),
@@ -63,7 +64,7 @@ class ArtifactsRepositorySeederTest extends ArtifactsTestSupport {
     // the seed must never be what keeps a restarted instance from coming up.
     seeder.ensureDefaults();
     seeder.ensureDefaults();
-    assertEquals(8, service.list().size());
+    assertEquals(9, service.list().size());
     assertEquals(3, upstreams.list().size());
   }
 

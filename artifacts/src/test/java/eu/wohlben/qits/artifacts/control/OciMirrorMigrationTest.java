@@ -143,6 +143,36 @@ class OciMirrorMigrationTest {
     assertEquals(0, count("select count(*) from oci_mirror_tag_check"));
   }
 
+  @Test
+  void theMavenTableIsThereKeyedByRepositoryAndPath() throws SQLException {
+    // V8's one table, exercised the way the lineage pins everything else: insert a repository and a
+    // deployed file under it, and prove the foreign key does its half of the job.
+    insertRepository("maven", "MAVEN_PACKAGES");
+    try (Connection connection = dataSource.getConnection();
+        Statement statement = connection.createStatement()) {
+      statement.executeUpdate(
+          "insert into maven_artifact (repository, path, blob_id, size_bytes, created_at) values"
+              + " ('maven', 'eu/wohlben/qits/qits-eventstream/1.0.0/qits-eventstream-1.0.0.jar',"
+              + " '" + "0".repeat(64) + "', 47940, current_timestamp)");
+    }
+    assertEquals(1, count("select count(*) from maven_artifact where repository = 'maven'"));
+    SQLException refused =
+        assertThrows(
+            SQLException.class,
+            () -> {
+              try (Connection connection = dataSource.getConnection();
+                  Statement statement = connection.createStatement()) {
+                statement.executeUpdate(
+                    "insert into maven_artifact (repository, path, blob_id, size_bytes, created_at)"
+                        + " values ('no-such-repo', 'x/y.jar', '" + "1".repeat(64)
+                        + "', 1, current_timestamp)");
+              }
+            });
+    assertTrue(
+        refused.getMessage().toUpperCase(java.util.Locale.ROOT).contains("FK_MAVEN_ARTIFACT_REPOSITORY"),
+        refused.getMessage());
+  }
+
   private void insertRepository(String name, String type) throws SQLException {
     try (Connection connection = dataSource.getConnection();
         Statement statement = connection.createStatement()) {

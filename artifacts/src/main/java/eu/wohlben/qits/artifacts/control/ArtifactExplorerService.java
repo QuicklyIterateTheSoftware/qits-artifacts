@@ -15,6 +15,7 @@ import eu.wohlben.qits.artifacts.error.BadRequestException;
 import eu.wohlben.qits.artifacts.error.NotFoundException;
 import eu.wohlben.qits.artifacts.persistence.ArtifactRecordRepository;
 import eu.wohlben.qits.artifacts.persistence.ArtifactRepositoryRepository;
+import eu.wohlben.qits.artifacts.persistence.MavenArtifactRepository;
 import eu.wohlben.qits.artifacts.persistence.NpmDistTagRepository;
 import eu.wohlben.qits.artifacts.persistence.NpmVersionRepository;
 import eu.wohlben.qits.artifacts.persistence.OciManifestRepository;
@@ -57,6 +58,7 @@ public class ArtifactExplorerService {
   @Inject OciTagRepository tags;
   @Inject NpmVersionRepository versions;
   @Inject NpmDistTagRepository distTags;
+  @Inject MavenArtifactRepository mavenArtifacts;
   @Inject OciManifestFootprints footprints;
   @Inject BlobDiskIndex diskIndex;
   @Inject LiveBlobCensus census;
@@ -171,7 +173,7 @@ public class ArtifactExplorerService {
   }
 
   /**
-   * The seven figures that do not reconcile, and the gaps between them.
+   * The figures that do not reconcile, and the gaps between them.
    *
    * <p>One disk walk and one pass over the manifests answers all of it, and that pass is {@link
    * LiveBlobCensus} — the same reading garbage collection plans from. Deliberately not a second
@@ -189,6 +191,12 @@ public class ArtifactExplorerService {
         taken.liveBytes(RepositoryType.NPM_PACKAGES),
         taken.liveBytes(RepositoryType.NPM_PROXY),
         taken.npmProxyPackumentBytes(),
+        taken.liveBytes(RepositoryType.MAVEN_PACKAGES),
+        // Zero until the pull-through workstream lands MAVEN_PROXY: no repository of that type can
+        // exist before its constraint does, so zero is the honest figure rather than a placeholder.
+        // The census already attributes maven_artifact rows by their repository's type, so CQ
+        // changes this one line and no census code.
+        0L,
         taken.diskTotalBytes());
   }
 
@@ -239,6 +247,8 @@ public class ArtifactExplorerService {
     return switch (repository.type) {
       case OCI_IMAGES, OCI_MIRROR -> manifests.countImages(repository.name);
       case NPM_PACKAGES, NPM_PROXY -> versions.countPackages(repository.name);
+      // Deployed files — one number with a type-dependent meaning, the standing convention.
+      case MAVEN_PACKAGES -> mavenArtifacts.countByRepository(repository.name);
       case CI_SCREENSHOTS, CI_VIDEOS -> records.countByRepository(repository.name);
     };
   }
@@ -249,6 +259,8 @@ public class ArtifactExplorerService {
           OciManifestFootprints.sum(footprints.union(manifests.listByRepository(repository.name)));
       case NPM_PACKAGES, NPM_PROXY ->
           tarballBytes(List.of(repository.name), diskIndex.sizes(), new HashSet<>());
+      // The union over distinct blob ids, sized from the rows — the one protocol table that has it.
+      case MAVEN_PACKAGES -> mavenBytes(repository.name);
       case CI_SCREENSHOTS, CI_VIDEOS -> recordBytes(repository.name);
     };
   }
@@ -268,6 +280,15 @@ public class ArtifactExplorerService {
   private long recordBytes(String repository) {
     Map<String, Long> distinct = new TreeMap<>();
     for (Object[] blob : records.listDistinctBlobs(repository)) {
+      distinct.putIfAbsent((String) blob[0], (Long) blob[1]);
+    }
+    return OciManifestFootprints.sum(distinct);
+  }
+
+  /** Distinct content of a maven repository, sized from the rows on the same pattern as the CI half. */
+  private long mavenBytes(String repository) {
+    Map<String, Long> distinct = new TreeMap<>();
+    for (Object[] blob : mavenArtifacts.listDistinctBlobs(repository)) {
       distinct.putIfAbsent((String) blob[0], (Long) blob[1]);
     }
     return OciManifestFootprints.sum(distinct);

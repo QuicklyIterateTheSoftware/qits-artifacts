@@ -2,6 +2,7 @@ package eu.wohlben.qits.artifacts.control;
 
 import eu.wohlben.qits.artifacts.persistence.ArtifactRecordRepository;
 import eu.wohlben.qits.artifacts.persistence.ArtifactRepositoryRepository;
+import eu.wohlben.qits.artifacts.persistence.MavenArtifactRepository;
 import eu.wohlben.qits.artifacts.persistence.NpmDistTagRepository;
 import eu.wohlben.qits.artifacts.persistence.NpmProxyPackumentRepository;
 import eu.wohlben.qits.artifacts.persistence.NpmVersionRepository;
@@ -42,6 +43,8 @@ abstract class ArtifactsTestSupport {
 
   @Inject NpmProxyPackumentRepository npmProxyPackuments;
 
+  @Inject MavenArtifactRepository mavenArtifacts;
+
   @Inject OciMirrorUpstreamRepository mirrorUpstreams;
 
   @Inject BlobDiskIndex diskIndex;
@@ -62,6 +65,7 @@ abstract class ArtifactsTestSupport {
               npmVersions.deleteAll();
               npmVersionTombstones.deleteAll();
               npmProxyPackuments.deleteAll();
+              mavenArtifacts.deleteAll();
               records.deleteAll();
               // The mirror upstreams too: their slug is a foreign key into artifact_repository, so
               // the pairing that makes a namespace resolvable is also what makes the wipe ordered.

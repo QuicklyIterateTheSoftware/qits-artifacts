@@ -27,7 +27,7 @@ import org.junit.jupiter.api.Test;
  * <p>The strategies here are fakes constructed in the test rather than beans, and that is
  * deliberate: the reconciliation is what these cases are about, and a real strategy would answer
  * with its own policy instead of the shape a case needs. Registering one as a bean would also take
- * away the "nobody collects this type" case, which three of the five types are still in. The two
+ * away the "nobody collects this type" case, which {@code npm-proxy} is still in. The two
  * registered beans — {@code OciImageGcStrategy} and {@code NpmPackagesGcStrategy} — are exercised on
  * their own rules in their own suites and appear here only in the first case, as the report's shape.
  */
@@ -53,6 +53,7 @@ class GcPlanTest extends GcFixture {
         List.of(
             "CiScreenshotsGcStrategy",
             "CiVideosGcStrategy",
+            "MavenPackagesGcStrategy",
             "NpmPackagesGcStrategy",
             "OciImageGcStrategy",
             "OciMirrorGcStrategy"),
@@ -73,6 +74,13 @@ class GcPlanTest extends GcFixture {
           assertNull(type.note());
           assertNull(type.error());
           assertEquals(0, type.dead().size(), "both fixture versions are releases");
+        }
+        case MAVEN_PACKAGES -> {
+          assertEquals("MavenPackagesGcStrategy", type.strategy());
+          assertEquals(MavenPackagesGcStrategy.NOTE, type.note());
+          assertTrue(type.note().contains("snapshot"), "the note names the intended cleanup rule");
+          assertNull(type.error(), "it depends on nothing outside this service, so it cannot fail");
+          assertEquals(0, type.dead().size(), "append-only: this type condemns nothing, ever");
         }
         case OCI_MIRROR -> {
           assertEquals("OciMirrorGcStrategy", type.strategy());
