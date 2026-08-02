@@ -123,14 +123,20 @@
                 <version>${project.version}</version>
             </dependency>
             <dependency>
-                <!-- The nested submodule's one module. Same groupId and version as this reactor,
-                     so ${project.*} spells it. -->
+                <!-- Published by qits-integrations-quarkus into the platform Maven repository. -->
                 <groupId>${project.groupId}</groupId>
                 <artifactId>qits-auth-core</artifactId>
-                <version>${project.version}</version>
+                <version>1.0.0</version>
             </dependency>
         </dependencies>
     </dependencyManagement>
+
+    <repositories>
+        <repository>
+            <id>qits-maven</id>
+            <url>http://localhost:8081/artifacts/maven/maven</url>
+        </repository>
+    </repositories>
 
     <build>
         <pluginManagement>
