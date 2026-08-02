@@ -920,7 +920,7 @@ if a change would let one strategy reuse another's policy, it is the wrong chang
 | `ci-screenshots` | records of deleted branches; superseded per (branch, userflow) | — | newest per (branch, userflow) | `artifact_record.blob_id` | **stub claims the type** (`CiScreenshotsGcStrategy`): plans nothing at zero rows under a note naming the rule, fails closed once rows exist |
 | `ci-videos` | superseded per userflow beyond a byte budget | — | newest N per userflow, N in bytes | `artifact_record.blob_id` | **stub claims the type** (`CiVideosGcStrategy`): same posture, deliberately its own class — byte-budgeted is not branch-scoped |
 | `npm-proxy` | **parked** — cache eviction is access-based, which is `artifact-access-tracking`'s territory, not a structural rule | — | — | — | not this design |
-| `oci-mirror` | **nothing** — append-only, at a recorded price, until access tracking lands | every cached tag and manifest | — | manifest closure over the namespace | claimed, so the report says so |
+| `oci-mirror` | **nothing yet** — access is tracked, but no retention window/eviction policy is settled | every cached tag and manifest | — | manifest closure over the namespace | claimed, so the report says so |
 | `maven-packages` | **nothing** — releases are never eligible; timestamped snapshot builds accumulate at a recorded price, with the cleanup rule named (keep the newest N per snapshot version) | every deployed file | — | `maven_artifact.blob_id`, sized from the row | claimed, so the report says so |
 | git host (not an `artifact_repository` type) | superseded pack descriptions after a repack | every ref | current packs | `PackCatalog.list` per repo | the DFS migration |
 
@@ -1078,14 +1078,15 @@ around them exists.
 ### `oci-mirror`, the third — a rule of "nothing dies", said out loud
 
 `OciMirrorGcStrategy` keeps every cached tag and every cached manifest, under one rule:
-**`append-only pending access tracking`**. That is the settled posture, not a placeholder for one.
+**`append-only pending an access-based retention policy`**. That is the settled posture, not a
+placeholder for an invented structural rule.
 
-A cache's eviction is access-based — *which of these has nobody pulled in a year* — and this store
-tracks no access, so the choices were an eviction rule computed from something that is not access, or
-keeping everything at a price stated up front. The price: an estimated 1.5–2.5 GiB one-time fill for
+A cache's eviction is access-based — *which of these has nobody pulled in a year*. This store now
+tracks that fact, but the retention window and deletion policy remain deliberately unsettled, so it
+keeps everything at a price stated up front. The price: an estimated 1.5–2.5 GiB one-time fill for
 the platform's real base images, then low-GiB-per-year drift as upstreams move mutable tags like
-`jdk-25` and strand the manifests they used to name. `artifact-access-tracking.md` is where eviction
-lives when it lands, and the mirror joins `npm-proxy` as its second waiting client.
+`jdk-25` and strand the manifests they used to name. A later GC policy can now use the same
+access-filtered explorer view operators inspect.
 
 **Why a class at all, when the answer is "no".** An unclaimed type reports "no strategy registered",
 which is the honest report of a decision nobody has taken — and here one *was* taken. Claiming the
