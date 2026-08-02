@@ -41,6 +41,8 @@ public class BlobService {
 
   @Inject ArtifactRecordRepository records;
 
+  @Inject ArtifactAccessTracker accessTracker;
+
   /** The bytes + resolved mediatype for a serve response. */
   public record BlobContent(String mediatype, long size, InputStream stream) {}
 
@@ -121,9 +123,11 @@ public class BlobService {
                 () ->
                     new NotFoundException(
                         "No such blob in repository " + repoName + ": " + blobId));
+    InputStream stream = blobStore.open(blobId);
+    accessTracker.touchArtifact(repoName, blobId, Instant.now().truncatedTo(ChronoUnit.MICROS));
     // Size comes from the record (stored at upload) — no need to re-stat the file; open() is the
     // single filesystem touch (and its own id-shape/existence check) on this hot serve path.
-    return new BlobContent(record.mediatype, record.size, blobStore.open(blobId));
+    return new BlobContent(record.mediatype, record.size, stream);
   }
 
   private static void requireProfileKeys(RepositoryType type, Map<String, String> metadata) {

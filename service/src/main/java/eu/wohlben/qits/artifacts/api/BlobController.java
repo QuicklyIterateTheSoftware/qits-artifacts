@@ -12,6 +12,7 @@ import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
@@ -83,7 +84,16 @@ public class BlobController {
   @GET
   @Produces(MediaType.APPLICATION_JSON)
   @Operation(hidden = true)
-  public ListBlobsResponse query(@PathParam("repo") String repo, @Context UriInfo uriInfo) {
+  public ListBlobsResponse query(
+      @PathParam("repo") String repo,
+      @Context UriInfo uriInfo,
+      @QueryParam("accessed-after") String accessedAfter,
+      @QueryParam("accessed-before") String accessedBefore,
+      @QueryParam("created-after") String createdAfter,
+      @QueryParam("created-before") String createdBefore,
+      @QueryParam("min-size") String minSize,
+      @QueryParam("max-size") String maxSize,
+      @QueryParam("never-accessed") String neverAccessed) {
     Map<String, String> predicates = new LinkedHashMap<>();
     boolean latest = false;
     for (var entry : uriInfo.getQueryParameters().entrySet()) {
@@ -96,7 +106,17 @@ public class BlobController {
       }
     }
     var records =
-        queryService.query(repo, predicates, latest).stream().map(recordMapper::toDto).toList();
+        queryService
+            .query(
+                repo,
+                predicates,
+                latest,
+                ArtifactListFilters.parse(
+                    accessedAfter, accessedBefore, createdAfter, createdBefore, minSize, maxSize,
+                    neverAccessed))
+            .stream()
+            .map(recordMapper::toDto)
+            .toList();
     return new ListBlobsResponse(records);
   }
 

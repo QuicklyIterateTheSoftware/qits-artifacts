@@ -1,6 +1,7 @@
 package eu.wohlben.qits.artifacts.control;
 
 import eu.wohlben.qits.artifacts.dto.ImageSummary;
+import eu.wohlben.qits.artifacts.dto.ImageManifestSummary;
 import eu.wohlben.qits.artifacts.dto.ImageTagSummary;
 import eu.wohlben.qits.artifacts.dto.PackageSummary;
 import eu.wohlben.qits.artifacts.dto.PackageVersionSummary;
@@ -111,6 +112,11 @@ public class ArtifactExplorerService {
    * to be absent. Only the repository can be unknown.
    */
   public List<ImageTagSummary> listTags(String repository, String image) {
+    return listTags(repository, image, ArtifactListFilter.NONE);
+  }
+
+  public List<ImageTagSummary> listTags(
+      String repository, String image, ArtifactListFilter filter) {
     requireOci(repository);
     Map<String, OciManifest> byDigest = new HashMap<>();
     for (OciManifest manifest : manifests.listByImage(repository, image)) {
@@ -121,9 +127,36 @@ public class ArtifactExplorerService {
       OciManifest manifest = byDigest.get(tag.manifestDigest);
       long size =
           manifest == null ? 0L : OciManifestFootprints.sum(footprints.of(manifest));
-      summaries.add(
-          new ImageTagSummary(
-              tag.tag, OciDigest.wire(tag.manifestDigest), size, tag.updatedAt));
+      if (filter.matches(size, tag.updatedAt, tag.accessedAt)) {
+        summaries.add(
+            new ImageTagSummary(
+                tag.tag, OciDigest.wire(tag.manifestDigest), size, tag.updatedAt, tag.accessedAt));
+      }
+    }
+    return summaries;
+  }
+
+  /** Every manifest, including untagged manifests that a digest pull can still access. */
+  public List<ImageManifestSummary> listManifests(
+      String repository, String image, ArtifactListFilter filter) {
+    requireOci(repository);
+    Map<String, List<String>> tagsByDigest = new HashMap<>();
+    for (OciTag tag : tags.listByImage(repository, image)) {
+      tagsByDigest.computeIfAbsent(tag.manifestDigest, ignored -> new ArrayList<>()).add(tag.tag);
+    }
+    List<ImageManifestSummary> summaries = new ArrayList<>();
+    for (OciManifest manifest : manifests.listByImage(repository, image)) {
+      long size = OciManifestFootprints.sum(footprints.of(manifest));
+      if (filter.matches(size, manifest.createdAt, manifest.accessedAt)) {
+        summaries.add(
+            new ImageManifestSummary(
+                OciDigest.wire(manifest.digest),
+                manifest.mediaType,
+                size,
+                manifest.createdAt,
+                manifest.accessedAt,
+                List.copyOf(tagsByDigest.getOrDefault(manifest.digest, List.of()))));
+      }
     }
     return summaries;
   }

@@ -2,12 +2,14 @@ package eu.wohlben.qits.artifacts.api;
 
 import eu.wohlben.qits.artifacts.control.ArtifactExplorerService;
 import eu.wohlben.qits.artifacts.dto.ImageSummary;
+import eu.wohlben.qits.artifacts.dto.ImageManifestSummary;
 import eu.wohlben.qits.artifacts.dto.ImageTagSummary;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import java.util.List;
 import org.eclipse.microprofile.openapi.annotations.Operation;
@@ -57,7 +59,46 @@ public class ImageBrowseController {
   @GET
   @Path("/{image:.+}/tags")
   @Operation(hidden = true)
-  public ListTagsResponse tags(@PathParam("repo") String repo, @PathParam("image") String image) {
-    return new ListTagsResponse(explorer.listTags(repo, image));
+  public ListTagsResponse tags(
+      @PathParam("repo") String repo,
+      @PathParam("image") String image,
+      @QueryParam("accessed-after") String accessedAfter,
+      @QueryParam("accessed-before") String accessedBefore,
+      @QueryParam("created-after") String createdAfter,
+      @QueryParam("created-before") String createdBefore,
+      @QueryParam("min-size") String minSize,
+      @QueryParam("max-size") String maxSize,
+      @QueryParam("never-accessed") String neverAccessed) {
+    return new ListTagsResponse(
+        explorer.listTags(
+            repo,
+            image,
+            ArtifactListFilters.parse(
+                accessedAfter, accessedBefore, createdAfter, createdBefore, minSize, maxSize,
+                neverAccessed)));
+  }
+
+  public record ListManifestsResponse(List<ImageManifestSummary> manifests) {}
+
+  @GET
+  @Path("/{image:.+}/manifests")
+  @Operation(hidden = true)
+  public ListManifestsResponse manifests(
+      @PathParam("repo") String repo,
+      @PathParam("image") String image,
+      @QueryParam("accessed-after") String accessedAfter,
+      @QueryParam("accessed-before") String accessedBefore,
+      @QueryParam("created-after") String createdAfter,
+      @QueryParam("created-before") String createdBefore,
+      @QueryParam("min-size") String minSize,
+      @QueryParam("max-size") String maxSize,
+      @QueryParam("never-accessed") String neverAccessed) {
+    return new ListManifestsResponse(
+        explorer.listManifests(
+            repo,
+            image,
+            ArtifactListFilters.parse(
+                accessedAfter, accessedBefore, createdAfter, createdBefore, minSize, maxSize,
+                neverAccessed)));
   }
 }

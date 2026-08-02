@@ -42,6 +42,9 @@ public class ArtifactRecord extends PanacheEntityBase {
   @Column(name = "created_at", nullable = false)
   public Instant createdAt;
 
+  @Column(name = "accessed_at")
+  public Instant accessedAt;
+
   @ElementCollection(fetch = FetchType.EAGER)
   @CollectionTable(name = "artifact_metadata", joinColumns = @JoinColumn(name = "record_id"))
   @MapKeyColumn(name = "meta_key")

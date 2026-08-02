@@ -485,6 +485,10 @@ public class RegistryRoutes {
                         "manifest unknown to this image",
                         "this mirror has no cached copy of that manifest",
                         Map.of("reference", reference)));
+    // Resolve may revalidate a mirror tag and move it. Locate first, then touch exactly the final
+    // row that will be served; probing stale cache state is not itself client access.
+    Path manifestPath = blobStore.locate(manifest.digest());
+    registry.touchManifest(target.name(), reference, manifest.digest());
 
     // Accept is deliberately ignored. We never convert between manifest schemas, so returning what
     // was stored is the only honest answer — 404ing because a client did not list our exact type
@@ -500,7 +504,7 @@ public class RegistryRoutes {
       return;
     }
     response
-        .sendFile(blobStore.locate(manifest.digest()).toString())
+        .sendFile(manifestPath.toString())
         .onFailure(thrown -> LOG.debugf(thrown, "manifest %s: send aborted", manifest.digest()));
   }
 

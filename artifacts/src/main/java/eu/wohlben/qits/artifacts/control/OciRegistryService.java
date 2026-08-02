@@ -45,6 +45,7 @@ public class OciRegistryService {
   @Inject OciMirrorTagCheckRepository tagChecks;
   @Inject BlobStore blobStore;
   @Inject OciMirrorUpstreams mirrors;
+  @Inject ArtifactAccessTracker accessTracker;
 
   /** A manifest resolved for serving: what to read, how big it is, and what to call it. */
   public record StoredManifest(String digest, String mediaType, long size) {}
@@ -213,18 +214,25 @@ public class OciRegistryService {
    */
   @ActivateRequestContext
   public Optional<StoredManifest> resolveManifest(OciImageName name, String reference) {
-    String digest =
-        OciDigest.isDigest(reference)
-            ? OciDigest.hexOrNull(reference)
-            : tags.findOne(name.repository(), name.image(), reference)
-                .map(tag -> tag.manifestDigest)
-                .orElse(null);
+    String tag = OciDigest.isDigest(reference) ? null : reference;
+    String digest = tag == null ? OciDigest.hexOrNull(reference) : tags.findOne(name.repository(), name.image(), tag)
+        .map(row -> row.manifestDigest).orElse(null);
     if (digest == null) {
       return Optional.empty();
     }
-    return manifests
-        .findOne(name.repository(), name.image(), digest)
+    return manifests.findOne(name.repository(), name.image(), digest)
         .map(manifest -> new StoredManifest(manifest.digest, manifest.mediaType, manifest.size));
+  }
+
+  /** Records the manifest that the route actually selected after any mirror revalidation/fetch. */
+  @ActivateRequestContext
+  public void touchManifest(OciImageName name, String reference, String digest) {
+    accessTracker.touchManifest(
+        name.repository(),
+        name.image(),
+        digest,
+        OciDigest.isDigest(reference) ? null : reference,
+        Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS));
   }
 
   /**

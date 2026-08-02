@@ -76,6 +76,20 @@ class ArtifactQueryServiceTest extends ArtifactsTestSupport {
     assertThrows(NotFoundException.class, () -> queryService.query("nope", Map.of(), false));
   }
 
+  @Test
+  void typedBoundsAreInclusiveAndNeverAccessedIsExplicit() {
+    QuarkusTransaction.requiringNew().run(() -> {
+      ArtifactRecord row = recordRepository.find("blobId", "b2").firstResult();
+      row.accessedAt = T3;
+    });
+    ArtifactListFilter accessed = new ArtifactListFilter(T3, T3, T2, T2, 10L, 10L, false);
+    assertEquals(
+        List.of("b2"),
+        queryService.query("shots", Map.of(), false, accessed).stream().map(r -> r.blobId).toList());
+    ArtifactListFilter never = new ArtifactListFilter(null, null, null, null, null, null, true);
+    assertEquals(3, queryService.query("shots", Map.of(), false, never).size());
+  }
+
   private void persist(String branch, String flow, Instant createdAt, String blobId) {
     QuarkusTransaction.requiringNew()
         .run(

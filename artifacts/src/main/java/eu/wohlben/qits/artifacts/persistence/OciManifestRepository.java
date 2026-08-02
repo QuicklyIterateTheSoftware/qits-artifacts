@@ -7,6 +7,7 @@ import io.quarkus.panache.common.Sort;
 import jakarta.enterprise.context.ApplicationScoped;
 import java.util.List;
 import java.util.Optional;
+import java.time.Instant;
 
 /** Panache DAO for {@link OciManifest}, keyed by {@code (repository, imageName, digest)}. */
 @ApplicationScoped
@@ -63,5 +64,13 @@ public class OciManifestRepository
 
   public List<OciManifest> listByRepository(String repository) {
     return find("repository = ?1", Sort.ascending("imageName", "digest"), repository).list();
+  }
+
+  public long touch(
+      String repository, String imageName, String digest, Instant cutoff, Instant now) {
+    return update(
+        "accessedAt = ?1 where repository = ?2 and imageName = ?3 and digest = ?4"
+            + " and (accessedAt is null or accessedAt <= ?5)",
+        now, repository, imageName, digest, cutoff);
   }
 }

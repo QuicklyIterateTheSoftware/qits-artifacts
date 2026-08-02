@@ -4,6 +4,7 @@ import eu.wohlben.qits.artifacts.entity.ArtifactRecord;
 import io.quarkus.hibernate.orm.panache.PanacheRepositoryBase;
 import jakarta.enterprise.context.ApplicationScoped;
 import java.util.List;
+import java.time.Instant;
 
 /** Panache DAO for {@link ArtifactRecord} (keyed by its String UUID row id). */
 @ApplicationScoped
@@ -28,6 +29,13 @@ public class ArtifactRecordRepository implements PanacheRepositoryBase<ArtifactR
 
   public long countByRepository(String repository) {
     return count("repository = ?1", repository);
+  }
+
+  public long touchByRepositoryAndBlob(String repository, String blobId, Instant cutoff, Instant now) {
+    return update(
+        "accessedAt = ?1 where repository = ?2 and blobId = ?3"
+            + " and (accessedAt is null or accessedAt <= ?4)",
+        now, repository, blobId, cutoff);
   }
 
   /**

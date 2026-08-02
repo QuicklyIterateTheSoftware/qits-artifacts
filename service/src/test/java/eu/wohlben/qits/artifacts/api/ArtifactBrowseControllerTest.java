@@ -168,6 +168,38 @@ class ArtifactBrowseControllerTest {
   }
 
   @Test
+  void manifestsExposeUntaggedReachabilityAndNullableAccess() {
+    byte[] untaggedDocument =
+        ("{\"schemaVersion\":2,\"mediaType\":\"" + OciMediaTypes.OCI_INDEX_V1 + "\",\"manifests\":[]}")
+            .getBytes(StandardCharsets.UTF_8);
+    String untaggedDigest = store(untaggedDocument);
+    QuarkusTransaction.requiringNew().run(() -> {
+      OciManifest row = new OciManifest();
+      row.repository = "qits";
+      row.imageName = IMAGE;
+      row.digest = untaggedDigest;
+      row.mediaType = OciMediaTypes.OCI_INDEX_V1;
+      row.size = untaggedDocument.length;
+      row.createdAt = Instant.now();
+      manifests.persist(row);
+    });
+    given()
+        .urlEncodingEnabled(false)
+        .queryParam("never-accessed", "true")
+        .when()
+        .get("/artifacts/api/repositories/qits/images/" + IMAGE + "/manifests")
+        .then()
+        .statusCode(200)
+        .body("manifests", hasSize(greaterThanOrEqualTo(2)))
+        .body("manifests.digest", hasItem("sha256:" + untaggedDigest))
+        .body(
+            "manifests.find { it.digest == 'sha256:" + untaggedDigest + "' }.tags",
+            hasSize(0))
+        .body("manifests.mediaType", everyItem(notNullValue()))
+        .body("manifests.createdAt", everyItem(notNullValue()));
+  }
+
+  @Test
   void packagesAreListedForAnNpmRepository() {
     given()
         .when()

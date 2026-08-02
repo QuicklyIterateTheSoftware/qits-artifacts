@@ -7,6 +7,7 @@ import io.quarkus.panache.common.Sort;
 import jakarta.enterprise.context.ApplicationScoped;
 import java.util.List;
 import java.util.Optional;
+import java.time.Instant;
 
 /** Panache DAO for {@link OciTag}, keyed by {@code (repository, imageName, tag)}. */
 @ApplicationScoped
@@ -49,5 +50,12 @@ public class OciTagRepository implements PanacheRepositoryBase<OciTag, OciTagId>
 
   public long countByImage(String repository, String imageName) {
     return count("repository = ?1 and imageName = ?2", repository, imageName);
+  }
+
+  public long touch(String repository, String imageName, String tag, Instant cutoff, Instant now) {
+    return update(
+        "accessedAt = ?1 where repository = ?2 and imageName = ?3 and tag = ?4"
+            + " and (accessedAt is null or accessedAt <= ?5)",
+        now, repository, imageName, tag, cutoff);
   }
 }

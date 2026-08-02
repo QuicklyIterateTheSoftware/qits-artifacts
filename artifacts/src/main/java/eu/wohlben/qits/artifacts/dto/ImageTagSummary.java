@@ -14,4 +14,5 @@ import java.time.Instant;
  *     is the registry's one movable pointer, so it has no other timestamp. For a tag that has never
  *     moved, which is every commit-sha tag this platform pushes, it is when the image was pushed.
  */
-public record ImageTagSummary(String tag, String digest, long sizeBytes, Instant createdAt) {}
+public record ImageTagSummary(
+    String tag, String digest, long sizeBytes, Instant createdAt, Instant accessedAt) {}

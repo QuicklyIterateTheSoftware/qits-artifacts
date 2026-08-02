@@ -14,4 +14,5 @@ public record ArtifactRecordDto(
     String mediatype,
     long size,
     Instant createdAt,
+    Instant accessedAt,
     Map<String, String> metadata) {}

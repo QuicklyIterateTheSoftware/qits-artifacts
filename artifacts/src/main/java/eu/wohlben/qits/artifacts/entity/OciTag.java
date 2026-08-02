@@ -35,4 +35,7 @@ public class OciTag extends PanacheEntityBase {
 
   @Column(name = "updated_at", nullable = false)
   public Instant updatedAt;
+
+  @Column(name = "accessed_at")
+  public Instant accessedAt;
 }

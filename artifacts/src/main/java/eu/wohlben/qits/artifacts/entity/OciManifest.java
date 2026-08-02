@@ -51,4 +51,7 @@ public class OciManifest extends PanacheEntityBase {
 
   @Column(name = "created_at", nullable = false)
   public Instant createdAt;
+
+  @Column(name = "accessed_at")
+  public Instant accessedAt;
 }

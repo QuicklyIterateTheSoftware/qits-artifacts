@@ -705,7 +705,7 @@ The deploy `PUT` streams rather than buffers, capped by `qits.artifacts.maven.ma
 
 ## The explorer API
 
-Six `GET`s under `/artifacts/api` that answer the one question this service could not: **what is in
+The `GET`s under `/artifacts/api` answer the one question this service could not: **what is in
 here, and what does it cost.**
 
 None of the protocol surfaces can answer it, and that is by design in each case. `/v2/_catalog` is
@@ -715,7 +715,7 @@ discovery by probing is impossible. npm's `/-/all` and `/-/v1/search` are absent
 repository, because those paths never write `artifact_record` — it looks like an empty registry and
 is not. So these routes are new machinery rather than a view over an existing one.
 
-All six are reads and all six are **unguarded**, like their neighbours: `ArtifactsTokenFilter`
+All are reads and all are **unguarded**, like their neighbours: `ArtifactsTokenFilter`
 covers write methods only, and `/artifacts/api` is already on qits-gateway's public paths. Every
 operation carries `@Operation(hidden = true)` as everything here does, so `docs/openapi.yml` stays
 `paths: {}` and the contract is written out below instead.
@@ -724,6 +724,7 @@ operation carries `@Operation(hidden = true)` as everything here does, so `docs/
 GET /artifacts/api/repositories                                    every repository
 GET /artifacts/api/repositories/{repo}/images                      an OCI repository, hosted or mirror
 GET /artifacts/api/repositories/{repo}/images/{image}/tags         one image's tags
+GET /artifacts/api/repositories/{repo}/images/{image}/manifests    every manifest, tagged or not
 GET /artifacts/api/repositories/{repo}/packages                    an npm repository, either type
 GET /artifacts/api/repositories/{repo}/packages/{package}/versions one package's versions
 GET /artifacts/api/store/summary                                   the whole store, ten ways
@@ -734,13 +735,25 @@ GET /artifacts/api/mirror-upstreams                                the registrie
 |---|---|
 | `repositories` | `{"repositories":[{"name","type","createdAt","itemCount","sizeBytes"}]}` |
 | `images` | `{"images":[{"name","tagCount","manifestCount","sizeBytes"}]}` |
-| `tags` | `{"tags":[{"tag","digest","sizeBytes","createdAt"}]}` |
+| `tags` | `{"tags":[{"tag","digest","sizeBytes","createdAt","accessedAt"}]}` |
+| `manifests` | `{"manifests":[{"digest","mediaType","sizeBytes","createdAt","accessedAt","tags"}]}` |
 | `packages` | `{"packages":[{"name","versionCount","latest"}]}` |
 | `versions` | `{"versions":[{"version","tarballSizeBytes","publishedAt","distTags"}]}` |
 | `store/summary` | `{"ociPerImageSumBytes","ociUnionBytes","ociMirrorBytes","orphanBytes","npmPublishedBytes","npmProxyTarballBytes","npmProxyPackumentBytes","mavenPublishedBytes","mavenProxyBytes","diskTotalBytes"}` |
 | `mirror-upstreams` | `{"upstreams":[{"domain","slug","createdAt","cachedImages"}]}` |
 
 Details a client trips over if it does not know them:
+
+- CI `blobs`, OCI `tags`, and OCI `manifests` accept inclusive `accessed-after`,
+  `accessed-before`, `created-after`, `created-before`, `min-size`, and `max-size` filters.
+  `never-accessed=true` selects null access timestamps; `never-accessed=false` selects rows that
+  have been read. A null timestamp does not match an access range. Invalid or inverted bounds are
+  400. CI records expose the nullable `accessedAt` beside their existing fields.
+- Client content reads are coalesced to at most one timestamp write per row per hour. A CI blob URL
+  identifies content, so it touches every record in that repository naming that digest. An OCI tag
+  manifest pull touches its tag and resolved manifest; a digest pull touches the manifest only.
+  Layer blobs remain untracked because a globally deduplicated blob cannot be attributed to one
+  manifest or tag from its request.
 
 - **`itemCount` means something different per type**, on purpose: images for `oci-images`, packages
   for either npm type, deployed files for `maven-packages`, `artifact_record` rows for the two CI

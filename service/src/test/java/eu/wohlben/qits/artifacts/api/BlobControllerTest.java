@@ -3,6 +3,7 @@ package eu.wohlben.qits.artifacts.api;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.notNullValue;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 
 import io.quarkus.test.junit.QuarkusTest;
@@ -101,7 +102,19 @@ class BlobControllerTest {
         .then()
         .statusCode(200)
         .body("records.id", hasItem(id))
-        .body("records.mediatype", hasItem("image/png"));
+        .body("records.mediatype", hasItem("image/png"))
+        .body("records.accessedAt", hasItem(notNullValue()));
+  }
+
+  @Test
+  void invalidTypedFilterIs400() {
+    given()
+        .queryParam("accessed-before", "not-an-instant")
+        .when()
+        .get("/artifacts/api/repositories/ci-screenshots/blobs")
+        .then()
+        .statusCode(400)
+        .body("message", containsString("ISO-8601"));
   }
 
   @Test

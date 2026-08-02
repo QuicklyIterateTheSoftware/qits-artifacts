@@ -11,6 +11,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
+import eu.wohlben.qits.artifacts.persistence.OciManifestRepository;
+import eu.wohlben.qits.artifacts.persistence.OciTagRepository;
+import io.quarkus.narayana.jta.QuarkusTransaction;
+import jakarta.inject.Inject;
 import java.net.URI;
 import java.net.URL;
 import java.net.http.HttpResponse;
@@ -30,6 +34,9 @@ import org.junit.jupiter.api.Test;
  */
 @QuarkusTest
 class RegistryTest {
+
+  @Inject OciManifestRepository manifests;
+  @Inject OciTagRepository tags;
 
   private static final String REPO = "qits";
   private static final String ABSENT_DIGEST = "sha256:" + "0".repeat(64);
@@ -274,6 +281,38 @@ class RegistryTest {
 
       // And by digest, which is how an index's children are fetched.
       assertArrayEquals(pushed.manifest(), client.pull(image, pushed.manifestDigest()).manifest());
+    }
+  }
+
+  @Test
+  void onlyManifestReadsTouchRepositoryScopedReachabilityRoots() {
+    try (OciClient client = client()) {
+      TinyImage pushed = TinyImage.of("access");
+      client.push(image, "latest", pushed);
+      String imageName = image.substring((REPO + "/").length());
+
+      http().when().head("/v2/" + image + "/manifests/latest").then().statusCode(200);
+      String manifestHex = pushed.manifestDigest().substring("sha256:".length());
+      assertTrue(manifests.findOne(REPO, imageName, manifestHex).orElseThrow().accessedAt != null);
+      assertTrue(tags.findOne(REPO, imageName, "latest").orElseThrow().accessedAt != null);
+
+      QuarkusTransaction.requiringNew().run(() -> {
+        manifests.findOne(REPO, imageName, manifestHex).orElseThrow().accessedAt = null;
+        tags.findOne(REPO, imageName, "latest").orElseThrow().accessedAt = null;
+      });
+      tags.getEntityManager().clear();
+      http().when().get("/v2/" + image + "/manifests/" + pushed.manifestDigest())
+          .then().statusCode(200);
+      assertTrue(manifests.findOne(REPO, imageName, manifestHex).orElseThrow().accessedAt != null);
+      assertEquals(null, tags.findOne(REPO, imageName, "latest").orElseThrow().accessedAt);
+
+      QuarkusTransaction.requiringNew().run(() ->
+          manifests.findOne(REPO, imageName, manifestHex).orElseThrow().accessedAt = null);
+      manifests.getEntityManager().clear();
+      http().when().get("/v2/" + image + "/blobs/" + pushed.layer().digest())
+          .then().statusCode(200);
+      assertEquals(null,
+          manifests.findOne(REPO, imageName, manifestHex).orElseThrow().accessedAt);
     }
   }
 

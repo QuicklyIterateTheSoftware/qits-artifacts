@@ -29,11 +29,20 @@ public class ArtifactQueryService {
 
   public List<ArtifactRecord> query(
       String repoName, Map<String, String> predicates, boolean latest) {
+    return query(repoName, predicates, latest, ArtifactListFilter.NONE);
+  }
+
+  public List<ArtifactRecord> query(
+      String repoName,
+      Map<String, String> predicates,
+      boolean latest,
+      ArtifactListFilter filter) {
     repositoryService.require(repoName);
 
     List<ArtifactRecord> matching = new ArrayList<>();
     for (ArtifactRecord record : records.listByRepositoryNewestFirst(repoName)) {
-      if (matchesAll(record, predicates)) {
+      if (matchesAll(record, predicates)
+          && filter.matches(record.size, record.createdAt, record.accessedAt)) {
         matching.add(record);
       }
     }
