@@ -18,12 +18,15 @@ import io.quarkus.test.junit.QuarkusIntegrationTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import com.fasterxml.jackson.databind.JsonNode;
+import eu.wohlben.qits.maven.MavenClient;
+import eu.wohlben.qits.maven.TinyArtifact;
 import eu.wohlben.qits.npm.NpmClient;
 import eu.wohlben.qits.npm.TinyPackage;
 import eu.wohlben.qits.registry.OciClient;
 import eu.wohlben.qits.registry.TinyImage;
 import java.net.URI;
 import java.net.URL;
+import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
@@ -41,8 +44,9 @@ import org.junit.jupiter.api.Test;
  * <p>Deliberately <b>one</b> class spanning both packages rather than one per context, because the
  * thing under test is the single process: {@code /artifacts/} is Quinoa's static SPA, {@code
  * /artifacts/api/**} is JAX-RS, {@code /artifacts/q/**} is Quarkus' non-application root, and
- * {@code /artifacts/git/**}, {@code /artifacts/npm/**} and {@code /v2/**} are three independent
- * raw-Vert.x route stacks — and what needs proving is that all of them resolve in the same binary.
+ * {@code /artifacts/git/**}, {@code /artifacts/npm/**}, {@code /artifacts/maven/**} and {@code
+ * /v2/**} are four independent raw-Vert.x route stacks — and what needs proving is that all of
+ * them resolve in the same binary.
  * Splitting it by package would split the subject.
  *
  * <p>The SPA is here rather than in the {@code @QuarkusTest} suite because it <b>cannot</b> be
@@ -142,6 +146,11 @@ class PackagedProcessIT {
     // precisely the url qits-ci and qits-workspace-daemon hold as a contract. Un-ignored it answers
     // 200 text/html, and a git client told 200 HTML reports anything but "no such repository".
     given().when().get("/artifacts/git/" + UUID.randomUUID()).then().statusCode(404);
+
+    // The npm case verbatim, one segment over: no config key names /maven either (MavenRoutes
+    // spells it as a literal), so without the ignore a mistyped artifact path would answer 200
+    // text/html and a maven client would report a corrupt jar.
+    given().when().get("/artifacts/maven/maven").then().statusCode(404);
 
     // Setting the key REPLACED the derivation, so the two it used to supply are re-asserted here.
     given().when().get("/artifacts/api/repositories").then().statusCode(200);
@@ -313,6 +322,86 @@ class PackagedProcessIT {
   }
 
   @Test
+  void aMavenReleaseDeploysAndResolvesThroughTheBinary() {
+    // The fourth raw-Vert.x route stack, proved to coexist with /v2, /artifacts/npm and
+    // /artifacts/git in one binary — and the parts of it only a binary can falsify: the deploy PUT
+    // streams through VertxInputStream, the metadata document and the checksums are derived per
+    // request, and the jar comes back through HttpServerResponse.sendFile, which behaves
+    // differently under native-image than on the JVM.
+    //
+    // The seed has already written the `maven` row in a packaged process; this states its own
+    // precondition anyway rather than resting on another test's subject.
+    given()
+        .contentType("application/json")
+        .body("{\"type\":\"maven-packages\"}")
+        .when()
+        .put("/artifacts/api/repositories/maven")
+        .then()
+        .statusCode(200);
+
+    try (MavenClient maven = new MavenClient(URI.create(root.toString()))) {
+      String ga = "eu/wohlben/qits/packaged-it";
+      String base = ga + "/1.0.0/packaged-it-1.0.0";
+      byte[] jar = TinyArtifact.jar("packaged-it release");
+      assertEquals(201, maven.put("maven", base + ".jar", jar).statusCode());
+      assertEquals(
+          201,
+          maven.put(
+                  "maven", base + ".pom",
+                  TinyArtifact.pom("eu.wohlben.qits", "packaged-it", "1.0.0"))
+              .statusCode());
+      // The deploy plugin's last steps: the checksum claim, verified; the client's metadata merge,
+      // accepted and discarded.
+      assertEquals(
+          201,
+          maven.put("maven", base + ".jar.sha1", TinyArtifact.hex(jar, "SHA-1").getBytes())
+              .statusCode());
+      assertEquals(
+          201,
+          maven.put("maven", ga + "/maven-metadata.xml", "<metadata/>".getBytes()).statusCode());
+
+      assertArrayEquals(
+          jar,
+          maven.get("maven", base + ".jar").body(),
+          "sendFile must return the exact bytes from the binary");
+
+      HttpResponse<String> metadata = maven.getText("maven", ga + "/maven-metadata.xml");
+      assertEquals(200, metadata.statusCode(), metadata.body());
+      assertTrue(metadata.body().contains("<release>1.0.0</release>"), metadata.body());
+      assertTrue(metadata.body().contains("<version>1.0.0</version>"), metadata.body());
+
+      assertEquals(
+          TinyArtifact.hex(jar, "SHA-256"),
+          maven.getText("maven", base + ".jar.sha256").body(),
+          "the checksum is derived from the stored bytes, in the binary");
+    }
+  }
+
+  @Test
+  void aMavenSnapshotDeploysAndItsVersionMetadataDerivesThroughTheBinary() {
+    // The ⚖1 flow end to end in the packaged process: a timestamped deploy as ordinary files, and
+    // the version-level document derived from the names — the whole of the server's snapshot
+    // machinery.
+    try (MavenClient maven = new MavenClient(URI.create(root.toString()))) {
+      String dir = "eu/wohlben/qits/packaged-it-snap/1.0.1-SNAPSHOT";
+      byte[] jar = TinyArtifact.jar("packaged-it snapshot");
+      assertEquals(
+          201,
+          maven.put(
+                  "maven",
+                  dir + "/packaged-it-snap-1.0.1-20260802.123456-1.jar",
+                  jar)
+              .statusCode());
+
+      HttpResponse<String> metadata = maven.getText("maven", dir + "/maven-metadata.xml");
+      assertEquals(200, metadata.statusCode(), metadata.body());
+      assertTrue(
+          metadata.body().contains("<value>1.0.1-20260802.123456-1</value>"), metadata.body());
+      assertTrue(metadata.body().contains("<buildNumber>1</buildNumber>"), metadata.body());
+    }
+  }
+
+  @Test
   void gitSmartHttpAdvertisesRefsFromTheBinary() throws Exception {
     // JGit's UploadPack running inside the compiled binary. A 404 here would mean the route is
     // missing; a 500 would mean JGit itself did not survive the compile.
@@ -470,7 +559,11 @@ class PackagedProcessIT {
         .body("orphanBytes", greaterThanOrEqualTo(0))
         .body("npmProxyTarballBytes", greaterThanOrEqualTo(0))
         .body("npmProxyPackumentBytes", greaterThanOrEqualTo(0))
-        .body("ociMirrorBytes", greaterThanOrEqualTo(0));
+        .body("ociMirrorBytes", greaterThanOrEqualTo(0))
+        .body("mavenPublishedBytes", greaterThanOrEqualTo(0))
+        // Zero, not merely non-negative: no maven-proxy repository can exist before the
+        // pull-through workstream lands the type.
+        .body("mavenProxyBytes", equalTo(0));
 
     given().when().get("/artifacts/api/repositories/no-such-repo/images").then().statusCode(404);
     given().when().get("/artifacts/api/repositories/npm/images").then().statusCode(400);

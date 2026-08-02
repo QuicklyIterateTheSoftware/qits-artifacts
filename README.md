@@ -1,16 +1,17 @@
 # qits-artifacts
 
 qits' **byte plane**: the metadata-rich blob store, the in-process git smart-HTTP host workspace
-containers clone from and push to, the OCI registry they pull images from, and the npm registry —
-hosted, plus a pull-through cache of npmjs — they install from.
+containers clone from and push to, the OCI registry they pull images from, the npm registry —
+hosted, plus a pull-through cache of npmjs — they install from, and the maven repository they
+deploy their own library to.
 
 One repo, because every one of them is "qits serves bytes over HTTP against on-disk state it owns"
-and none has an inbound edge from the rest of qits. The two protocol registries are the third and
-fourth uses of the byte plane and both were predicted by the code — `RepositoryType` already
-reserved the seam — and neither needed a new storage layer, because a content-addressed SHA-256 blob
-store *is* the OCI blob model and is a perfectly good home for a tarball. The git host landed here
-rather than in a `qits-repositories` service because that name collides with `domain.repository` —
-see `migration-plan.md` §3.4 in the home repo.
+and none has an inbound edge from the rest of qits. The three protocol registries are the third,
+fourth and fifth uses of the byte plane and all were predicted by the code — `RepositoryType`
+already reserved the seam — and none needed a new storage layer, because a content-addressed
+SHA-256 blob store *is* the OCI blob model and is a perfectly good home for a tarball or a jar.
+The git host landed here rather than in a `qits-repositories` service because that name collides
+with `domain.repository` — see `migration-plan.md` §3.4 in the home repo.
 
     mvn verify        # a clone of this repo alone builds and tests green — no monorepo, no docker
 
@@ -20,7 +21,7 @@ see `migration-plan.md` §3.4 in the home repo.
 |---|---|
 | `artifacts/` | `eu.wohlben.qits.artifacts.*` — entity, persistence, dto, mapper, control, error. The blob store proper. No web, no JAX-RS. |
 | `git-storage/` | `eu.wohlben.qits.githost.storage` — a JGit `DfsRepository` whose packs, pack indexes and refs are blobs, plus the two ports it declares and does not implement (`PackBlobStore`, `PackCatalog`). One compile dependency: JGit. |
-| `service/` | `eu.wohlben.qits.artifacts.api` (the JAX-RS boundary), `eu.wohlben.qits.githost` (the Vert.x + JGit smart-HTTP host), `eu.wohlben.qits.githost.persistence` (the two adapters and the git host's entities), `eu.wohlben.qits.registry` (the Vert.x OCI Distribution API) and `eu.wohlben.qits.npm` (the Vert.x npm registry and its upstream proxy). |
+| `service/` | `eu.wohlben.qits.artifacts.api` (the JAX-RS boundary), `eu.wohlben.qits.githost` (the Vert.x + JGit smart-HTTP host), `eu.wohlben.qits.githost.persistence` (the two adapters and the git host's entities), `eu.wohlben.qits.registry` (the Vert.x OCI Distribution API), `eu.wohlben.qits.npm` (the Vert.x npm registry and its upstream proxy) and `eu.wohlben.qits.maven` (the Vert.x maven repository). |
 | `service/src/main/webui/` | The `qits-spa-artifacts` submodule — an Angular SPA, built into the app by Quinoa and served at `/artifacts`. Not Java, and not a Maven module. |
 
 `artifacts/` and `git-storage/` are library jars and depend on nothing of each other's — they are
@@ -31,7 +32,7 @@ different contexts, which is why `git-storage` declares ports and `service` impl
     ./mvnw verify
     java -jar service/target/quarkus-app/quarkus-run.jar   # :8080 — SPA /artifacts/, blobs /artifacts/api/**,
                                                            #         git /artifacts/git/**, npm /artifacts/npm/**,
-                                                           #         images /v2/**
+                                                           #         maven /artifacts/maven/**, images /v2/**
 
     ./mvnw verify -Dnative
     ./service/target/qits-artifacts                        # same routes, ~35ms to listening
@@ -44,11 +45,11 @@ intended path, and it is worth recognising by name when a build that normally ta
 downloading a container image.
 
 `-Dnative` also flips `skipITs`, so it runs `PackagedProcessIT` against the binary it just built —
-openapi, swagger-ui, a blob round trip, a real `git clone` + `push`, an image push/pull and an npm
-publish/install. That suite is the only thing in this repo that exercises **JGit compiled ahead of
-time**, which is the part of this service most likely to break in a native image (see "The git host"
-below), the only thing that exercises zero-copy `sendFile` serving in a binary, and the only place
-the four route stacks are proved to coexist in one process.
+openapi, swagger-ui, a blob round trip, a real `git clone` + `push`, an image push/pull, an npm
+publish/install and a maven deploy/resolve. That suite is the only thing in this repo that
+exercises **JGit compiled ahead of time**, which is the part of this service most likely to break
+in a native image (see "The git host" below), the only thing that exercises zero-copy `sendFile`
+serving in a binary, and the only place the five route stacks are proved to coexist in one process.
 
 It was extracted as a library, on the reasoning that packaging it would need an auth variant, a
 webui and a main class. All three have lapsed: authentication terminates at `qits-gateway` and this
@@ -66,9 +67,9 @@ Everything is served under the `/artifacts` gateway segment, because `qits-gatew
 verbatim by prefix and rewrites nothing — there is no unprefixed form, on `qits-net` either.
 
 Note the route stacks resolve differently: `/artifacts/api/**` is JAX-RS and moves with
-`quarkus.rest.path`; `/artifacts/git/**`, `/artifacts/npm/**` and `/v2/**` are registered straight
-onto the Vert.x router with the segment as a literal, and do not. A `git clone
-http://<host>/artifacts/git/<repoId>` against the packaged process is the check that matters,
+`quarkus.rest.path`; `/artifacts/git/**`, `/artifacts/npm/**`, `/artifacts/maven/**` and `/v2/**`
+are registered straight onto the Vert.x router with the segment as a literal, and do not. A `git
+clone http://<host>/artifacts/git/<repoId>` against the packaged process is the check that matters,
 because nothing in the JAX-RS configuration can prove it.
 
 `artifacts/` owns its **own datasource, persistence unit and Flyway lineage**
@@ -648,6 +649,60 @@ collector, so unpublish has no meaning here yet. `/-/v1/search`, `/-/npm/v1/secu
 instead of Vert.x' HTML page. Dist-tag mutation APIs (`npm dist-tag add`) are absent too:
 publish-if-absent is the versioning convention, so a tag only ever moves as part of a publish.
 
+## The maven repository
+
+`MavenRoutes` serves a maven repository at `/artifacts/maven/<repository>/<path…>`, the npm shape
+verbatim: npm lives at `/artifacts/npm/npm/<pkg>`, so the platform's own library deploys to
+`/artifacts/maven/maven/eu/wohlben/qits/qits-eventstream/1.0.0/qits-eventstream-1.0.0.jar`. The
+first segment is the `artifact_repository` row; `maven` (type `maven-packages`, hosted) is seeded
+at startup alongside `npm` and `npmjs`. Maven accepts a repository URL of any depth, so — like npm
+and unlike `/v2` — there is no root-level segment, no gateway change, and no client-side routing
+story beyond declaring the repository. A pull-through cache of Maven Central (`maven-proxy`, row
+`central`) is its own settled workstream; until it lands, consumers reach Central directly.
+
+```
+GET|HEAD /artifacts/maven/<repo>/<path…>          an artifact, a pom, metadata, a checksum
+PUT      /artifacts/maven/<repo>/<path…>          deploy — mvn deploy / gradle publish compatible
+DELETE   anywhere under the base                  405 — no undeploy; the append-only stance, verbatim
+anything else under the base                      404 with a short text body, never the SPA's HTML
+```
+
+The server is a **dumb path store**. `mvn deploy` PUTs the jar, the pom, then each file's checksums,
+then its merged `maven-metadata.xml` with checksums — one request per file, no session, no lock —
+and resolution is GETs of the same paths. Every byte goes through `BlobStore` like everything else,
+so jars dedupe globally with image layers and tarballs. The whole of the server's intelligence is
+derivation, never rewriting:
+
+- **`maven-metadata.xml` is derived state**, the packument precedent at two levels. At artifact
+  level, `<versions>` is the distinct version directories present, `<latest>` the highest by maven
+  ordering and `<release>` the highest non-`SNAPSHOT` one. At version level, a snapshot directory's
+  timestamped filenames parse back into the `<snapshotVersions>` a resolver maps
+  `1.0.1-SNAPSHOT` through. **The client's own metadata PUT is accepted and discarded** — refusing
+  would break `mvn deploy` on its final request; storing it would serve a merge that goes stale on
+  the next deploy, the second source of truth the derived document exists to prevent. A snapshot
+  directory holding only literal `-SNAPSHOT` files (a non-unique deploy) answers **404**
+  deliberately, because the resolver's defined fallback for a missing document is exactly that
+  literal filename.
+- **Checksums are derived at GET and verified at PUT, never stored.** Every stored file serves
+  `.md5`, `.sha1`, `.sha256` and `.sha512` siblings computed from the blob bytes; a checksum a
+  client PUTs is recomputed against the referenced blob and refused `400` on mismatch — the npm
+  `requireClaimMatches` restated. A match stores nothing, because a derivable value stored is a
+  value that can only ever disagree.
+- **Releases are immutable, and the path space has three classes.** Release paths and timestamped
+  snapshot files (unique by construction — one deploy, one filename) refuse a redeploy with
+  different bytes at `403`; an identical redeploy is a `201` no-op, because deploy retries are
+  normal. A **literal `-SNAPSHOT` filename** is the one mutable path — the coordinate is a moving
+  target by definition — and serves with `no-cache` rather than `immutable`.
+
+**No login here either** — the OCI/npm threat model word for word, with one less wrinkle than npm:
+maven sends no credential unless challenged, this server never challenges, so a pipeline's
+`distributionManagement` needs no matching `<server>` entry. From outside, `/artifacts/maven/**`
+falls under qits-gateway's ordinary session auth like any other non-allowlisted artifacts path.
+
+The deploy `PUT` streams rather than buffers, capped by `qits.artifacts.maven.max-artifact-size`
+(default 128M) — the one size answer for both directions a jar can travel, the npm
+`max-publish-size` precedent.
+
 ## The explorer API
 
 Six `GET`s under `/artifacts/api` that answer the one question this service could not: **what is in
@@ -671,7 +726,7 @@ GET /artifacts/api/repositories/{repo}/images                      an OCI reposi
 GET /artifacts/api/repositories/{repo}/images/{image}/tags         one image's tags
 GET /artifacts/api/repositories/{repo}/packages                    an npm repository, either type
 GET /artifacts/api/repositories/{repo}/packages/{package}/versions one package's versions
-GET /artifacts/api/store/summary                                   the whole store, eight ways
+GET /artifacts/api/store/summary                                   the whole store, ten ways
 GET /artifacts/api/mirror-upstreams                                the registries this one mirrors
 ```
 
@@ -682,14 +737,14 @@ GET /artifacts/api/mirror-upstreams                                the registrie
 | `tags` | `{"tags":[{"tag","digest","sizeBytes","createdAt"}]}` |
 | `packages` | `{"packages":[{"name","versionCount","latest"}]}` |
 | `versions` | `{"versions":[{"version","tarballSizeBytes","publishedAt","distTags"}]}` |
-| `store/summary` | `{"ociPerImageSumBytes","ociUnionBytes","ociMirrorBytes","orphanBytes","npmPublishedBytes","npmProxyTarballBytes","npmProxyPackumentBytes","diskTotalBytes"}` |
+| `store/summary` | `{"ociPerImageSumBytes","ociUnionBytes","ociMirrorBytes","orphanBytes","npmPublishedBytes","npmProxyTarballBytes","npmProxyPackumentBytes","mavenPublishedBytes","mavenProxyBytes","diskTotalBytes"}` |
 | `mirror-upstreams` | `{"upstreams":[{"domain","slug","createdAt","cachedImages"}]}` |
 
 Details a client trips over if it does not know them:
 
 - **`itemCount` means something different per type**, on purpose: images for `oci-images`, packages
-  for either npm type, `artifact_record` rows for the two CI types. One number with a
-  type-dependent meaning beats four that are always null.
+  for either npm type, deployed files for `maven-packages`, `artifact_record` rows for the two CI
+  types. One number with a type-dependent meaning beats five that are always null.
 - **404 is an unknown repository; 400 is a repository of the wrong type.** An npm repository has no
   images and never will, and reporting that as an empty list would read as an image registry that
   lost its images. Both OCI types answer the image routes: a mirror namespace holds the same rows,
@@ -766,10 +821,11 @@ layers and configs get none by design, and `oci_manifest.size_bytes` is the size
 total ~650 MB — **85% of the H2 file**, and 3.8× the tarballs they index. A UI reporting only the
 proxy's disk usage is off by nearly 4×. It is counted in characters; the documents are ASCII JSON.
 
-The seven figures reconcile in exactly one way, which is the panel's whole claim:
+The ten figures reconcile in exactly one way, which is the panel's whole claim:
 
 ```
-diskTotalBytes = ociUnionBytes + npmPublishedBytes + npmProxyTarballBytes + orphanBytes
+diskTotalBytes = ociUnionBytes + npmPublishedBytes + npmProxyTarballBytes
+               + mavenPublishedBytes + mavenProxyBytes + orphanBytes
 ```
 
 `ociPerImageSumBytes` sits above `ociUnionBytes` by whatever images share, and
@@ -852,6 +908,7 @@ if a change would let one strategy reuse another's policy, it is the wrong chang
 | `ci-videos` | superseded per userflow beyond a byte budget | — | newest N per userflow, N in bytes | `artifact_record.blob_id` | **stub claims the type** (`CiVideosGcStrategy`): same posture, deliberately its own class — byte-budgeted is not branch-scoped |
 | `npm-proxy` | **parked** — cache eviction is access-based, which is `artifact-access-tracking`'s territory, not a structural rule | — | — | — | not this design |
 | `oci-mirror` | **nothing** — append-only, at a recorded price, until access tracking lands | every cached tag and manifest | — | manifest closure over the namespace | claimed, so the report says so |
+| `maven-packages` | **nothing** — releases are never eligible; timestamped snapshot builds accumulate at a recorded price, with the cleanup rule named (keep the newest N per snapshot version) | every deployed file | — | `maven_artifact.blob_id`, sized from the row | claimed, so the report says so |
 | git host (not an `artifact_repository` type) | superseded pack descriptions after a repack | every ref | current packs | `PackCatalog.list` per repo | the DFS migration |
 
 The OCI keep-set is **fetched at plan time and fail-closed**: qits-cd unreachable aborts that type's
@@ -863,7 +920,8 @@ plan with nothing planned, never a plan on stale pins. The seam supports that di
 extracted from the explorer rather than written again, because a second implementation of "what is
 live" is a set the UI reports and a set the sweep protects, drifting silently until the day a sweep
 deletes something the page called referenced. Its byte-exactness is the summary's own identity,
-proved by the explorer's tests: `diskTotal = ociUnion + npmPublished + npmProxyTarballs + orphans`.
+proved by the explorer's tests: `diskTotal = ociUnion + npmPublished + npmProxyTarballs +
+mavenPublished + mavenProxy + orphans`.
 
 It splits liveness **by the type that names a blob**, which is what lets one type let go of content
 another still serves — the same bytes can be an image layer and a published tarball, and the file is
@@ -947,7 +1005,7 @@ tombstone and the dist-tag refusal live in the mechanism, not the policy). A str
 condemns — the mirror, the CI stubs — keeps the default, which is correct for the empty set and
 loud for anything else.
 
-### `oci-images`, the first of the five strategies that exist
+### `oci-images`, the first of the six strategies that exist
 
 `OciImageGcStrategy` implements the row the table above gives it. Five rules, each named in the
 report beside the identity it saved:
@@ -1028,6 +1086,24 @@ This is the one strategy that reads the census: with no rules of its own, the ty
 its answer. It also depends on nothing outside this service, so it can never fail closed — an
 `error` on this type's line means something is genuinely wrong.
 
+### `maven-packages`, the sixth — the mirror's shape, on purpose
+
+`MavenPackagesGcStrategy` claims the type and plans `nothingDies` under a note, keeping the default
+`apply` that refuses any condemning plan. It takes the mirror's shape rather than the CI stubs':
+the stubs fail closed *when rows appear*, which made sense for types expected to stay empty — this
+type has rows from its first hour, that being its purpose, so a fail-closed-at-rows stub would
+report `error` on every plan forever and train the reader to ignore the one signal that means
+something.
+
+The rule itself, said out loud: **releases are never eligible** (a maven release repository is the
+purest form of the rule npm and docker both reduce to), and **timestamped snapshot builds
+accumulate** — priced honestly: jar plus pom at the platform library's tens-of-kilobytes scale is
+noise, and even a CI cadence of snapshot deploys is single-digit MiB per library per year. The
+cleanup rule is named in the strategy's note — *keep the newest N timestamped builds per (group,
+artifact, snapshot version); releases never eligible* — and lands when someone wants the bytes
+back. `maven-proxy` is deliberately unclaimed, the `npm-proxy` line verbatim: a re-fetchable cache
+of upstream, whose eviction is `artifact-access-tracking`'s third waiting client.
+
 ### What the plan says
 
 ```jsonc
@@ -1035,7 +1111,7 @@ its answer. It also depends on nothing outside this service, so it can never fai
   "generatedAt": "2026-08-01T12:00:00Z",
   "dryRun": true,                       // always, on this route; the sweep's receipt is the twin with false
   "graceWindow": "P7D",
-  "types": [                            // all six, always — including the ones nobody collects
+  "types": [                            // all seven, always — including the ones nobody collects
     { "type": "oci-images", "strategy": "OciImageGcStrategy",
       "note": null, "error": null,
       "dead": [{ "repository": "qits", "identity": "qits-ci:3ff84c05…",
@@ -1070,10 +1146,10 @@ its answer. It also depends on nothing outside this service, so it can never fai
 Three details a reader trips over otherwise:
 
 - **A type with no strategy says so.** "Nothing to collect" and "nobody is collecting" are different
-  answers, and only one of them is fine. Five types are claimed today (`oci-images`, `npm-packages`,
-  `oci-mirror` — whose whole policy is "nothing dies", which is still a decision — and the two CI
-  stubs, whose notes name their intended rules); only `npm-proxy` reports "no strategy registered",
-  which is the honest state of a decision nobody has taken.
+  answers, and only one of them is fine. Six types are claimed today (`oci-images`, `npm-packages`,
+  `oci-mirror`, `maven-packages` — whose whole policies are "nothing dies", which is still a
+  decision — and the two CI stubs, whose notes name their intended rules); only `npm-proxy` reports
+  "no strategy registered", which is the honest state of a decision nobody has taken.
 - **`sweep` is not the sum of the per-type figures.** A blob dies once, and two types releasing the
   same content free it once. The per-type numbers answer "what does this rule buy on its own"; the
   sweep answers "what would a run free tonight".
@@ -1132,6 +1208,7 @@ app's `application.properties` overrides them.
 | `qits.artifacts.oci.mirror.blob-timeout` | `PT10M` | the bound on one upstream blob transfer |
 | `qits.artifacts.oci.mirror.endpoint-override` | blank | dial every upstream here rather than at its own domain — the suite's stub seam, blank in a deployment |
 | `qits.artifacts.npm.max-publish-size` | `32M` | the largest npm tarball, in either direction — see below |
+| `qits.artifacts.maven.max-artifact-size` | `128M` | the largest maven artifact, in either direction — jars are megabytes at most; the deploy PUT streams, so the knob is the only bound |
 | `qits.artifacts.npm.proxy.upstream` | `https://registry.npmjs.org` | what an `npm-proxy` repository caches |
 | `qits.artifacts.npm.proxy.packument-ttl` | `PT5M` | how long a cached packument serves before revalidation |
 | `qits.repositories.git.max-pack-size` | `64M` | the git host's `BodyHandler` limit |
@@ -1202,7 +1279,9 @@ and only the host part is a deployment decision.
   as an operator's `POST /artifacts/api/gc/sweep` — the registries' `DELETE` endpoints stay
   unimplemented, row-less blobs stay untouchable, and the npm proxy cache still only grows (its
   eviction is parked for access tracking).
-- **A maven repository type.** The same seam again, a third protocol.
+- **A maven Central pull-through.** The hosted maven repository is above; the `maven-proxy` type,
+  its `central` row and the upstream cache are their own settled workstream (maven-repository-plan.md,
+  ⚖3), landing after the platform's own library publishes.
 - **Building packages.** The npm registry stores and serves them; nothing here runs `npm pack`. A
   producer is a CI step that runs `npm publish` over plain HTTP to `qits-artifacts:8080` — no docker
   socket, no credential, since the registry is tokenless and publishes stay inside the deployment.

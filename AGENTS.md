@@ -1,7 +1,8 @@
 # qits-artifacts — working notes
 
-Read `README.md` first: it defines what this repo owns (the blob store and the git host, plus the two
-protocol registries built on the blob store — OCI at `/v2` and npm at `/artifacts/npm`), the one
+Read `README.md` first: it defines what this repo owns (the blob store and the git host, plus the
+three protocol registries built on the blob store — OCI at `/v2`, npm at `/artifacts/npm` and maven
+at `/artifacts/maven`), the one
 port, and the config surface. This file is the working conventions on top of it.
 
 ## The two rules that shape everything
@@ -67,7 +68,7 @@ later measurement shows it is dead weight; do not assume it earned its place.
 
 Almost everything is served under the `/artifacts` gateway segment — `qits-gateway` routes verbatim
 by prefix, so an unprefixed route is normally unreachable, on `qits-net` as much as through the
-gateway. Four second-level segments and the segment itself, plus one root-level exception:
+gateway. Five second-level segments and the segment itself, plus one root-level exception:
 
 | Prefix | Machinery | Moves with |
 |---|---|---|
@@ -76,20 +77,23 @@ gateway. Four second-level segments and the segment itself, plus one root-level 
 | `/artifacts/q/**` | Quarkus' non-application root (openapi, swagger-ui, health) | `quarkus.http.non-application-root-path` |
 | `/artifacts/git/**` | raw Vert.x routes in `GitHostRoutes` | **nothing** — the segment is a literal in the code |
 | `/artifacts/npm/**` | raw Vert.x routes in `NpmRoutes` (the npm registry, hosted + proxy) | **nothing** — a literal, and `NpmPaths.BASE` is the only place it is spelled |
+| `/artifacts/maven/**` | raw Vert.x routes in `MavenRoutes` (the maven repository, hosted) | **nothing** — a literal, and `MavenPaths.BASE` is the only place it is spelled |
 | `/v2/**` | raw Vert.x routes in `RegistryRoutes` (the OCI Distribution API) | **nothing** — a literal, and not under `/artifacts` at all |
 
 `/artifacts/npm` is *not* forced on us the way `/v2` is: npm accepts a registry URL of any depth, so
 it sits inside the segment the gateway already routes here and needs no extra prefix on
 `QitsService.ARTIFACTS`. The first path segment after it is the `artifact_repository` row, the same
-first-segment rule the OCI registry uses.
+first-segment rule the OCI registry uses. `/artifacts/maven` is the same case verbatim: maven
+accepts a repository URL of any depth, and `MavenPaths.BASE` is the only place the segment is
+spelled.
 
 The SPA is the one that takes the *whole* segment, so it is the one that can swallow the others.
 Quinoa's SPA re-route is a catch-all at `/artifacts/*` registered near-last, so anything with a real
 route in front of it still wins — but a request matching **no** route is rerouted to `index.html` and
 answers `200 text/html`. `quarkus.quinoa.ignored-path-prefixes` is what stops that, and it is set
-explicitly (`/api,/q,/git,/npm,/v2`) rather than left to Quinoa's derivation, because the derivation
-reads `quarkus.rest.path` and `quarkus.http.non-application-root-path` and **nothing names `/git` or
-`/npm`**.
+explicitly (`/api,/q,/git,/npm,/maven,/v2`) rather than left to Quinoa's derivation, because the
+derivation reads `quarkus.rest.path` and `quarkus.http.non-application-root-path` and **nothing
+names `/git`, `/npm` or `/maven`**.
 Setting the key REPLACES the derivation rather than extending it, and its values are relative to
 `ui-root-path`, so `/api` and `/q` cannot be written as `${quarkus.rest.path}`: that line is a
 hand-kept copy of a derivation and has to be edited when either key moves.
@@ -116,8 +120,8 @@ on its artifacts entry (`QitsService.ARTIFACTS("/v2")`) rather than as a service
 deployment still names one host and gets both.
 
 The last three lines are the ones that bite: no config key moves those routes, and no JAX-RS test
-covers them. `GitHostTest`, `RegistryTest` and `NpmRegistryTest` are the only things that would catch
-them drifting, which is why all three spell their paths out absolutely.
+covers them. `GitHostTest`, `RegistryTest`, `NpmRegistryTest` and `MavenRegistryTest` are the only
+things that would catch them drifting, which is why all four spell their paths out absolutely.
 
 Two outbound/inbound addresses are contracts other repos hold:
 
@@ -149,12 +153,12 @@ Two top-level packages, deliberately kept apart:
   - The adapters can only live in `service`. `git-storage` may not depend on
     `qits-artifacts-artifacts` and `artifacts` may not depend on `git-storage` — they are different
     contexts — and `service` is the one module that already depends on both.
-- `eu.wohlben.qits.registry` and `eu.wohlben.qits.npm` — the two protocol wire stacks, `service/`
-  only. Unlike the git host these *do* share the blob store, so the split is by layer rather than by
-  context: every byte and every row goes through `artifacts/control` (`OciRegistryService`,
-  `NpmRegistryService`, `BlobStore`), and the `service/` package holds routes, error envelopes and —
-  for npm — the outbound upstream client. A wire package that touched a Panache repository directly
-  would be the drift to watch for.
+- `eu.wohlben.qits.registry`, `eu.wohlben.qits.npm` and `eu.wohlben.qits.maven` — the three protocol
+  wire stacks, `service/` only. Unlike the git host these *do* share the blob store, so the split is
+  by layer rather than by context: every byte and every row goes through `artifacts/control`
+  (`OciRegistryService`, `NpmRegistryService`, `MavenRegistryService`, `BlobStore`), and the
+  `service/` package holds routes, error envelopes and — for npm — the outbound upstream client. A
+  wire package that touched a Panache repository directly would be the drift to watch for.
 
 `artifacts` carries its own `error/` package (`ArtifactsException` and the four status-carrying
 subtypes) rather than the monorepo's `domain/error/*`. It always did — this is one of the few
@@ -226,7 +230,9 @@ The OCI mirror owns two (V7): `oci_mirror_upstream`, whose slug is a foreign key
 resolves to, and `oci_mirror_tag_check`, which the miss path writes — one row per mirrored tag,
 moved both by a fetch and by a `HEAD` that found the digest unchanged, and deliberately **not**
 moved when the upstream could not be reached (a failed check that touched it would suppress the
-next attempt for a whole TTL). **A plan reserves no migration number**: three workstreams were
+next attempt for a whole TTL). The maven repository owns one (V8): `maven_artifact`, path-keyed
+with its `size_bytes` beside the blob id — the one protocol table the census sizes without a disk
+read. **A plan reserves no migration number**: three workstreams were
 widening this lineage at once, and the rule they share is "take the next free V at land time, and re-enumerate
 `ck_artifact_repository_type` from the `RepositoryType` enum as it stands in the tree"
 (proxy-pulling-normal-images.md §4). `OciMirrorMigrationTest` pins that by looping over
@@ -292,14 +298,17 @@ them. Pack GC is its own later workstream and needs the DFS migration first.
   `POST /artifacts/api/gc/sweep`) applies only plans it computed in the same request, and on a
   store younger than the window a sweep provably deletes nothing.
 
-Five strategies exist: `OciImageGcStrategy` (`oci-images`), `NpmPackagesGcStrategy`
-(`npm-packages`), `OciMirrorGcStrategy` (`oci-mirror`), and the two CI stubs
+Six strategies exist: `OciImageGcStrategy` (`oci-images`), `NpmPackagesGcStrategy`
+(`npm-packages`), `OciMirrorGcStrategy` (`oci-mirror`), `MavenPackagesGcStrategy` (`maven-packages`)
+and the two CI stubs
 (`CiScreenshotsGcStrategy`, `CiVideosGcStrategy`) — deliberately two classes, because their
 intended rules already diverge in kind (branch-scoped against byte-budgeted) and sharing a base
 would be the exact unification the plan forbids, demonstrated at the cheapest place. The stubs plan
 `nothingDies` at zero rows under a `note()` naming the intended rule, and **fail closed the day
-rows exist** — a plan over rows with no implemented rule is a guess. A few things the strategies
-share cost time otherwise.
+rows exist** — a plan over rows with no implemented rule is a guess. The maven strategy is the
+mirror's shape rather than the stubs': `maven-packages` has rows from its first hour, so it claims
+its type with a "nothing dies" plan under a note naming the snapshot cleanup rule, and never fails
+closed. A few things the strategies share cost time otherwise.
 
 - **All five are `@Singleton`, not `@ApplicationScoped`, and the reason is the report.** `GcPlanner`
   names a strategy by its class's simple name, and a normal-scoped bean would answer that through its
@@ -336,9 +345,10 @@ Two things are npm's alone, and the plan is explicit that docker needs neither:
 
 `oci-mirror` is claimed by a strategy whose whole rule is "nothing dies"
 (`append-only pending access tracking`, proxy-pulling-normal-images.md ⚖2), and the class exists
-*because* the alternative — leaving the type unclaimed — reports a decision nobody took. It is the
-one strategy that reads the census, which is honest rather than lazy: with no rules of its own, the
+*because* the alternative — leaving the type unclaimed — reports a decision nobody took. It was the
+first strategy to read the census, which is honest rather than lazy: with no rules of its own, the
 type's live set is its answer, and recomputing it would be a second answer to a settled question.
+`MavenPackagesGcStrategy` reads it the same way for the same reason.
 
 `npm-proxy` is deliberately unclaimed. It shares `npm_version` with the hosted registry, so the scope
 is asserted rather than assumed (`NpmPackagesGcStrategyTest`); the planner's "no strategy registered
@@ -364,7 +374,7 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 
 ## Tests
 
-- `mvn verify` runs 375 tests (152 in `artifacts/`, 18 in `git-storage/`, 205 in `service/`) in about
+- `mvn verify` runs 421 tests (176 in `artifacts/`, 18 in `git-storage/`, 227 in `service/`) in about
   a minute. Nothing here
   needs docker — and that is the constraint that shapes the registry suite: `docker`, `podman` and
   `skopeo` may not be assumed present, so `registry/OciClient` + `registry/TinyImage` synthesise a
@@ -383,6 +393,14 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   than by touching its fields, and the reason is worth knowing before writing another one: Quarkus
   instantiates a `QuarkusTestProfile` in **two** classloaders, so a static singleton exists twice
   and the application ends up talking to a different instance than the test configures.
+- The maven suite is the hosted half of that shape again: `maven/TinyArtifact` synthesises a real
+  jar in memory and `maven/MavenClient` drives the deploy/resolve round trip over the JDK
+  `HttpClient` — no RestAssured, no maven binary, no network, because the path grammar and the
+  encoding questions are the point. `MavenSnapshotTest` drives the ⚖1 flow the way a real client
+  does: timestamped files PUT as ordinary paths, then the derived version-level metadata read back.
+  Both name their own artifact per case, because the service module's suite has no table reset and
+  releases are immutable — a shared coordinate would be order-dependent in exactly the way the
+  registry exists to refuse.
 - **The OCI mirror suite is that shape again with one extra hazard, and the hazard is why the
   suite's default upstream is a closed port.** `registry/StubOciRegistry` is the in-process registry
   the miss path is a mirror *of*, reached through `qits.artifacts.oci.mirror.endpoint-override`.
@@ -406,8 +424,8 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   per-domain endpoint config. With every upstream pointed at one stub, the wire suites would pass
   just as well if the derivation were a single hardcoded host — so `MirrorEndpointsTest` is a plain
   JUnit test over the three prefilled domains, and it is what makes "table-driven" a measurement.
-- `mvn verify -Dnative` runs those, then 20 more against the compiled binary: `PackagedProcessIT`
-  (18) and `ProtectedGitHostIT` (2). They are two classes because they are two process
+- `mvn verify -Dnative` runs those, then 22 more against the compiled binary: `PackagedProcessIT`
+  (20) and `ProtectedGitHostIT` (2). They are two classes because they are two process
   configurations — `PackagedProcessIT` asserts the SHIPPED defaults leave the default branch
   unprotected, and the seatbelt cases need it on — and `@TestProfile` is per class. The protection
   cases used to turn it on per repository with one `git config` on the served bare; the override is
@@ -508,7 +526,8 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   - **It only gates a declared `Content-Length`.** Quarkus installs the check as a route at order
     −2; with no `Content-Length` it merely stashes the limit under `io.quarkus.max-request-size` for
     a body *reader* to apply. A raw Vert.x route reading `HttpServerRequest` itself is not gated at
-    all — which is why `RegistryRoutes` reads through `registry/OciRequestBody` (Quarkus' own
+    all — which is why `RegistryRoutes` and `MavenRoutes` read through
+    `registry/OciRequestBody` (Quarkus' own
     `VertxInputStream`, the one thing on the classpath that honours that key) and never off the
     request. A hand-rolled stream here would silently remove the registry's only wire limit.
   - **It is deliberately *above* `qits.artifacts.oci.max-layer-size`, not equal to it.** Equal values
@@ -539,15 +558,16 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 - The blob store's `RepositoryType` enum hardcodes its types. Adding one is a schema check
   constraint change plus a validation profile, not a config knob — since V2 the constraint is named
   (`ck_artifact_repository_type`), so widening it is a one-liner (V3 is that one-liner, twice over).
-- **The four protocol types' profiles are empty and their `maxBytes()` is `0`, and that is not an
-  oversight.** `OCI_IMAGES`, `NPM_PACKAGES`, `NPM_PROXY` and `OCI_MIRROR` never flow through
+- **The five protocol types' profiles are empty and their `maxBytes()` is `0`, and that is not an
+  oversight.** `OCI_IMAGES`, `NPM_PACKAGES`, `NPM_PROXY`, `OCI_MIRROR` and `MAVEN_PACKAGES` never
+  flow through
   `BlobService` — their
   bytes arrive on their own wire routes and go straight to `BlobStore` — so there is no media type to
   sniff (a gzipped tar sniffs to nothing and would 400) and no metadata to require. The empty
   media-type set is what makes the zero cap safe: `accepts()` rejects a stray JSON-API upload before
-  anything reads the cap. The real caps are `qits.artifacts.oci.max-layer-size` and
-  `qits.artifacts.npm.max-publish-size`, config knobs because they have to move with the wire
-  ceiling.
+  anything reads the cap. The real caps are `qits.artifacts.oci.max-layer-size`,
+  `qits.artifacts.npm.max-publish-size` and `qits.artifacts.maven.max-artifact-size`, config knobs
+  because they have to move with the wire ceiling.
 - **`/v2` has two resolution seams and they are not interchangeable.**
   `OciRegistryService.requireOciRepository` is the **write** one: it demands an `oci-images` row and
   refuses an `oci-mirror` one with `405`. `resolveForPull` is the **read** one: it also accepts a
@@ -584,8 +604,9 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   `JsonNode`, precisely so no `@RegisterForReflection` is needed and the failure mode is
   unavailable. `registry` and `npm` together add **zero** native-image configuration; if either ever
   seems to need some, something reflective has crept in.
-- **Wire handlers carry `@ActivateRequestContext`/`@Transactional` on `OciRegistryService` and
-  `NpmRegistryService`.** A raw Vert.x route has no CDI request context and no transaction.
+- **Wire handlers carry `@ActivateRequestContext`/`@Transactional` on `OciRegistryService`,
+  `NpmRegistryService` and `MavenRegistryService`.** A raw Vert.x route has no CDI request context
+  and no transaction.
   `GitHostRoutes` is no precedent — it touches no database. Drop an annotation and those routes fail
   with `ContextNotActiveException` at runtime only. The same fact has a test-side consequence worth
   knowing: inside a `@QuarkusTest` a request context is *already* active, so two of these calls in a
