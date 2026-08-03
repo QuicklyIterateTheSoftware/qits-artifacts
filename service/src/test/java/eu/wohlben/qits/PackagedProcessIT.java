@@ -576,7 +576,8 @@ class PackagedProcessIT {
     // nothing references. The store here holds blobs pushed by the cases above, so the row-less
     // figures are a real reading rather than a zero that would pass either way.
     //
-    // One of the seven types has no strategy and must say so. oci-images must name the one that
+    // One of the eight types has no strategy and must say so — daemon-binaries joins npm-proxy as
+    // unclaimed. oci-images must name the one that
     // does — and, with no qits-cd to answer, must report the refusal rather than a plan. That
     // fail-closed path only exists in the binary if the JDK HttpClient survived the compile, so this
     // is the one assertion here that a JVM test cannot make on its behalf. npm-packages is the
@@ -590,7 +591,7 @@ class PackagedProcessIT {
         .statusCode(200)
         .body("dryRun", equalTo(true))
         .body("graceWindow", equalTo("P7D"))
-        .body("types", hasSize(7))
+        .body("types", hasSize(8))
         .body("types.find { it.type == 'oci-images' }.strategy", equalTo("OciImageGcStrategy"))
         .body("types.find { it.type == 'oci-images' }.error", containsString("qits-cd"))
         .body("types.find { it.type == 'oci-images' }.dead", hasSize(0))
@@ -602,6 +603,10 @@ class PackagedProcessIT {
         .body(
             "types.find { it.type == 'npm-proxy' }.note", containsString("no strategy registered"))
         .body("types.find { it.type == 'npm-proxy' }.strategy", nullValue())
+        .body(
+            "types.find { it.type == 'daemon-binaries' }.note",
+            containsString("no strategy registered"))
+        .body("types.find { it.type == 'daemon-binaries' }.strategy", nullValue())
         .body(
             "types.find { it.type == 'maven-packages' }.strategy",
             equalTo("MavenPackagesGcStrategy"))
@@ -646,7 +651,7 @@ class PackagedProcessIT {
         .statusCode(200)
         .body("dryRun", equalTo(false))
         .body("graceWindow", equalTo("P7D"))
-        .body("types", hasSize(7))
+        .body("types", hasSize(8))
         .body("types.find { it.type == 'oci-images' }.error", containsString("qits-cd"))
         .body("types.find { it.type == 'npm-packages' }.deleted", hasSize(0))
         .body("sweep.blobsUnlinked", equalTo(0))
