@@ -15,7 +15,7 @@ import org.junit.jupiter.api.Test;
  * The GC plan on the wire, and the things it must say when there is nothing to say.
  *
  * <p>The report is all zeros here — and the whole point of this suite is that zeros arrive with
- * reasons attached: three types naming that nobody collects them, {@code oci-images} naming the
+ * reasons attached: two types naming that nobody collects them, {@code oci-images} naming the
  * strategy that does and the reason it refused, {@code npm-packages} naming the strategy that ran
  * and found nothing to condemn, a sweep that would unlink nothing, and the row-less pool listed as
  * untouchable. A report that answered {@code {}} would be indistinguishable from a broken one.
@@ -50,7 +50,7 @@ class GcPlanControllerTest {
         .body("dryRun", is(true))
         .body("generatedAt", notNullValue())
         .body("graceWindow", is("P7D"))
-        .body("types", hasSize(7))
+        .body("types", hasSize(8))
         .body(
             "types.type",
             org.hamcrest.Matchers.containsInAnyOrder(
@@ -60,7 +60,8 @@ class GcPlanControllerTest {
                 "npm-packages",
                 "npm-proxy",
                 "oci-mirror",
-                "maven-packages"))
+                "maven-packages",
+                "daemon-binaries"))
         .body("types.find { it.type == 'oci-images' }.strategy", is("OciImageGcStrategy"))
         .body("types.find { it.type == 'npm-packages' }.strategy", is("NpmPackagesGcStrategy"))
         .body("types.find { it.type == 'oci-mirror' }.strategy", is("OciMirrorGcStrategy"))
@@ -74,6 +75,15 @@ class GcPlanControllerTest {
             org.hamcrest.Matchers.containsString("snapshot"))
         .body("types.find { it.type == 'npm-proxy' }.note", is("no strategy registered for npm-proxy"))
         .body("types.find { it.type == 'npm-proxy' }.strategy", nullValue())
+        // daemon-binaries is unclaimed on purpose: its strategy is workstream BK, and it needs a
+        // pin surface (GET /ci/api/daemon) that does not exist yet. "No strategy registered" is the
+        // honest report of a decision nobody has taken; a strategy shipped ahead of its pin source
+        // would be a plan on facts it could not fetch, over the one blob class a running service
+        // executes.
+        .body(
+            "types.find { it.type == 'daemon-binaries' }.note",
+            is("no strategy registered for daemon-binaries"))
+        .body("types.find { it.type == 'daemon-binaries' }.strategy", nullValue())
         .body("types.reclaimableBytes", everyItem(is(0)));
   }
 
@@ -197,7 +207,7 @@ class GcPlanControllerTest {
             .body("dryRun", is(false))
             .body("executedAt", notNullValue())
             .body("graceWindow", is("P7D"))
-            .body("types", hasSize(7))
+            .body("types", hasSize(8))
             .body(
                 "types.find { it.type == 'oci-images' }.error",
                 org.hamcrest.Matchers.containsString("qits-cd"))

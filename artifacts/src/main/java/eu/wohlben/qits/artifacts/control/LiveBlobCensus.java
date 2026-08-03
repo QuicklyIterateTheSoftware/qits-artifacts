@@ -4,6 +4,7 @@ import eu.wohlben.qits.artifacts.entity.ArtifactRepository;
 import eu.wohlben.qits.artifacts.entity.RepositoryType;
 import eu.wohlben.qits.artifacts.persistence.ArtifactRecordRepository;
 import eu.wohlben.qits.artifacts.persistence.ArtifactRepositoryRepository;
+import eu.wohlben.qits.artifacts.persistence.DaemonBinaryRepository;
 import eu.wohlben.qits.artifacts.persistence.MavenArtifactRepository;
 import eu.wohlben.qits.artifacts.persistence.NpmProxyPackumentRepository;
 import eu.wohlben.qits.artifacts.persistence.NpmVersionRepository;
@@ -29,7 +30,7 @@ import java.util.Set;
  * until a sweep deletes something the summary called live. So the explorer's summary and every GC
  * plan are built from this one class, and its byte-exactness is proved by the explorer's own tests:
  * {@code diskTotal = ociUnion + npmPublished + npmProxyTarballs + mavenPublished + mavenProxy +
- * orphans}.
+ * daemonBinaries + orphans}.
  *
  * <p>The type split is what makes per-type strategies safe. A blob dedupes globally, so "is this
  * blob garbage" is never a question one type can answer — but "which blobs does <em>my</em> type
@@ -54,6 +55,10 @@ import java.util.Set;
  *       like npm's. Attribution runs off the repository row's type, exactly like the CI records
  *       below, so both maven types' live sets fill from this one table and the pull-through
  *       workstream adds no census code when its constant lands.
+ *   <li>{@code daemon-binaries} — {@code daemon_binary.blob_id}, sized from the row for the same
+ *       reason maven's is. This is the set that made {@code orphanBytes} honest: every row-less
+ *       blob the store held was a ci-daemon build pushed through the blob-upload session, which
+ *       writes no row, so the census reported a live executable as an orphan.
  *   <li>{@code ci-screenshots} / {@code ci-videos} — {@code artifact_record.blob_id}, sized from the
  *       row, the one place a size sits beside an id.
  * </ul>
@@ -64,11 +69,12 @@ import java.util.Set;
  * honest if that ever changes.
  *
  * <p><b>What this census cannot see is not garbage — it is untouchable.</b> A blob on disk that no
- * identity row names appears in {@link Census#rowless()}, and no strategy may ever release one: the
- * store's largest such pool is three ELF binaries uploaded through the OCI blob-upload session, one
- * of which is the CI daemon every build downloads. Row-less blobs are reported and left alone; the
- * git host's DFS pack blobs are in that pool too until its GC (a later workstream) contributes them
- * as a live set of its own.
+ * identity row names appears in {@link Census#rowless()}, and no strategy may ever release one: that
+ * pool used to be three ELF binaries uploaded through the OCI blob-upload session, one of which is
+ * the CI daemon every build downloads. The {@code daemon-binaries} type is what gives those bytes a
+ * row; adopting the three already on the volume is an ops action, so until it runs they stay here,
+ * reported and left alone. The git host's DFS pack blobs are in that pool too until its GC (a later
+ * workstream) contributes them as a live set of its own.
  */
 @ApplicationScoped
 public class LiveBlobCensus {
@@ -79,6 +85,7 @@ public class LiveBlobCensus {
   @Inject NpmVersionRepository versions;
   @Inject NpmProxyPackumentRepository packuments;
   @Inject MavenArtifactRepository mavenArtifacts;
+  @Inject DaemonBinaryRepository daemonBinaries;
   @Inject OciManifestFootprints footprints;
   @Inject BlobDiskIndex diskIndex;
 
@@ -202,6 +209,15 @@ public class LiveBlobCensus {
       Map<String, Long> mavenBlobs = live.get(repository.type);
       for (Object[] blob : mavenArtifacts.listDistinctBlobs(repository.name)) {
         mavenBlobs.putIfAbsent((String) blob[0], (Long) blob[1]);
+      }
+      // The daemon half, on the same pattern and for the sharpest reason in this method: these
+      // bytes used to BE the orphan pool. Every one of the store's 124 MiB of row-less blobs was a
+      // ci-daemon build, uploaded through the OCI blob-upload session, which writes no row — so
+      // orphanBytes reported a live, downloaded-every-build executable as garbage-shaped. With rows
+      // the census sees it natively and orphanBytes tells the truth.
+      Map<String, Long> daemonBlobs = live.get(repository.type);
+      for (Object[] blob : daemonBinaries.listDistinctBlobs(repository.name)) {
+        daemonBlobs.putIfAbsent((String) blob[0], (Long) blob[1]);
       }
     }
 

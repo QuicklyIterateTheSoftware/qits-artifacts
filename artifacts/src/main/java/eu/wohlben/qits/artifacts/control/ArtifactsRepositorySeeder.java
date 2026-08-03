@@ -8,7 +8,8 @@ import jakarta.inject.Inject;
 /**
  * Idempotently ensures the default repository rows exist: the two CI types ({@code ci-screenshots},
  * {@code ci-videos}), the platform image repository ({@code qits}, type {@code oci-images}), the
- * two npm roots ({@code npm} hosted, {@code npmjs} proxy), the maven root ({@code maven}, hosted)
+ * two npm roots ({@code npm} hosted, {@code npmjs} proxy), the maven root ({@code maven}, hosted),
+ * the daemon root ({@code daemons}, type {@code daemon-binaries})
  * and the three OCI mirror namespaces ({@code hub}, {@code quay}, {@code redhat}, each paired with
  * its upstream row). Invoked by the
  * service-side startup gate
@@ -53,6 +54,14 @@ public class ArtifactsRepositorySeeder {
    */
   public static final String MAVEN = "maven";
 
+  /**
+   * The platform's daemon binaries, at {@code /artifacts/daemons/}. Same argument as {@link #NPM}
+   * with one more edge: this is the namespace a <b>cold bootstrap</b> publishes into before the
+   * platform has any CI to run a release pipeline with, so it must exist on the very first boot or
+   * the first daemon upload 404s and the fresh platform has nothing to launch its builds with.
+   */
+  public static final String DAEMONS = "daemons";
+
   @Inject ArtifactRepositoryService repositoryService;
 
   @Inject OciMirrorUpstreams mirrorUpstreams;
@@ -65,6 +74,7 @@ public class ArtifactsRepositorySeeder {
     repositoryService.ensure(NPM, RepositoryType.NPM_PACKAGES);
     repositoryService.ensure(NPM_PROXY, RepositoryType.NPM_PROXY);
     repositoryService.ensure(MAVEN, RepositoryType.MAVEN_PACKAGES);
+    repositoryService.ensure(DAEMONS, RepositoryType.DAEMON_BINARIES);
     // The mirror namespaces (hub, quay, redhat) and the upstream row each of them fronts. Written
     // as a PAIR by OciMirrorUpstreams, which is why they are not five more lines above: a
     // repository row with no upstream is a namespace nothing can be fetched into, and an upstream

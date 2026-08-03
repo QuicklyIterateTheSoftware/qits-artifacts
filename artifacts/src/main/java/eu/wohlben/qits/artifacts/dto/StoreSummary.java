@@ -4,7 +4,7 @@ package eu.wohlben.qits.artifacts.dto;
  * The honesty panel: every way of saying how big this store is, named rather than reconciled.
  *
  * <p>They do not add up, and the gaps are large enough to look like a bug — which is the reason all
- * ten are reported together instead of one being picked. An unlabelled byte count over a
+ * eleven are reported together instead of one being picked. An unlabelled byte count over a
  * content-addressed, globally deduped store is a lie with a number in it.
  *
  * @param ociPerImageSumBytes the per-image unions, added. What the image list's column sums to, and
@@ -16,10 +16,12 @@ package eu.wohlben.qits.artifacts.dto;
  *     questions: one is what this platform published, the other is what it cached from three public
  *     registries and could re-fetch. It is also the figure that stops growing once the base images
  *     settle, which is the whole claim the pull-through cache makes.
- * @param orphanBytes blob files no manifest and no tarball row references. Not a rounding error:
- *     this store holds three ELF binaries uploaded through the OCI blob-upload session with no
- *     manifest and no row of any kind, so they are servable, reachable from nothing, and invisible
- *     to every view built on the database. There is no garbage collector to reclaim them.
+ * @param orphanBytes blob files no identity row of any type references. It used to be exactly three
+ *     ELF binaries uploaded through the OCI blob-upload session with no manifest and no row of any
+ *     kind — servable, reachable from nothing, and invisible to every view built on the database.
+ *     {@link #daemonBinaryBytes} is where those bytes belong now; the ones already on a deployment's
+ *     volume move across when they are adopted, and this figure reading zero is the proof that
+ *     happened (daemon-artifact-identity-plan.md §5 step 4).
  * @param npmPublishedBytes tarballs in the hosted npm repositories, deduped.
  * @param npmProxyTarballBytes tarballs cached from upstream, deduped.
  * @param npmProxyPackumentBytes the cached packument documents, which are H2 CLOBs and not files —
@@ -32,8 +34,12 @@ package eu.wohlben.qits.artifacts.dto;
  * @param mavenProxyBytes bytes cached from an upstream maven repository. Zero until the
  *     pull-through workstream lands the type: no {@code maven-proxy} repository can exist before
  *     its constraint does, so zero is the honest figure rather than a placeholder.
+ * @param daemonBinaryBytes the platform's own daemon executables, deduped and sized from the rows —
+ *     {@code daemon_binary} is the second protocol table that carries its size. Reported as its own
+ *     figure rather than folded into any other because it is the one class whose bytes a running
+ *     service downloads and executes: it has to be legible on the kept side of every report.
  * @param diskTotalBytes every blob file under the blob root, which is the number the filesystem
- *     agrees with. It exceeds the two OCI unions plus the npm and maven figures by exactly {@link
+ *     agrees with. It exceeds the two OCI unions plus the npm, maven and daemon figures by exactly {@link
  *     #orphanBytes} — provided no blob is reached by two types at once, which content addressing
  *     permits and nothing forbids. That is the one way these figures can over-count, and it is the
  *     reason the census, not this record, is what a sweep reconciles over.
@@ -48,4 +54,5 @@ public record StoreSummary(
     long npmProxyPackumentBytes,
     long mavenPublishedBytes,
     long mavenProxyBytes,
+    long daemonBinaryBytes,
     long diskTotalBytes) {}

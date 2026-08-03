@@ -173,6 +173,65 @@ class OciMirrorMigrationTest {
         refused.getMessage());
   }
 
+  @Test
+  void theDaemonTableIsThereKeyedByRepositoryNameAndVersion() throws SQLException {
+    // V10's one table. The plan that asked for it said "V6" — written when the lineage ended at V5,
+    // with four migrations landing behind it. No plan reserves a number; this took the next free V
+    // and re-enumerated the constraint from the enum as it stands, which is what the first test in
+    // this class turns into a property.
+    insertRepository("daemons", "DAEMON_BINARIES");
+    try (Connection connection = dataSource.getConnection();
+        Statement statement = connection.createStatement()) {
+      statement.executeUpdate(
+          "insert into daemon_binary (repository, name, version, blob_id, size_bytes, published_at)"
+              + " values ('daemons', 'qits-ci-daemon', '2026.801.120000',"
+              + " '" + "c".repeat(64) + "', 43123792, current_timestamp)");
+    }
+    assertEquals(1, count("select count(*) from daemon_binary where repository = 'daemons'"));
+
+    // The uniqueness that makes a republish answerable at all: without it there is no "409, this
+    // version exists", which is the whole reason this type beat an artifact_record row.
+    SQLException duplicate =
+        assertThrows(
+            SQLException.class,
+            () -> {
+              try (Connection connection = dataSource.getConnection();
+                  Statement statement = connection.createStatement()) {
+                statement.executeUpdate(
+                    "insert into daemon_binary (repository, name, version, blob_id, size_bytes,"
+                        + " published_at) values ('daemons', 'qits-ci-daemon', '2026.801.120000',"
+                        + " '" + "d".repeat(64) + "', 1, current_timestamp)");
+              }
+            });
+    assertTrue(
+        duplicate.getMessage().toUpperCase(java.util.Locale.ROOT).contains("PRIMARY KEY"),
+        duplicate.getMessage());
+
+    SQLException refused =
+        assertThrows(
+            SQLException.class,
+            () -> {
+              try (Connection connection = dataSource.getConnection();
+                  Statement statement = connection.createStatement()) {
+                statement.executeUpdate(
+                    "insert into daemon_binary (repository, name, version, blob_id, size_bytes,"
+                        + " published_at) values ('no-such-repo', 'x', '1', '" + "1".repeat(64)
+                        + "', 1, current_timestamp)");
+              }
+            });
+    assertTrue(
+        refused.getMessage().toUpperCase(java.util.Locale.ROOT).contains("FK_DAEMON_BINARY_REPOSITORY"),
+        refused.getMessage());
+  }
+
+  @Test
+  void theLineageEmbedsNoLivePlatformDigest() throws SQLException {
+    // §5 step 2's rule, as an assertion: adopting the three ELF blobs already on the volume is an
+    // OPS action, never a migration. A migration cannot verify a digest against the running store,
+    // and a lineage carrying one would replay it onto every fresh platform that has no such bytes.
+    assertEquals(0, count("select count(*) from daemon_binary"));
+  }
+
   private void insertRepository(String name, String type) throws SQLException {
     try (Connection connection = dataSource.getConnection();
         Statement statement = connection.createStatement()) {
