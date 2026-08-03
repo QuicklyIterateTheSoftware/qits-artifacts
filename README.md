@@ -6,8 +6,8 @@ hosted, plus a pull-through cache of npmjs — they install from, and the maven 
 deploy their own library to.
 
 One repo, because every one of them is "qits serves bytes over HTTP against on-disk state it owns"
-and none has an inbound edge from the rest of qits. The three protocol registries are the third,
-fourth and fifth uses of the byte plane and all were predicted by the code — `RepositoryType`
+and none has an inbound edge from the rest of qits. The protocol registries are the third through
+sixth uses of the byte plane and all were predicted by the code — `RepositoryType`
 already reserved the seam — and none needed a new storage layer, because a content-addressed
 SHA-256 blob store *is* the OCI blob model and is a perfectly good home for a tarball or a jar.
 The git host landed here rather than in a `qits-repositories` service because that name collides
@@ -711,6 +711,54 @@ The deploy `PUT` streams rather than buffers, capped by `qits.artifacts.maven.ma
 (default 128M) — the one size answer for both directions a jar can travel, the npm
 `max-publish-size` precedent.
 
+## The daemon binaries
+
+`DaemonRoutes` serves the platform's own executables at `/artifacts/daemons/<name>/<version>`.
+`daemons` (type `daemon-binaries`) is seeded at startup alongside `npm`, `npmjs` and `maven`.
+
+```
+PUT      /artifacts/daemons/<name>/<version>      publish — streams; 201 with the computed digest
+GET|HEAD /artifacts/daemons/<name>/<version>      the binary, version-addressed
+DELETE   anywhere under the base                  405 — no delete; the append-only stance, verbatim
+anything else under the base                      404 with a short text body, never the SPA's HTML
+```
+
+Unlike the other three surfaces there is **no repository segment**: this one serves the platform's
+own daemons and nothing else, so the first segment after the base is the daemon's name. A second
+namespace would be a design decision rather than a path someone can mint by typing one.
+
+**The row write IS the publish.** One request stages the bytes, promotes them into `BlobStore` and
+inserts the `daemon_binary` row, in one transaction — so there is no way to store a daemon's bytes
+without an identity. That is the hole this type exists to close: the bootstrap used to upload the
+ci-daemon through the OCI blob-upload session, which promotes bytes and writes no row by
+construction, and the consequence was measurable — **every row-less byte in the store was a
+ci-daemon build**, so `orphanBytes` reported a live executable that every build downloads as
+garbage-shaped. `daemon_binary.blob_id` is now one of the census's live sets.
+
+**Versions are immutable**: re-publishing an existing `(name, version)` is `409`, even for identical
+bytes. That differs from maven's idempotent re-deploy on purpose — a maven deploy sends one file per
+request and retries are routine, while a daemon publish is one request from one release pipeline, so
+a second one means the version was reused or the release ran twice. The response carries the
+computed digest, which is what a release pipeline pastes into a deployment.
+
+**Two download spellings, deliberately.** The digest-addressed blob route on `/v2` is *untouched*:
+the launcher, the `qits.ci.daemon-binary-url-template` and every existing `QITS_CI_DAEMON_VERSION`
+pin keep working exactly as they are, and the digest stays what the pin holds. The version-addressed
+`GET` here is the readable second spelling, safe to add only because a version pointer never moves;
+it answers with `Docker-Content-Digest` so a consumer can check it against its pin without a second
+request.
+
+**Publishing is guarded; downloading is not.** `DaemonPublishGuard` demands a machine token minted
+for `qits-artifacts` when `qits.auth.machine.required` is on — the same decision `AdminWriteGuard`
+makes for the JSON API, reached differently because that filter is JAX-RS and runs on no raw Vert.x
+route. Reads stay anonymous because the cold-start path is a bootstrap script with no credential: a
+fresh platform has to be able to fetch a daemon before it has any CI to mint one with.
+
+The publish `PUT` streams rather than buffers, capped by `qits.artifacts.daemon.max-binary-size`
+(default 256M). It uses **no `BodyHandler`**, and that is the point: vertx-web defaults one to
+10 MiB and the binary is 43 MB, so the obvious implementation would have 413'd every real publish
+while passing every test small enough to be quick.
+
 ## The explorer API
 
 The `GET`s under `/artifacts/api` answer the one question this service could not: **what is in
@@ -747,7 +795,7 @@ GET /artifacts/api/mirror-upstreams                                the registrie
 | `manifests` | `{"manifests":[{"digest","mediaType","sizeBytes","createdAt","accessedAt","tags"}]}` |
 | `packages` | `{"packages":[{"name","versionCount","latest"}]}` |
 | `versions` | `{"versions":[{"version","tarballSizeBytes","publishedAt","distTags"}]}` |
-| `store/summary` | `{"ociPerImageSumBytes","ociUnionBytes","ociMirrorBytes","orphanBytes","npmPublishedBytes","npmProxyTarballBytes","npmProxyPackumentBytes","mavenPublishedBytes","mavenProxyBytes","diskTotalBytes"}` |
+| `store/summary` | `{"ociPerImageSumBytes","ociUnionBytes","ociMirrorBytes","orphanBytes","npmPublishedBytes","npmProxyTarballBytes","npmProxyPackumentBytes","mavenPublishedBytes","mavenProxyBytes","daemonBinaryBytes","diskTotalBytes"}` |
 | `mirror-upstreams` | `{"upstreams":[{"domain","slug","createdAt","cachedImages"}]}` |
 
 Details a client trips over if it does not know them:
@@ -764,7 +812,8 @@ Details a client trips over if it does not know them:
   manifest or tag from its request.
 
 - **`itemCount` means something different per type**, on purpose: images for `oci-images`, packages
-  for either npm type, deployed files for `maven-packages`, `artifact_record` rows for the two CI
+  for either npm type, deployed files for `maven-packages`, published versions for
+  `daemon-binaries`, `artifact_record` rows for the two CI
   types. One number with a type-dependent meaning beats five that are always null.
 - **404 is an unknown repository; 400 is a repository of the wrong type.** An npm repository has no
   images and never will, and reporting that as an empty list would read as an image registry that
@@ -842,20 +891,25 @@ layers and configs get none by design, and `oci_manifest.size_bytes` is the size
 total ~650 MB — **85% of the H2 file**, and 3.8× the tarballs they index. A UI reporting only the
 proxy's disk usage is off by nearly 4×. It is counted in characters; the documents are ASCII JSON.
 
-The ten figures reconcile in exactly one way, which is the panel's whole claim:
+The eleven figures reconcile in exactly one way, which is the panel's whole claim:
 
 ```
 diskTotalBytes = ociUnionBytes + npmPublishedBytes + npmProxyTarballBytes
-               + mavenPublishedBytes + mavenProxyBytes + orphanBytes
+               + mavenPublishedBytes + mavenProxyBytes + daemonBinaryBytes + orphanBytes
 ```
 
 `ociPerImageSumBytes` sits above `ociUnionBytes` by whatever images share, and
 `npmProxyPackumentBytes` is outside the identity because those bytes are rows, not files.
 
-**`orphanBytes` is not a rounding error.** This store holds 124 MiB in three ELF binaries — the
-ci-daemon — uploaded through the OCI blob-upload session with no manifest, no tag and no row of any
-kind. They are servable, because `serveBlob` validates the repository rather than that the digest
-belongs to the image. There is no garbage collector to reclaim them. Report it; do not sweep it.
+**`orphanBytes` is not a rounding error, and it is the figure `daemon-binaries` exists to empty.**
+This store holds 124 MiB in three ELF binaries — the ci-daemon — uploaded through the OCI
+blob-upload session with no manifest, no tag and no row of any kind. They are servable, because
+`serveBlob` validates the repository rather than that the digest belongs to the image, and there is
+nothing else in the pool: the three sizes reconcile to `orphanBytes` with zero remainder. Anything
+published through `PUT /artifacts/daemons/…` gets its row at publish time and lands in
+`daemonBinaryBytes` instead; the three already on the volume move across when they are adopted,
+which is an ops action rather than a migration — a lineage must not embed live-platform digests, and
+a migration cannot verify one against the running store. Until then: report it; do not sweep it.
 
 ### Deliberately not here
 
@@ -930,6 +984,7 @@ if a change would let one strategy reuse another's policy, it is the wrong chang
 | `npm-proxy` | **parked** — cache eviction is access-based, which is `artifact-access-tracking`'s territory, not a structural rule | — | — | — | not this design |
 | `oci-mirror` | **nothing yet** — access is tracked, but no retention window/eviction policy is settled | every cached tag and manifest | — | manifest closure over the namespace | claimed, so the report says so |
 | `maven-packages` | **nothing** — releases are never eligible; timestamped snapshot builds accumulate at a recorded price, with the cleanup rule named (keep the newest N per snapshot version) | every deployed file | — | `maven_artifact.blob_id`, sized from the row | claimed, so the report says so |
+| `daemon-binaries` | **nothing yet** — the rule is keep the pinned version plus the most recent previous distinct version per daemon, and the pin comes from qits-ci at plan time (`GET /ci/api/daemon`), which does not exist yet | the pin and its predecessor | — | `daemon_binary.blob_id`, sized from the row | **unclaimed**, so the report says "no strategy registered": a plan over this type with no pin source would be a guess about the one blob class a running service executes |
 | git host (not an `artifact_repository` type) | superseded pack descriptions after a repack | every ref | current packs | `PackCatalog.list` per repo | the DFS migration |
 
 The OCI keep-set is **fetched at plan time and fail-closed**: qits-cd unreachable aborts that type's
@@ -1234,6 +1289,7 @@ app's `application.properties` overrides them.
 | `qits.artifacts.oci.mirror.endpoint-override` | blank | dial every upstream here rather than at its own domain — the suite's stub seam, blank in a deployment |
 | `qits.artifacts.npm.max-publish-size` | `32M` | the largest npm tarball, in either direction — see below |
 | `qits.artifacts.maven.max-artifact-size` | `128M` | the largest maven artifact, in either direction — jars are megabytes at most; the deploy PUT streams, so the knob is the only bound |
+| `qits.artifacts.daemon.max-binary-size` | `256M` | the largest daemon binary, in either direction. The measured ci-daemon is 43 MB, so this is headroom rather than a snug fit; the publish PUT streams, so the knob is the only bound a chunked upload has |
 | `qits.artifacts.npm.proxy.upstream` | `https://registry.npmjs.org` | what an `npm-proxy` repository caches |
 | `qits.artifacts.npm.proxy.packument-ttl` | `PT5M` | how long a cached packument serves before revalidation |
 | `qits.repositories.git.max-pack-size` | `64M` | the git host's `BodyHandler` limit |

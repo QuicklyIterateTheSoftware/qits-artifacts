@@ -52,6 +52,7 @@ class LiveBlobCensusTest extends GcFixture {
     assertEquals(Set.of(), taken.live(RepositoryType.NPM_PROXY).keySet());
     assertEquals(Set.of(), taken.live(RepositoryType.OCI_MIRROR).keySet());
     assertEquals(Set.of(), taken.live(RepositoryType.MAVEN_PACKAGES).keySet());
+    assertEquals(Set.of(), taken.live(RepositoryType.DAEMON_BINARIES).keySet());
     assertEquals(Set.of(), taken.live(RepositoryType.CI_SCREENSHOTS).keySet());
     assertEquals(Set.of(), taken.live(RepositoryType.CI_VIDEOS).keySet());
   }
@@ -161,6 +162,7 @@ class LiveBlobCensusTest extends GcFixture {
     assertEquals(taken.liveBytes(RepositoryType.NPM_PACKAGES), summary.npmPublishedBytes());
     assertEquals(taken.liveBytes(RepositoryType.NPM_PROXY), summary.npmProxyTarballBytes());
     assertEquals(taken.liveBytes(RepositoryType.MAVEN_PACKAGES), summary.mavenPublishedBytes());
+    assertEquals(taken.liveBytes(RepositoryType.DAEMON_BINARIES), summary.daemonBinaryBytes());
     assertEquals(taken.rowlessBytes(), summary.orphanBytes());
     assertEquals(taken.diskTotalBytes(), summary.diskTotalBytes());
     assertEquals(taken.ociPerImageSumBytes(), summary.ociPerImageSumBytes());

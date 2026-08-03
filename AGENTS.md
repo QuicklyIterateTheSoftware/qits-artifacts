@@ -78,6 +78,7 @@ gateway. Five second-level segments and the segment itself, plus one root-level 
 | `/artifacts/git/**` | raw Vert.x routes in `GitHostRoutes` | **nothing** — the segment is a literal in the code |
 | `/artifacts/npm/**` | raw Vert.x routes in `NpmRoutes` (the npm registry, hosted + proxy) | **nothing** — a literal, and `NpmPaths.BASE` is the only place it is spelled |
 | `/artifacts/maven/**` | raw Vert.x routes in `MavenRoutes` (the maven repository, hosted) | **nothing** — a literal, and `MavenPaths.BASE` is the only place it is spelled |
+| `/artifacts/daemons/**` | raw Vert.x routes in `DaemonRoutes` (the platform's own daemon binaries) | **nothing** — a literal, and `DaemonPaths.BASE` is the only place it is spelled |
 | `/v2/**` | raw Vert.x routes in `RegistryRoutes` (the OCI Distribution API) | **nothing** — a literal, and not under `/artifacts` at all |
 
 `/artifacts/npm` is *not* forced on us the way `/v2` is: npm accepts a registry URL of any depth, so
@@ -91,9 +92,12 @@ The SPA is the one that takes the *whole* segment, so it is the one that can swa
 Quinoa's SPA re-route is a catch-all at `/artifacts/*` registered near-last, so anything with a real
 route in front of it still wins — but a request matching **no** route is rerouted to `index.html` and
 answers `200 text/html`. `quarkus.quinoa.ignored-path-prefixes` is what stops that, and it is set
-explicitly (`/api,/q,/git,/npm,/maven,/v2`) rather than left to Quinoa's derivation, because the
+explicitly (`/api,/q,/git,/npm,/maven,/daemons,/v2`) rather than left to Quinoa's derivation,
+because the
 derivation reads `quarkus.rest.path` and `quarkus.http.non-application-root-path` and **nothing
-names `/git`, `/npm` or `/maven`**.
+names `/git`, `/npm`, `/maven` or `/daemons`**. `/daemons` is the least forgiving omission of the
+four: a bootstrap script `curl`s a daemon binary and execs it, so `index.html` at 200 becomes an
+executable that is a web page.
 Setting the key REPLACES the derivation rather than extending it, and its values are relative to
 `ui-root-path`, so `/api` and `/q` cannot be written as `${quarkus.rest.path}`: that line is a
 hand-kept copy of a derivation and has to be edited when either key moves.
@@ -120,8 +124,9 @@ on its artifacts entry (`QitsService.ARTIFACTS("/v2")`) rather than as a service
 deployment still names one host and gets both.
 
 The last three lines are the ones that bite: no config key moves those routes, and no JAX-RS test
-covers them. `GitHostTest`, `RegistryTest`, `NpmRegistryTest` and `MavenRegistryTest` are the only
-things that would catch them drifting, which is why all four spell their paths out absolutely.
+covers them. `GitHostTest`, `RegistryTest`, `NpmRegistryTest`, `MavenRegistryTest` and `DaemonRegistryTest`
+are the only things that would catch them drifting, which is why all five spell their paths out
+absolutely.
 
 Two outbound/inbound addresses are contracts other repos hold:
 
@@ -154,10 +159,12 @@ Two top-level packages, deliberately kept apart:
   - The adapters can only live in `service`. `git-storage` may not depend on
     `qits-artifacts-artifacts` and `artifacts` may not depend on `git-storage` — they are different
     contexts — and `service` is the one module that already depends on both.
-- `eu.wohlben.qits.registry`, `eu.wohlben.qits.npm` and `eu.wohlben.qits.maven` — the three protocol
+- `eu.wohlben.qits.registry`, `eu.wohlben.qits.npm`, `eu.wohlben.qits.maven` and
+  `eu.wohlben.qits.daemon` — the four protocol
   wire stacks, `service/` only. Unlike the git host these *do* share the blob store, so the split is
   by layer rather than by context: every byte and every row goes through `artifacts/control`
-  (`OciRegistryService`, `NpmRegistryService`, `MavenRegistryService`, `BlobStore`), and the
+  (`OciRegistryService`, `NpmRegistryService`, `MavenRegistryService`, `DaemonRegistryService`,
+  `BlobStore`), and the
   `service/` package holds routes, error envelopes and — for npm — the outbound upstream client. A
   wire package that touched a Panache repository directly would be the drift to watch for.
 
@@ -232,8 +239,12 @@ resolves to, and `oci_mirror_tag_check`, which the miss path writes — one row 
 moved both by a fetch and by a `HEAD` that found the digest unchanged, and deliberately **not**
 moved when the upstream could not be reached (a failed check that touched it would suppress the
 next attempt for a whole TTL). The maven repository owns one (V8): `maven_artifact`, path-keyed
-with its `size_bytes` beside the blob id — the one protocol table the census sizes without a disk
-read. **A plan reserves no migration number**: three workstreams were
+with its `size_bytes` beside the blob id. The daemon-binaries type owns one (V10): `daemon_binary`,
+keyed `(repository, name, version)` with its `size_bytes` beside the blob id too — those two are the
+protocol tables the census sizes without a disk read. `daemon_binary` deliberately holds **no
+prefill**: adopting the ELF blobs already on a deployment's volume is an ops action, because the
+lineage must not embed live-platform digests and a migration cannot verify one against the running
+store. **A plan reserves no migration number**: three workstreams were
 widening this lineage at once, and the rule they share is "take the next free V at land time, and re-enumerate
 `ck_artifact_repository_type` from the `RepositoryType` enum as it stands in the tree"
 (proxy-pulling-normal-images.md §4). `OciMirrorMigrationTest` pins that by looping over
@@ -522,6 +533,13 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   assume it is covered. `store` holds only the read-only store summary today and is listed so that
   stays a choice rather than an accident. It guards writes only, by design, and is a no-op while the
   rollout gate `qits.auth.machine.required` is off.
+  **It is JAX-RS, so it runs on no raw Vert.x route** — adding a prefix for one would look exactly
+  like guarding it and guard nothing. `/v2`, `/artifacts/npm` and `/artifacts/maven` are unguarded
+  on purpose (qits-net trust); the daemon publish `PUT` is not, and `DaemonPublishGuard` is how it
+  reaches the same decision — the same two `MachineAuth` config keys, with
+  `HttpAuthenticator.attemptAuthentication` as the explicit ask that `quarkus.http.auth.proactive=false`
+  otherwise leaves nobody making. `DaemonPublishGuardTest` runs the gate on; without it a green
+  build would ship an open write surface.
 - `service` ships `quarkus.http.limits.max-body-size=1088M`, which is a **global** ceiling — every
   route in the process, not just the upload. Tracked as an open tradeoff in
   `docs/issues/2026-07-19_artifacts-global-max-body-size-widens-public-ingest-dos.md`, which now
@@ -546,6 +564,12 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   to disk. The npm publish `PUT` is the third such route (`qits.artifacts.npm.max-publish-size`), and
   the one where the number is least obvious: a publish document carries its tarball
   **base64-inflated by 4/3** inside JSON, so 32M there is roughly a 24M tarball.
+  **The daemon publish `PUT` is the one that would have been caught by this trap and was not**: the
+  binary is 43 MB against the 10 MiB default, so a `BodyHandler` there would have 413'd every real
+  publish while passing every test small enough to be quick. It streams through `OciRequestBody`
+  instead, bounded by `qits.artifacts.daemon.max-binary-size` (256M) — `DaemonBinaryCapTest` lowers
+  the knob rather than uploading a quarter of a gigabyte, and asserts the chunked case too, because
+  a body with no `Content-Length` is gated by that knob and by nothing else.
 - App-level config lives in `service/src/main/resources/application.properties` — the shipped copy —
   and the tests **inherit** it: Quarkus merges main's `application.properties` into the test config
   rather than letting the test one shadow it. So never re-declare an app-level setting
@@ -563,15 +587,17 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 - The blob store's `RepositoryType` enum hardcodes its types. Adding one is a schema check
   constraint change plus a validation profile, not a config knob — since V2 the constraint is named
   (`ck_artifact_repository_type`), so widening it is a one-liner (V3 is that one-liner, twice over).
-- **The five protocol types' profiles are empty and their `maxBytes()` is `0`, and that is not an
-  oversight.** `OCI_IMAGES`, `NPM_PACKAGES`, `NPM_PROXY`, `OCI_MIRROR` and `MAVEN_PACKAGES` never
+- **The six protocol types' profiles are empty and their `maxBytes()` is `0`, and that is not an
+  oversight.** `OCI_IMAGES`, `NPM_PACKAGES`, `NPM_PROXY`, `OCI_MIRROR`, `MAVEN_PACKAGES` and
+  `DAEMON_BINARIES` never
   flow through
   `BlobService` — their
   bytes arrive on their own wire routes and go straight to `BlobStore` — so there is no media type to
   sniff (a gzipped tar sniffs to nothing and would 400) and no metadata to require. The empty
   media-type set is what makes the zero cap safe: `accepts()` rejects a stray JSON-API upload before
   anything reads the cap. The real caps are `qits.artifacts.oci.max-layer-size`,
-  `qits.artifacts.npm.max-publish-size` and `qits.artifacts.maven.max-artifact-size`, config knobs
+  `qits.artifacts.npm.max-publish-size`, `qits.artifacts.maven.max-artifact-size` and
+  `qits.artifacts.daemon.max-binary-size`, config knobs
   because they have to move with the wire ceiling.
 - **`/v2` has two resolution seams and they are not interchangeable.**
   `OciRegistryService.requireOciRepository` is the **write** one: it demands an `oci-images` row and

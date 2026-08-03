@@ -16,6 +16,7 @@ import eu.wohlben.qits.artifacts.error.BadRequestException;
 import eu.wohlben.qits.artifacts.error.NotFoundException;
 import eu.wohlben.qits.artifacts.persistence.ArtifactRecordRepository;
 import eu.wohlben.qits.artifacts.persistence.ArtifactRepositoryRepository;
+import eu.wohlben.qits.artifacts.persistence.DaemonBinaryRepository;
 import eu.wohlben.qits.artifacts.persistence.MavenArtifactRepository;
 import eu.wohlben.qits.artifacts.persistence.NpmDistTagRepository;
 import eu.wohlben.qits.artifacts.persistence.NpmVersionRepository;
@@ -60,6 +61,7 @@ public class ArtifactExplorerService {
   @Inject NpmVersionRepository versions;
   @Inject NpmDistTagRepository distTags;
   @Inject MavenArtifactRepository mavenArtifacts;
+  @Inject DaemonBinaryRepository daemonBinaries;
   @Inject OciManifestFootprints footprints;
   @Inject BlobDiskIndex diskIndex;
   @Inject LiveBlobCensus census;
@@ -230,6 +232,7 @@ public class ArtifactExplorerService {
         // The census already attributes maven_artifact rows by their repository's type, so CQ
         // changes this one line and no census code.
         0L,
+        taken.liveBytes(RepositoryType.DAEMON_BINARIES),
         taken.diskTotalBytes());
   }
 
@@ -282,6 +285,9 @@ public class ArtifactExplorerService {
       case NPM_PACKAGES, NPM_PROXY -> versions.countPackages(repository.name);
       // Deployed files — one number with a type-dependent meaning, the standing convention.
       case MAVEN_PACKAGES -> mavenArtifacts.countByRepository(repository.name);
+      // Published versions across every daemon this repository holds — one number, the same
+      // type-dependent meaning the line above has.
+      case DAEMON_BINARIES -> daemonBinaries.countByRepository(repository.name);
       case CI_SCREENSHOTS, CI_VIDEOS -> records.countByRepository(repository.name);
     };
   }
@@ -294,6 +300,7 @@ public class ArtifactExplorerService {
           tarballBytes(List.of(repository.name), diskIndex.sizes(), new HashSet<>());
       // The union over distinct blob ids, sized from the rows — the one protocol table that has it.
       case MAVEN_PACKAGES -> mavenBytes(repository.name);
+      case DAEMON_BINARIES -> daemonBytes(repository.name);
       case CI_SCREENSHOTS, CI_VIDEOS -> recordBytes(repository.name);
     };
   }
@@ -322,6 +329,15 @@ public class ArtifactExplorerService {
   private long mavenBytes(String repository) {
     Map<String, Long> distinct = new TreeMap<>();
     for (Object[] blob : mavenArtifacts.listDistinctBlobs(repository)) {
+      distinct.putIfAbsent((String) blob[0], (Long) blob[1]);
+    }
+    return OciManifestFootprints.sum(distinct);
+  }
+
+  /** Distinct content of a daemon repository — the maven half verbatim, sized from the rows. */
+  private long daemonBytes(String repository) {
+    Map<String, Long> distinct = new TreeMap<>();
+    for (Object[] blob : daemonBinaries.listDistinctBlobs(repository)) {
       distinct.putIfAbsent((String) blob[0], (Long) blob[1]);
     }
     return OciManifestFootprints.sum(distinct);

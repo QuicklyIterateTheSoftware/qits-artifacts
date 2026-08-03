@@ -250,7 +250,7 @@ class ArtifactBrowseControllerTest {
   }
 
   @Test
-  void theStoreSummaryNamesAllSevenFigures() {
+  void theStoreSummaryNamesEveryFigure() {
     // Values depend on whatever else this JVM's suite has pushed, so the assertion is the contract
     // rather than the arithmetic — that lives in the artifacts module, over a fixture it owns.
     given()
@@ -264,6 +264,8 @@ class ArtifactBrowseControllerTest {
         .body("npmPublishedBytes", greaterThanOrEqualTo(0))
         .body("npmProxyTarballBytes", greaterThanOrEqualTo(0))
         .body("npmProxyPackumentBytes", greaterThanOrEqualTo(0))
+        .body("mavenPublishedBytes", greaterThanOrEqualTo(0))
+        .body("daemonBinaryBytes", greaterThanOrEqualTo(0))
         .body("diskTotalBytes", greaterThanOrEqualTo(0));
   }
 
