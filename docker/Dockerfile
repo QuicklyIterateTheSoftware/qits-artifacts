@@ -32,9 +32,11 @@
 #
 # An /etc/passwd line for 1001 would make it boot with no environment at all. It is deliberately not
 # here: every one of those paths would then resolve inside the container's writable layer, and this
-# service's data is not its own. `qits.repositories.data-dir` is a three-way on-disk contract —
-# qits-projects clones bare origins into it and qits-workspaces branches from them, so all three
-# must resolve it to the SAME volume or the git host serves an empty tree. A container that came up
+# service's data is not its own. `qits.repositories.data-dir` is a two-way on-disk contract now
+# (projects-volume-decoupling-plan.md BT) — this service serves the bare origins over git smart-HTTP
+# and qits-workspaces still reads pre-move workspace sidecars off the same volume, so both must
+# resolve it to the SAME volume or one of them sees stale or empty data. qits-projects no longer
+# mounts it at all: it clones its own mirrors over the wire instead. A container that came up
 # healthy on an ephemeral copy is the failure that hides; one that refuses to start is the failure
 # you see.
 #
@@ -42,9 +44,9 @@
 #
 #   the git tree      `qits.repositories.data-dir` is settled, and nothing in it is stored in SQL —
 #                     it is bare origins on disk. The image names it itself (see the runtime stage)
-#                     so it is correct out of the box, and it names the SAME literal qits-projects
-#                     and qits-workspaces ship, so one volume satisfies the three-way contract
-#                     without a deployment having to get one string right in three places.
+#                     so it is correct out of the box, and it names the SAME literal qits-workspaces
+#                     ships, so one volume satisfies the two-way contract without a deployment
+#                     having to get one string right in both places.
 #
 #   the database      the prototype. Deliberately unnamed here; the service will not start until a
 #                     deployment says where it goes.
@@ -196,9 +198,10 @@ RUN chmod +x /work/qits-artifacts
 RUN mkdir -p /data/repositories && chown -R 1001:root /data && chmod -R 775 /data
 
 # The git tree, named here rather than left to a deployment: it is not the prototype, and nothing in
-# it is stored in SQL. `/data/repositories` is a literal qits-projects and qits-workspaces also ship
-# — the three-way contract in the header only holds if all three resolve it to the same volume, and
-# three services each told the same string separately is three chances to get it wrong.
+# it is stored in SQL. `/data/repositories` is a literal qits-workspaces also ships — the two-way
+# contract in the header only holds if both resolve it to the same volume, and two services each
+# told the same string separately is two chances to get it wrong. qits-projects no longer ships
+# this literal at all (projects-volume-decoupling-plan.md BT).
 #
 # Note what is NOT set beside it: no QUARKUS_DATASOURCE_* and no QITS_ARTIFACTS_BLOBS_DIR. That
 # asymmetry is the point — the git host works out of the box, the prototype's storage refuses to.
