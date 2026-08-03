@@ -45,11 +45,17 @@ import org.jboss.logging.Logger;
  * qits.ci.daemon-version} holds (⚖2). The version-addressed {@code GET} here is the readable second
  * spelling, safe to add only because a version pointer never moves.
  *
- * <p><b>Publishing is guarded, downloading is not.</b> {@link DaemonPublishGuard} carries the
- * machine-token decision — see its javadoc for why a prefix in {@code AdminWriteGuard}'s set would
- * have guarded nothing here. Reads stay anonymous because the cold-start path is a bootstrap script
- * with no token yet: a fresh platform has to be able to fetch a daemon before it has any CI to mint
- * a credential with.
+ * <p><b>There is no authentication here, at all</b> — the same stance {@code /v2}, {@code
+ * /artifacts/npm} and {@code /artifacts/maven} take, and for the same reason: on qits-net producers
+ * are trusted, and a publish surface that needed a credential store would need one before the
+ * platform can build anything. What a publish cannot do is <em>change</em> anything — a version is
+ * immutable ({@code 409} on republish) and a consumer pins the digest this route echoes, so
+ * integrity comes from addressing rather than from write auth. Machine auth arrives wholesale with
+ * qits-idp, for every surface at once; gating this one alone would report a decision nobody took.
+ *
+ * <p>Reads are anonymous for the extra reason that the cold-start path is a bootstrap script with no
+ * token: a fresh platform has to be able to fetch a daemon before it has any CI to mint a credential
+ * with.
  *
  * <p><b>No {@code BodyHandler}, anywhere in this class.</b> {@code BodyHandler.create()} defaults to
  * 10 MiB and the binary is 43 MB, so one would have silently 413'd every real publish — the git
@@ -68,7 +74,6 @@ public class DaemonRoutes {
 
   @Inject DaemonRegistryService registry;
   @Inject BlobStore blobStore;
-  @Inject DaemonPublishGuard publishGuard;
 
   /**
    * The one size answer for both directions a daemon binary can travel.
@@ -196,7 +201,6 @@ public class DaemonRoutes {
    * itself and a re-publish of different bytes leaves a row-less blob the census reports honestly.
    */
   private void publish(RoutingContext rc) {
-    publishGuard.requirePublisher(rc);
     String name = rc.pathParam("name");
     String version = rc.pathParam("version");
     registry.requireDaemonRepository(ArtifactsRepositorySeeder.DAEMONS);

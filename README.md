@@ -748,11 +748,17 @@ pin keep working exactly as they are, and the digest stays what the pin holds. T
 it answers with `Docker-Content-Digest` so a consumer can check it against its pin without a second
 request.
 
-**Publishing is guarded; downloading is not.** `DaemonPublishGuard` demands a machine token minted
-for `qits-artifacts` when `qits.auth.machine.required` is on — the same decision `AdminWriteGuard`
-makes for the JSON API, reached differently because that filter is JAX-RS and runs on no raw Vert.x
-route. Reads stay anonymous because the cold-start path is a bootstrap script with no credential: a
-fresh platform has to be able to fetch a daemon before it has any CI to mint one with.
+**Nothing here is authenticated**, in either direction — the same posture `/v2`, `/artifacts/npm`
+and `/artifacts/maven` hold, and deliberately not a weaker one. On qits-net producers are trusted,
+which is what lets a release pipeline publish with no credential store. Integrity does not come from
+write auth: a version is immutable, so an open publish can add a version and can never change one,
+and a consumer pins the digest this route echoes, so what a launcher runs is decided by content
+addressing. Machine auth arrives wholesale with qits-idp, for every publish path at once — gating
+this one alone would report a posture the other three do not have. `DaemonOpenPublishTest` pins it
+with the machine-token gate turned on, beside the npm and registry twins.
+
+Reads are anonymous for the extra reason that the cold-start path is a bootstrap script with no
+credential: a fresh platform has to be able to fetch a daemon before it has any CI to mint one with.
 
 The publish `PUT` streams rather than buffers, capped by `qits.artifacts.daemon.max-binary-size`
 (default 256M). It uses **no `BodyHandler`**, and that is the point: vertx-web defaults one to
