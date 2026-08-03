@@ -651,9 +651,12 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   `GitHostRoutes.service(...)` receives the options; the one in `infoRefs(...)` *advertises the
   capability*, and a client only sends `-o` if it was offered. Setting it on one and not the other
   compiles, passes anything that does not drive a real client, and produces the confusing failure
-  where every option is silently never seen — so `ProtectedRefHook`'s bypasses would all refuse. The
-  advertisement is asserted directly (`theReceivePackAdvertisementOffersPushOptions`, and again in
-  the native IT) precisely because it has no other symptom.
+  where every option is silently never seen — so `ProtectedRefHook`'s two bypasses (`qits.release`,
+  `qits.token=`) would all refuse, and the post-receive hook's own option, `-o qits.no-ci` (skips the
+  CI intake POST for the push; it grants no write, unlike the other two, so it needs no gate), would
+  silently suppress nothing. The advertisement is asserted directly
+  (`theReceivePackAdvertisementOffersPushOptions`, and again in the native IT) precisely because it
+  has no other symptom.
 - **`ProtectedRefHook` ships inert and must stay that way in this repo.** `mvn verify` proves the
   matrix, but the shipped value of `qits.repositories.git.protect-default-branch` is what decides
   whether this service can still receive its own redeploy — qits-artifacts is the git host that
