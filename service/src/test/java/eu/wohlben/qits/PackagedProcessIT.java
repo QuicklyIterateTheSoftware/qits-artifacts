@@ -147,6 +147,17 @@ class PackagedProcessIT {
     // 200 text/html, and a git client told 200 HTML reports anything but "no such repository".
     given().when().get("/artifacts/git/" + UUID.randomUUID()).then().statusCode(404);
 
+    // The repository listing is the base itself, and the one route here a machine cannot tell from
+    // the SPA by status code alone: index.html answers 200 exactly as a listing does. So this
+    // asserts the body's shape, which is the only difference a caller could act on.
+    given()
+        .when()
+        .get("/artifacts/git")
+        .then()
+        .statusCode(200)
+        .contentType(containsString("json"))
+        .body("repositories", notNullValue());
+
     // The npm case verbatim, one segment over: no config key names /maven either (MavenRoutes
     // spells it as a literal), so without the ignore a mistyped artifact path would answer 200
     // text/html and a maven client would report a corrupt jar.

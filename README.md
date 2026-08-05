@@ -148,6 +148,14 @@ one segment to both:
   relative submodule urls (`../<name>.git`) resolve natively. Needs the `RepositoryNameResolver`
   port.
 
+Beside them, the base itself answers `GET /artifacts/git` with
+`{"repositories": ["<repoId>", ...]}` — every repository this host serves, sorted
+lexicographically, on whichever storage backend is selected. It is one segment shorter than every
+route above, so it shadows none of them. The host withheld this listing while nothing needed it;
+qits-ci's trigger engine has to enumerate candidates before it can fire an event-triggered pipeline,
+so the decision is reversed rather than left standing. Reads are unauthenticated here as everywhere
+else on this host.
+
 This base is a **cross-repo contract**: qits-ci fetches pipeline config from it and
 qits-workspace-daemon's `Provisioner` clones from it, both against the literal `/artifacts/git`.
 
