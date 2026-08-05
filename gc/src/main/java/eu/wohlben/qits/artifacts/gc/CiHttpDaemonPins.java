@@ -44,8 +44,13 @@ public class CiHttpDaemonPins implements CiDaemonPins {
   @Inject ObjectMapper objectMapper;
 
   @Override
+  public String url() {
+    return baseUrl + "/daemon";
+  }
+
+  @Override
   public DaemonPin daemonPin() {
-    String url = baseUrl + "/daemon";
+    String url = url();
     JsonNode body = get(url);
     // Missing fields read as blank rather than as a refusal: blank is this endpoint's own way of
     // saying "no pin", so a shape with one absent says the same thing. A body that is not an object

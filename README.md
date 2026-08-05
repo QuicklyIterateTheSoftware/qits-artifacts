@@ -969,7 +969,7 @@ The sweep computes its own plan inside the request — there is no way to submit
 stored plan is a plan on stale facts, and a plan on stale facts deletes a running image (the OCI
 keep-set's cd pins are fetched inside the same request too). The receipt is the plan report's
 executed twin: identities deleted per type, blobs unlinked with their bytes, what the grace window
-withheld, and the untouchable pool restated.
+withheld, the pins section the plan carries, and the untouchable pool restated.
 
 **The grace window gates identity rows as well as blob unlinks.** A blob may only be swept by
 *losing* its last identity row — so deleting a row while the blob's file is still inside the window
@@ -985,6 +985,42 @@ direction; per the recorded decision, no interim token scheme is invented meanwh
 registries' `405` on client deletes (`/v2` manifests, npm unpublish) is untouched: no client gains
 deletion semantics from any of this.
 
+### Running a sweep (ops)
+
+This platform has never deleted a byte, and the first sweep changes that. The choreography below is
+what that first run does, and it is the **standing procedure** for every sweep after it — the first
+one is not a special ceremony, it is the ordinary one performed while nobody yet trusts the result.
+
+1. **Read the dry-run.** `GET /artifacts/api/gc/plan`. Start at `summary`: executable yes/no, what
+   it would free, and which type is doing the work. Then check three things in the detail, because
+   they are the three ways this goes wrong:
+   - the **pins** section — every source `answered`, and its `keeps` are the shas your deployments
+     are actually running and the daemon rungs qits-ci is actually on;
+   - the **releases are on the kept side** — every type's `kept` list holds its last two releases,
+     naming the release rule rather than an access window;
+   - the **per-type windows** are the ones intended (`configuration[]`), and each type's dead list
+     is content that really has gone cold for that long.
+2. **Back up H2 and save the blob listing.** Copy the database file, and keep the plan's
+   `sweep.blobIds` and `untouchable.blobIds`. The first is what the run is about to unlink; the
+   second is the list to check the CI daemon binary against, and the pair is what makes an unwanted
+   deletion answerable afterwards rather than only regrettable.
+3. **Run one sweep, by hand.** `POST /artifacts/api/gc/sweep`, once. Nothing is scheduled and
+   nothing runs on a timer; the plan it executes is computed inside that request.
+4. **Verify four things, in this order:**
+   - `GET /artifacts/api/store/summary` — the identity still balances
+     (`diskTotal = ociUnion + npmPublished + npmProxyTarballs + mavenPublished + mavenProxy +
+     orphans`), which is the census and the disk agreeing after a delete;
+   - a **qits-cd restart still pulls** — restart one deployed application and watch it come back
+     from its pinned sha, which is the pins section proved against reality;
+   - an **evicted proxy package re-caches** — install something the run evicted and watch it come
+     back from upstream, which is what "a cache holds re-fetchable content" means when it is true;
+   - the receipt's `withheldByGraceWindow` — a young store withholds everything, and that no-op is
+     the mechanism working rather than a failure to investigate.
+
+Anything unexpected in step 1 is a reason to change configuration and re-read, not to run the sweep
+and inspect afterwards: the plan is reviewable without side effects precisely so that argument
+happens before the delete.
+
 ### Two layers, because identities and blobs are different questions
 
 A blob is content-addressed bytes with no meaning of its own, so *"is this blob garbage"* is not a
@@ -996,35 +1032,25 @@ answer is its own.
 - **The blob sweep** is one mechanism with no policy at all. A blob may die only when **no type**
   reaches it any more, because the store dedupes globally across types and repositories.
 
-That split is what makes six independent strategies safe by construction: a strategy never touches
-bytes, so no strategy can free a blob another type still needs.
+That split is what keeps eight types collectable safely: a strategy never touches bytes, so no
+type's rule can free a blob another type still needs.
 
-**Docker's and npm's rules resemble each other by coincidence, not by identity.** Both reduce to
-"releases stay, keep the newest prerelease" today — but what a release is, what "newest" is, and what
-deleting one breaks are different in the two systems. They are two classes with no shared policy
-code, no base class beyond the seam, and no retention-rule framework. A future implementer's rule:
-if a change would let one strategy reuse another's policy, it is the wrong change.
+**One rule per type used to mean one rule *class* per type; it does not any more.** This section
+used to argue that docker's and npm's rules resemble each other by coincidence and must therefore
+never share code — no base class, no retention-rule framework, no reuse. **That rule is superseded
+by the user's decision of 2026-08-05** (`artifacts-gc-plan.md`, "Settlement"), which replaced the
+bespoke strategies with two engines chosen per type in configuration. The design below is that
+decision; the argument above is history, and re-splitting an engine into per-type rules is now the
+change to refuse.
 
-| type | identity that dies | keeps, always | keeps, conditionally | liveness expression | gate |
-|---|---|---|---|---|---|
-| `oci-images` | sha tags; manifests unreachable from kept tags | calver version tags | every sha qits-cd pins (`GET /cd/api/pins`: what serves, what a rollback restores); newest sha per image | manifest closure over kept manifests | dry-run reviewed |
-| `npm-packages` | suffixed `-main.g<sha7>` versions except the newest per package | every unsuffixed version; anything a dist-tag names | newest prerelease per package | tarball blob ids of kept versions | dry-run reviewed |
-| `ci-screenshots` | records of deleted branches; superseded per (branch, userflow) | — | newest per (branch, userflow) | `artifact_record.blob_id` | **stub claims the type** (`CiScreenshotsGcStrategy`): plans nothing at zero rows under a note naming the rule, fails closed once rows exist |
-| `ci-videos` | superseded per userflow beyond a byte budget | — | newest N per userflow, N in bytes | `artifact_record.blob_id` | **stub claims the type** (`CiVideosGcStrategy`): same posture, deliberately its own class — byte-budgeted is not branch-scoped |
-| `npm-proxy` | cached versions and cached packuments unaccessed for `P30D` | — | anything a live pin names by digest | `npm_version.tarball_blob_id` of surviving versions | **live** (`NpmProxyGcStrategy`, the cache engine) |
-| `oci-mirror` | cached tags, and manifests no tag names, unaccessed for `P30D` | — | anything a live pin names by digest | manifest closure over surviving tags and manifests | **live** (`OciMirrorGcStrategy`, the cache engine) |
-| `maven-packages` | **nothing** — releases are never eligible; timestamped snapshot builds accumulate at a recorded price, with the cleanup rule named (keep the newest N per snapshot version) | every deployed file | — | `maven_artifact.blob_id`, sized from the row | claimed, so the report says so |
-| `daemon-binaries` | **nothing yet** — the pin source exists now (`GET /ci/api/daemon`, read by every run), so what is missing is the adapter, not the facts | the pinned version and its predecessor | — | `daemon_binary.blob_id`, sized from the row | **unclaimed**, so the report says "no strategy registered": a strategy shipped before its adapter would be a guess about the one blob class a running service executes |
-| git host (not an `artifact_repository` type) | superseded pack descriptions after a repack | every ref | current packs | `PackCatalog.list` per repo | the DFS migration |
-
-The OCI keep-set is **fetched at plan time and fail-closed**: qits-cd unreachable aborts that type's
-plan with nothing planned, never a plan on stale pins. The seam supports that directly — see below.
+What the old rule was protecting survives it, and is not softened: a type has exactly **one**
+policy (two claimants are a collision the report names and never merges), the per-type **facts**
+stay in that type's own adapter, and no engine may switch on `RepositoryType`.
 
 ### The settlement: two engines, configured per type
 
-The table above is what ships and answers today. What replaces it is the user's settlement of
-2026-08-05 (`artifacts-gc-plan.md`): **two generic strategies, not six bespoke ones, mapped onto the
-types by configuration.**
+The doctrine, settled by the user on 2026-08-05 (`artifacts-gc-plan.md`): **two generic strategies,
+not one bespoke rule per type, mapped onto the types by configuration.**
 
 - **`CacheEvictionStrategy`** — a pull-through cache holds somebody else's re-fetchable content, so
   everything unaccessed past the window goes and a live pin is the only thing that stays regardless.
@@ -1039,10 +1065,12 @@ Both check pins **before** the access rule, because a pin is the one fact no tim
 container running untouched for months still pulls its image sha on restart.
 
 The rules live in the engines; the **facts** live in a `GcTypeAdapter`, one per type, sharing no
-policy code — what an identity is, what a release is, which of two is newer, when each was last
-touched, and how a row is deleted. So the framing's rule survives the settlement rather than being
-overturned by it: the types no longer share a *rule*, they share an *engine*, and each still owns
-everything that makes it different.
+code at all — what an identity is, what a release is, which of two is newer, when each was last
+touched, and how a row is deleted. That is the line the settlement drew instead of the old one:
+types share a *rule* now, chosen for them by name, and each still owns everything that makes it
+different. The eight `*GcStrategy` classes left over are **binders** across that line — a type, an
+adapter, four lines — and a rule appearing in one is the settlement being unpicked one type at a
+time.
 
 ```java
 public interface GcTypeAdapter {
@@ -1069,17 +1097,31 @@ a type nobody configured is a decision nobody took.
 | `maven-packages`, `daemon-binaries` | `own` | `P90D` |
 | `ci-screenshots`, `ci-videos` | `excluded` | — (a window beside a type nobody collects reads as a running rule) |
 
-**The cache engine is live; the own engine is not yet.** `oci-mirror` and `npm-proxy` run
-`CacheEvictionStrategy` over real adapters, which is the **first change to what dies on this
-platform** — both types used to condemn nothing. The four own types still answer through their own
-per-type strategies until their adapters land, and that split is asserted rather than assumed:
-`GcTypeConfigTest` pins the two caches' new dead sets and the other six types' sets as
-identity-for-identity what they were.
+**Both engines are live over every configured type**, which is the first change to what dies on
+this platform: six types used to condemn nothing between them. What each one condemns, in one line
+each — the sections below carry the reasoning:
+
+| type | engine, window | identity that dies | what keeps it | liveness expression |
+|---|---|---|---|---|
+| `oci-images` | `own`, `P30D` | a sha tag, or a manifest no tag and no tagged manifest reaches | the last 2 calver releases; a sha qits-cd pins; the newest sha per image; anything pulled inside the window | manifest closure over surviving tags and manifests |
+| `npm-packages` | `own`, `P30D` | a published version | the last 2 releases by semver; anything a dist-tag names; anything installed inside the window | `npm_version.tarball_blob_id` of survivors |
+| `maven-packages` | `own`, `P90D` | a **coordinate** — one version's whole file set | the last 2 release versions; the newest deployable set of every snapshot line; anything resolved inside the window | `maven_artifact.blob_id`, sized from the row |
+| `daemon-binaries` | `own`, `P90D` | a `daemon_binary` row | the last 2 versions; both rungs qits-ci names; a pinned digest's bytes; anything downloaded inside the window | `daemon_binary.blob_id`, sized from the row |
+| `oci-mirror` | `cache`, `P30D` | a cached tag, or a manifest no tag names | anything pulled inside the window; anything a live pin names by digest | manifest closure over survivors |
+| `npm-proxy` | `cache`, `P30D` | a cached version, or a cached packument | anything installed inside the window; anything a live pin names by digest | `npm_version.tarball_blob_id` of survivors |
+| `ci-screenshots`, `ci-videos` | `excluded` | **nothing** — no engine is configured, so nothing of them is ever deleted | everything | `artifact_record.blob_id`, reported live |
+| git host (not an `artifact_repository` type) | none | superseded pack descriptions after a repack | every ref, current packs | `PackCatalog.list` per repo — blocked on the DFS migration |
+
+`GcTypeConfigTest` is the guard over that table and is edited **deliberately, once per workstream**:
+a type whose dead set moves has its new set written out there, and every other type stays
+identity-for-identity what it was.
 
 The report carries the **configuration echo** beside the outcomes: `configuration[]` in
 `GET /gc/plan`, one line per type with the configured strategy, the window and the effective rule as
 a sentence. It is the half of a plan the outcomes cannot show — "nothing died" reads identically
-whether the rule is right or the window is a year.
+whether the rule is right or the window is a year. The two `excluded` types say so **twice**: in
+that echo, and on their own entry in `types[]`, because `dead: []` beside a claimed strategy would
+otherwise read as a rule that ran and found nothing.
 
 ### Live pins, and the whole-run abort
 
@@ -1424,9 +1466,42 @@ answer to them is an ops action, once, by hand.
 
 ```jsonc
 {
+  "summary": {                          // first, because it is what a human reads first
+    "executable": true,
+    "headline": "a sweep run now would execute this plan: 37 identities would be deleted and 21 blob files unlinked, reclaiming 402.7 MiB, with 3 blobs (12.0 KiB) withheld by the P7D grace window.",
+    "identitiesCondemned": 37,
+    "blobsSweepable": 21,
+    "reclaimableBytes": 422313984,
+    "reclaimable": "402.7 MiB",         // the same figure, so nobody counts digits
+    "withheldByGraceWindow": 3,
+    "types": [                          // one line per type: configured engine, window, outcome, note
+      "ci-screenshots (excluded): excluded by configuration, so nothing of it is ever deleted — a decision, not a gap — stub: the golden-diff loop has never produced a screenshot.",
+      "ci-videos (excluded): excluded by configuration, so nothing of it is ever deleted — a decision, not a gap — stub: the golden-diff loop has never produced a video.",
+      "oci-images (own, P30D): 12 identities condemned, 28 kept, 9 blobs freed, 384.0 MiB reclaimable",
+      "npm-packages (own, P30D): 1 identities condemned, 4 kept, 1 blobs freed, 17.5 KiB reclaimable",
+      "npm-proxy (cache, P30D): 2 identities condemned, 2 kept, 1 blobs freed, 20.0 KiB reclaimable — cached packuments are H2 CLOBs, not files: 660287820 characters are cached as this report was produced.",
+      "oci-mirror (cache, P30D): 2 identities condemned, 0 kept, 9 blobs freed, 18.7 MiB reclaimable",
+      "maven-packages (own, P90D): 1 identities condemned, 6 kept, 2 blobs freed, 40.3 KiB reclaimable",
+      "daemon-binaries (own, P90D): 1 identities condemned, 2 kept, 1 blobs freed, 41.1 MiB reclaimable"
+    ]
+  },
   "generatedAt": "2026-08-01T12:00:00Z",
   "dryRun": true,                       // always, on this route; the sweep's receipt is the twin with false
   "graceWindow": "P7D",
+  "executable": true,
+  "pinFailures": [],
+  "pins": [                             // how this run read its pins; the sweep receipt carries the same
+    { "source": "qits-cd", "url": "http://qits-cd:8080/cd/api/pins",
+      "answered": true, "readAt": "2026-08-01T12:00:00Z", "tookMillis": 34,
+      "outcome": "9 application pins over 14 image shas — what is serving, and what a rollback would restore",
+      "pinCount": 9,
+      "keeps": ["qits-artifacts:3ff84c05…", "qits-ci:ab854a19…"] },
+    { "source": "qits-ci", "url": "http://qits-ci:8080/ci/api/daemon",
+      "answered": true, "readAt": "2026-08-01T12:00:00Z", "tookMillis": 11,
+      "outcome": "daemon qits-ci-daemon, 2 ladder rungs pinned (source: adopted)",
+      "pinCount": 2,
+      "keeps": ["blob 9f2c…", "qits-ci-daemon@2026.802.40", "qits-ci-daemon@9f2c…"] }
+  ],
   "types": [                            // all eight, always — including the ones nobody collects
     { "type": "oci-images", "strategy": "OciImageGcStrategy",
       "note": null, "error": null,
@@ -1472,7 +1547,11 @@ answer to them is an ops action, once, by hand.
                  "rule": "cached content unaccessed for longer than P30D" }],
       "kept": [{ "repository": "npmjs", "identity": "chalk@5.3.0",
                  "rule": "accessed inside the P30D window" }],
-      "blobsReleased": 1, "blobsSweepable": 1, "reclaimableBytes": 20480 }
+      "blobsReleased": 1, "blobsSweepable": 1, "reclaimableBytes": 20480 },
+    { "type": "ci-screenshots", "strategy": "CiScreenshotsGcStrategy",
+      "note": "excluded by configuration: no engine is configured for this type, so nothing of it is ever deleted — a decision, not a gap. stub: the golden-diff loop has never produced a screenshot. The intended rule is branch-scoped …",
+      "error": null, "dead": [], "kept": [],
+      "blobsReleased": 0, "blobsSweepable": 0, "reclaimableBytes": 0 }
   ],
   "sweep":       { "blobCount": 0, "reclaimableBytes": 0,
                    "withheldByGraceWindow": 0, "withheldBytes": 0, "blobIds": [] },
@@ -1480,12 +1559,24 @@ answer to them is an ops action, once, by hand.
 }
 ```
 
-Three details a reader trips over otherwise:
+Details a reader trips over otherwise:
 
-- **A type with no strategy says so.** "Nothing to collect" and "nobody is collecting" are different
-  answers, and only one of them is fine. All eight types are claimed today, `daemon-binaries` last;
-  the line still has to be right, because it is what a **new** `RepositoryType` reads as on the day
-  it lands, and `GcPlanTest` proves it over an empty registration rather than leaving it untested.
+- **The summary is derived, never a second opinion.** Every figure in it comes from the report below
+  it (`GcSummary`), so it can only be wrong about arithmetic. It leads with the refusal when a plan
+  is not executable, because a plan that cannot run must never be skimmed as a plan that would free
+  nothing — the figures under a refusal are what the types that could still plan would do.
+- **The pins section is the provenance of every keep.** The keep-set is partly another service's
+  answer, so the report shows the answer as well as its consequences: the url called, whether it
+  answered, how long it took, and the keep-identities it produced. Checking that the pinned shas are
+  the shas the deployments are running is the first thing a review of this report does. The sweep
+  receipt carries the same section, an aborted run included — a receipt whose whole story is one
+  unreachable source has to show that source.
+- **A type with no strategy says so, and an excluded type says so twice.** "Nothing to collect",
+  "nobody is collecting" and "nobody is *meant* to be collecting" are three answers, and the report
+  distinguishes them: an unclaimed type carries "no strategy registered" (what a **new**
+  `RepositoryType` reads as on the day it lands, proved by `GcPlanTest` over an empty registration),
+  while `ci-screenshots` and `ci-videos` carry the excluded line on their own entry as well as in
+  the configuration echo.
 - **Every type on an engine refuses when the pins are missing** — all six of them. A run with
   qits-cd or qits-ci unreachable reports them as `live pins unavailable` rather than planning them
   against "nothing is pinned". Two of them are pinned by *coordinate* (an image sha, a daemon

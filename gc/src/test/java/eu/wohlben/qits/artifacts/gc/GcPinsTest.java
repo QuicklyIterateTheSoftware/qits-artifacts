@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.artifacts.entity.NpmVersion;
 import eu.wohlben.qits.artifacts.entity.RepositoryType;
+import eu.wohlben.qits.artifacts.gc.dto.GcPinSource;
 import eu.wohlben.qits.artifacts.gc.dto.GcPlanReport;
 import eu.wohlben.qits.artifacts.gc.dto.GcSweepReport;
 import eu.wohlben.qits.artifacts.gc.dto.GcTypePlan;
@@ -18,6 +19,7 @@ import jakarta.inject.Inject;
 import java.io.IOException;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -41,6 +43,8 @@ class GcPinsTest extends GcFixture {
   @Inject GcSweepExecutor executor;
   @Inject GcPinSources pinSources;
 
+  private static final String DIGEST =
+      "3ff84c05e2a01c3f2b9d1e8a7c6b5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c";
   private static final String PKG = "@qits/pins-case";
   private static final String RELEASE = "2026.801.85149";
   private static final String SUPERSEDED = RELEASE + "-main.g1111111";
@@ -54,6 +58,76 @@ class GcPinsTest extends GcFixture {
     assertEquals(2, pins.failures().size(), "both sources are asked, so both outages are named");
     assertTrue(pins.whyIncomplete().contains("qits-cd"));
     assertTrue(pins.whyIncomplete().contains("qits-ci"));
+
+    // And the provenance says which url produced which outage, so a fix starts from the report
+    // rather than from a grep for the config key.
+    assertEquals(2, pins.sources().size());
+    GcPinSource cd = source(pins, "qits-cd");
+    assertFalse(cd.answered());
+    assertTrue(cd.url().endsWith("/cd/api/pins"), cd.url());
+    assertTrue(cd.outcome().contains("qits-cd"), cd.outcome());
+    assertEquals(0, cd.pinCount());
+    assertEquals(List.of(), cd.keeps());
+    assertTrue(source(pins, "qits-ci").url().endsWith("/ci/api/daemon"));
+  }
+
+  @Test
+  void aSourceThatAnsweredReportsItsUrlItsCountsAndTheKeepsItProduced() {
+    // The pins section a healthy run carries, which is the half of a keep-set a reviewer can check
+    // against their own deployments: not "3 pins" but which image at which sha, and — for the
+    // daemon — the blob a digest rung protects beside the row it names. Built by hand because
+    // neither qits-cd nor qits-ci exists in this repository.
+    GcPinSources sources = new GcPinSources();
+    sources.cd =
+        () ->
+            List.of(
+                new CdDeploymentPins.ApplicationPin("qits-ci", List.of("aaaa", "bbbb")),
+                new CdDeploymentPins.ApplicationPin("qits-cd", List.of("cccc")));
+    sources.ci = () -> new CiDaemonPins.DaemonPin("qits-ci-daemon", DIGEST, "2026.802.40", "adopted");
+
+    GcPins pins = sources.fetch();
+
+    assertTrue(pins.complete());
+    GcPinSource cd = source(pins, "qits-cd");
+    assertTrue(cd.answered());
+    assertEquals(2, cd.pinCount(), "applications, which is what cd answers with");
+    assertEquals(List.of("qits-cd:cccc", "qits-ci:aaaa", "qits-ci:bbbb"), cd.keeps());
+    assertTrue(cd.outcome().contains("3 image shas"), cd.outcome());
+    assertTrue(cd.tookMillis() >= 0);
+
+    GcPinSource ci = source(pins, "qits-ci");
+    assertEquals(2, ci.pinCount(), "both rungs of the ladder pin");
+    assertEquals(
+        List.of("blob " + DIGEST, "qits-ci-daemon@2026.802.40", "qits-ci-daemon@" + DIGEST),
+        ci.keeps(),
+        "a 64-hex rung pins the bytes as well as the row, and the section shows both");
+    assertTrue(ci.outcome().contains("adopted"), ci.outcome());
+  }
+
+  @Test
+  void aBlankDaemonVersionIsReportedAsAnAnswerRatherThanAsAnOutage() {
+    // The shipped default on a platform that has published no daemon. It must read as a source that
+    // answered with nothing pinned, because a reviewer who reads it as an outage goes looking for a
+    // broken qits-ci that is working perfectly.
+    GcPinSources sources = new GcPinSources();
+    sources.cd = List::of;
+    sources.ci = () -> new CiDaemonPins.DaemonPin("", "", "", "none");
+
+    GcPins pins = sources.fetch();
+
+    assertTrue(pins.complete());
+    GcPinSource ci = source(pins, "qits-ci");
+    assertTrue(ci.answered());
+    assertEquals(0, ci.pinCount());
+    assertEquals(List.of(), ci.keeps());
+    assertTrue(ci.outcome().contains("an answer, not an absence"), ci.outcome());
+  }
+
+  private static GcPinSource source(GcPins pins, String name) {
+    return pins.sources().stream()
+        .filter(source -> source.source().equals(name))
+        .findFirst()
+        .orElseThrow();
   }
 
   @Test
@@ -83,6 +157,11 @@ class GcPinsTest extends GcFixture {
     assertTrue(
         report.untouchable().reason().contains("not computed"),
         "no census was taken, so claiming an empty row-less pool would be claiming something");
+    assertEquals(
+        2,
+        report.pins().size(),
+        "a receipt of a run that never started still shows what it tried to read");
+    assertFalse(report.pins().get(0).answered());
 
     npmVersions.getEntityManager().clear();
     assertTrue(
@@ -103,6 +182,7 @@ class GcPinsTest extends GcFixture {
 
     assertFalse(report.executable());
     assertEquals(2, report.pinFailures().size());
+    assertEquals(2, report.pins().size(), "and the same two sources are named in the pins section");
     GcTypePlan oci = typePlan(report, RepositoryType.OCI_IMAGES);
     assertNotNull(oci.error());
     assertTrue(oci.error().contains("live pins unavailable"));

@@ -16,12 +16,15 @@ import java.util.Set;
  * <b>never</b> decides that a blob may be unlinked. Which blobs lost their last reference across all
  * types is {@link BlobSweep}'s answer, and only its answer.
  *
- * <p><b>One strategy per type, sharing no policy code.</b> Docker's and npm's rules look alike today
- * — releases stay, keep the newest prerelease — and that is a coincidence, not an identity: what a
- * release is, what "newest" is, and what deleting one breaks are different in the two systems. Each
- * implementation owns its rule end to end. This interface is the only thing they share, there is no
- * base class, and a retention-rule framework growing between them would be the mistake this seam is
- * shaped to prevent. Registering one is a CDI bean of this type and nothing else.
+ * <p><b>One strategy per type, and the rule inside it is an engine's.</b> This used to read "sharing
+ * no policy code", on the argument that docker's and npm's rules only look alike by coincidence.
+ * The user's settlement of 2026-08-05 ({@code artifacts-gc-plan.md}) overturned that: there are two
+ * rules — {@link CacheEvictionStrategy} and {@link OwnArtifactsStrategy} — and configuration says
+ * which type runs which. So an implementation of this interface is a <b>binder</b>: it names its
+ * type and its {@link GcTypeAdapter}, and carries no rule of its own. What survives the settlement
+ * is the count: exactly one strategy may claim a type, and two claimants are a collision the
+ * planner reports rather than a merge it performs. Registering one is a CDI bean of this type and
+ * nothing else.
  *
  * <p><b>Failing is a supported answer, and it is fail-closed.</b> A strategy that cannot establish
  * its keep-set must throw rather than plan without it. The planner catches it, reports the type as

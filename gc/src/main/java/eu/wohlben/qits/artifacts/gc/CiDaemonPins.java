@@ -46,4 +46,12 @@ public interface CiDaemonPins {
    *     blank version, which is an answer.
    */
   DaemonPin daemonPin();
+
+  /**
+   * Where this implementation reads it from, for the report's pins section. Default for the reason
+   * {@link CdDeploymentPins#url()} gives: provenance, not policy.
+   */
+  default String url() {
+    return "(not reported by " + getClass().getSimpleName() + ")";
+  }
 }

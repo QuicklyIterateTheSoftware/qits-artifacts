@@ -1,5 +1,6 @@
 package eu.wohlben.qits.artifacts.gc;
 
+import eu.wohlben.qits.artifacts.gc.dto.GcPinSource;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -31,13 +32,18 @@ import java.util.regex.Pattern;
  * @param blobs digests pinned directly: a daemon version that is 64 hex characters names the blob it
  *     is fetched by as well as any row keyed with it
  * @param failures one sentence per pin source that could not answer; empty is a complete aggregate
+ * @param sources how this aggregate was read — one entry per source, with its url, its outcome, how
+ *     long it took and the keep-identities it produced. Carried on the aggregate rather than
+ *     assembled at the report, so a plan and a sweep receipt state the same provenance for the same
+ *     run without either of them re-deriving it.
  */
 public record GcPins(
     Map<String, Set<String>> deployments,
     String daemonName,
     Set<String> daemonVersions,
     Set<String> blobs,
-    List<String> failures) {
+    List<String> failures,
+    List<GcPinSource> sources) {
 
   /** The rule an image sha is kept under when a deployment holds it. */
   public static final String BY_CD = "pinned by qits-cd deployment";
@@ -53,6 +59,23 @@ public record GcPins(
     daemonVersions = Set.copyOf(daemonVersions);
     blobs = Set.copyOf(blobs);
     failures = List.copyOf(failures);
+    sources = List.copyOf(sources);
+  }
+
+  /**
+   * The keep-set alone, with no provenance — what a case that hands pins in directly is stating.
+   *
+   * <p>{@link #sources()} is how a <b>run</b> read its pins, so a value constructed in a test has
+   * none to report and must not invent one: an empty list reads as "this aggregate was not fetched",
+   * which is exactly true of one written by hand.
+   */
+  public GcPins(
+      Map<String, Set<String>> deployments,
+      String daemonName,
+      Set<String> daemonVersions,
+      Set<String> blobs,
+      List<String> failures) {
+    this(deployments, daemonName, daemonVersions, blobs, failures, List.of());
   }
 
   /** Nothing pinned and nothing broken — the shape a test states explicitly. */

@@ -24,7 +24,42 @@ final class GcRules {
       "excluded: no engine is configured for this type, so nothing of it is ever deleted. A"
           + " decision, not a gap — the rule it will eventually get is named in its strategy class.";
 
+  /** The wire spelling of {@link GcPolicy#EXCLUDED}, as the echo and the summary both write it. */
+  static final String EXCLUDED_STRATEGY = "excluded";
+
+  /**
+   * What an excluded type's own report line leads with, ahead of whatever its strategy says.
+   *
+   * <p>The configuration echo already carries {@link #EXCLUDED}, and that is not enough: a reviewer
+   * reads a type's own entry to find out what happened to it, and {@code dead: []} beside a claimed
+   * strategy reads as "the rule ran and found nothing". Those are different facts, and only one of
+   * them is a decision. Stated on the line where the absence is, which is the honesty-about-absence
+   * rule applied to the settlement's two excluded types.
+   */
+  static final String EXCLUDED_NOTE =
+      "excluded by configuration: no engine is configured for this type, so nothing of it is ever"
+          + " deleted — a decision, not a gap. ";
+
   private GcRules() {}
+
+  /**
+   * A type's report note, with the excluded line in front of it when it is one of the excluded
+   * types. Used by the plan and by the sweep receipt, so both say the same thing about absence.
+   */
+  static String note(GcTypeConfig config, RepositoryType type, String strategyNote) {
+    GcPolicy policy;
+    try {
+      policy = config.of(type).strategy();
+    } catch (RuntimeException unconfigured) {
+      // Unconfigured is a louder fault than excluded and the echo already reports it in full; the
+      // type's own note is left as its strategy wrote it rather than overwritten with a guess.
+      return strategyNote;
+    }
+    if (policy != GcPolicy.EXCLUDED) {
+      return strategyNote;
+    }
+    return strategyNote == null ? EXCLUDED_NOTE.trim() : EXCLUDED_NOTE + strategyNote;
+  }
 
   /** One line per repository type, in the enum's own order. */
   static List<GcTypeConfiguration> echo(GcTypeConfig config) {
@@ -43,7 +78,7 @@ final class GcRules {
       return new GcTypeConfiguration(type, null, null, unconfigured.getMessage());
     }
     if (policy == GcPolicy.EXCLUDED) {
-      return new GcTypeConfiguration(type, name(policy), null, EXCLUDED);
+      return new GcTypeConfiguration(type, EXCLUDED_STRATEGY, null, EXCLUDED);
     }
     Duration window;
     try {

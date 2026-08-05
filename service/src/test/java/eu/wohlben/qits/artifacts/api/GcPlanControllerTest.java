@@ -152,6 +152,35 @@ class GcPlanControllerTest {
   }
 
   @Test
+  void theReportLeadsWithASummaryAndSaysHowItReadItsPins() {
+    // The two halves a review starts with. The summary is the paragraph a human reads before any
+    // of the detail means anything — and here it has to lead with the refusal, because a plan that
+    // cannot run must never be skimmed as a plan that would free nothing. The pins section is the
+    // provenance under every keep the report claims: which service, at which url, answering what.
+    given()
+        .when()
+        .get("/artifacts/api/gc/plan")
+        .then()
+        .statusCode(200)
+        .body("summary.executable", is(false))
+        .body("summary.headline", org.hamcrest.Matchers.startsWith("NOT EXECUTABLE"))
+        .body("summary.headline", org.hamcrest.Matchers.containsString("qits-cd"))
+        .body("summary.reclaimableBytes", is(0))
+        .body("summary.reclaimable", is("0 B"))
+        .body("summary.identitiesCondemned", is(0))
+        .body("summary.types", hasSize(8))
+        .body(
+            "summary.types.find { it.startsWith('ci-videos') }",
+            org.hamcrest.Matchers.containsString("excluded by configuration"))
+        .body("pins", hasSize(2))
+        .body("pins.source", org.hamcrest.Matchers.containsInAnyOrder("qits-cd", "qits-ci"))
+        .body("pins.find { it.source == 'qits-cd' }.url", is("http://localhost:1/cd/api/pins"))
+        .body("pins.find { it.source == 'qits-cd' }.answered", is(false))
+        .body("pins.find { it.source == 'qits-ci' }.url", is("http://localhost:1/ci/api/daemon"))
+        .body("pins.find { it.source == 'qits-ci' }.keeps", hasSize(0));
+  }
+
+  @Test
   void anUnreachableQitsCdAbortsTheOciPlanRatherThanCondemningEveryTag() {
     given()
         .when()

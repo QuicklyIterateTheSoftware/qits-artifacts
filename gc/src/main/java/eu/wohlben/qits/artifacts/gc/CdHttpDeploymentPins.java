@@ -62,8 +62,13 @@ public class CdHttpDeploymentPins implements CdDeploymentPins {
   @Inject ObjectMapper objectMapper;
 
   @Override
+  public String url() {
+    return baseUrl + "/pins";
+  }
+
+  @Override
   public List<ApplicationPin> pins() {
-    String url = baseUrl + "/pins";
+    String url = url();
     JsonNode body = get(url);
     JsonNode pins = body.get("pins");
     if (pins == null || !pins.isArray()) {

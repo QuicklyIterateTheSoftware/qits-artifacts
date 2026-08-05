@@ -45,4 +45,16 @@ public interface CdDeploymentPins {
    *     because an empty list reads as "nothing is deployed" and condemns every tag
    */
   List<ApplicationPin> pins();
+
+  /**
+   * Where this implementation reads them from, for the report's pins section.
+   *
+   * <p>A reviewer checking a keep-set against their own deployments needs the url that produced it:
+   * a run pointed at the wrong qits-cd answers plausibly and pins the wrong shas, and that is not
+   * visible in a list of shas. Default because it is provenance rather than policy — a stub in a
+   * suite has nothing useful to say here and must not be made to invent something.
+   */
+  default String url() {
+    return "(not reported by " + getClass().getSimpleName() + ")";
+  }
 }

@@ -50,6 +50,7 @@ public class GcSweepExecutor {
   @Inject BlobReclaim blobs;
   @Inject Instance<GcStrategy> strategies;
   @Inject GcPinSources pinSources;
+  @Inject GcTypeConfig config;
 
   /**
    * One full run: every live pin, a fresh census, every registered strategy, the unlink loop, the
@@ -89,6 +90,7 @@ public class GcSweepExecutor {
         false,
         GcPlanner.iso(sweep.graceWindow()),
         why,
+        pins.sources(),
         types,
         new GcSweepOutcome(0, 0L, 0, 0L, 0, 0, List.of()),
         new GcUntouchablePool(
@@ -159,7 +161,7 @@ public class GcSweepExecutor {
             new GcTypeSweepResult(
                 type,
                 name,
-                strategy.note(),
+                GcRules.note(config, type, strategy.note()),
                 applied.errors().isEmpty() ? null : String.join("; ", applied.errors()),
                 applied.deleted(),
                 applied.withheldByGraceWindow()));
@@ -188,6 +190,7 @@ public class GcSweepExecutor {
         false,
         GcPlanner.iso(window),
         null,
+        pins.sources(),
         types,
         outcome,
         // The pool as it stood before this run: a version row deleted moments ago leaves its

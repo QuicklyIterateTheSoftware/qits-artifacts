@@ -20,6 +20,9 @@ import java.util.List;
  *     not answer — qits-cd's deployments, qits-ci's daemon ladder — ends the <b>whole</b> run before
  *     the census, because a keep-set assembled without a live pin is a keep-set assembled from
  *     "nothing is pinned"
+ * @param pins how this run read its live pins — the same section the dry-run carries, and on a
+ *     receipt it is the record of what the keep-set was built from at the moment rows were deleted.
+ *     An aborted run still carries it, because the failed source is the whole story of that receipt.
  * @param types one entry per repository type, always all of them, same honesty rule as the plan
  * @param sweep the blob unlinks: what was freed, and what was withheld
  * @param untouchable the row-less pool as it stood before this run — restated on every receipt
@@ -30,6 +33,7 @@ public record GcSweepReport(
     boolean dryRun,
     String graceWindow,
     String aborted,
+    List<GcPinSource> pins,
     List<GcTypeSweepResult> types,
     GcSweepOutcome sweep,
     GcUntouchablePool untouchable) {}

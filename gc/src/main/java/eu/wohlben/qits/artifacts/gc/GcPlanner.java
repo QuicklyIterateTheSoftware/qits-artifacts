@@ -4,6 +4,7 @@ import eu.wohlben.qits.artifacts.control.LiveBlobCensus;
 import eu.wohlben.qits.artifacts.entity.RepositoryType;
 import eu.wohlben.qits.artifacts.gc.dto.GcPlanReport;
 import eu.wohlben.qits.artifacts.gc.dto.GcSweepPlan;
+import eu.wohlben.qits.artifacts.gc.dto.GcTypeConfiguration;
 import eu.wohlben.qits.artifacts.gc.dto.GcTypePlan;
 import io.quarkus.arc.ClientProxy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -106,7 +107,7 @@ public class GcPlanner {
             new GcTypePlan(
                 type,
                 name,
-                strategy.note(),
+                GcRules.note(config, type, strategy.note()),
                 null,
                 plan.dead(),
                 plan.kept(),
@@ -121,20 +122,28 @@ public class GcPlanner {
       }
     }
 
+    // The configuration echo, beside the outcomes rather than instead of them: what each type is
+    // configured to do today, in the sentence the engine that will do it writes for itself.
+    List<GcTypeConfiguration> configuration = GcRules.echo(config);
+    GcSweepPlan sweepPlan = sweep.plan(census, plans);
+    String graceWindow = iso(sweep.graceWindow());
     return new GcPlanReport(
+        // First in the record, so it is first on the wire and first on the page: a reviewer reads
+        // the summary, then goes looking in the detail for the line that surprised them.
+        GcSummary.of(configuration, types, sweepPlan, pins, graceWindow),
         census.takenAt(),
         true,
-        iso(sweep.graceWindow()),
+        graceWindow,
         // Executable only when every pin source answered: a plan whose keep-set is missing a live
         // pin is a plan nobody may execute, and saying so on the report is how a reader knows the
         // zeros beside a pin-dependent type are a refusal rather than a finding.
         pins.complete(),
         pins.failures(),
-        // The configuration echo, beside the outcomes rather than instead of them: what each type is
-        // configured to do today, in the sentence the engine that will do it writes for itself.
-        GcRules.echo(config),
+        // How the pins were read, which is the provenance of every keep the report claims below.
+        pins.sources(),
+        configuration,
         types,
-        sweep.plan(census, plans),
+        sweepPlan,
         sweep.untouchable(census));
   }
 

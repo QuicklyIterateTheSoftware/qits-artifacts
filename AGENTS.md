@@ -331,12 +331,17 @@ collection" section is the contract; these are the rules that get "helpfully" re
   last identity row to a strategy's own deletion, so one that never had a row cannot be reached. This
   is not an allowlist and must not become one: 124 MiB of this store has no row, and one of those
   blobs is the CI daemon binary every build downloads by digest.
-- **No shared policy — but "shared engine" is now a decision, not a violation.** `GcStrategy` is
-  still the only thing the bespoke strategies share: docker's and npm's rules look alike by
-  coincidence, and a change that lets one reuse the other's policy is the wrong change. What the
-  settlement changed is that two types may share a *rule the user picked for both by name*, which is
-  what `CacheGcStrategy` binds — wiring only, no rule in it. Two beans claiming one type is still a
-  collision, reported and never merged.
+- **Two engines, and this supersedes the "no shared policy" rule.** Settled by user decision
+  2026-08-05 (`artifacts-gc-plan.md`, "Settlement"). The rules live in `CacheEvictionStrategy` (a
+  cache holds re-fetchable content, so everything unaccessed past the window goes) and
+  `OwnArtifactsStrategy` (own artifacts keep the last 2 released versions per identity group, the
+  rest ages out), mapped onto types by configuration. **The superseded rule was "one bespoke
+  strategy per type, no shared policy code, no retention-rule framework"** — it is history, and
+  re-splitting an engine back into per-type rules is now the wrong change, in the same words the
+  old rule used against merging them. Two things it said still hold and are not softened: a type
+  has exactly **one** policy (two beans claiming it is a collision, reported and never merged), and
+  the per-type *facts* stay in that type's own `GcTypeAdapter` — no engine may switch on
+  `RepositoryType`, no adapter may carry a window or a keep-count.
 - **The grace window gates identity rows, not only blob unlinks.** A blob can only be swept by
   *losing* its last row, so a row deleted while the blob's file is inside the window would strand
   the blob — row-less, untouchable, never reclaimed. `GcStrategy.apply` therefore withholds an
@@ -360,6 +365,17 @@ collection" section is the contract; these are the rules that get "helpfully" re
   `qits.artifacts.gc.oci.cd-*`, and they live in the `gc` jar's own
   `META-INF/microprofile-config.properties`. A deployment carrying the old spelling silently loses
   the value.
+- **The dry-run report is the review surface, and four of its parts are load-bearing.** `summary`
+  is first in `GcPlanReport` because it is what a human reads first — executable yes/no, the
+  reclaim in bytes and in units, one line per type — and it is **derived** by `GcSummary` from the
+  rest of the report, never re-computed: a summary that decided for itself what would die would be
+  a second policy. `pins` (`GcPinSource`, built in `GcPinSources` and carried on `GcPins`) gives
+  each source its url, outcome, duration, pin count and the keep-identities it produced, and the
+  **sweep receipt carries the same section**, an aborted one included. Excluded types say
+  `GcRules.EXCLUDED_NOTE` on their own line as well as in the configuration echo — `dead: []`
+  beside a claimed strategy otherwise reads as a rule that ran and found nothing. And the npm-proxy
+  H2 line rides in that type's `note()`, so it reaches both the type entry and the summary line
+  where the `0` it explains is printed.
 - **Both engines are live over every configured type.** The settlement (`artifacts-gc-plan.md`,
   2026-08-05) replaced the bespoke strategies with `CacheEvictionStrategy` + `OwnArtifactsStrategy`,
   mapped onto types by `qits.artifacts.gc.type.<wire-name>.strategy|window` (`GcTypeConfig`).
@@ -431,18 +447,17 @@ collection" section is the contract; these are the rules that get "helpfully" re
   `qits.artifacts.gc`: a mapping rooted at the wider prefix would claim `blob-grace-period` and the
   pin urls, which other classes read.
 
-Eight strategies exist, one per type. Six are engine beans over an adapter — `OciMirrorGcStrategy`
-and `NpmProxyGcStrategy` on the cache engine, `OciImageGcStrategy`, `DaemonBinariesGcStrategy`,
-`NpmPackagesGcStrategy` and `MavenPackagesGcStrategy` on the own engine, each with its
-`*GcAdapter`. Then the two CI stubs
-(`CiScreenshotsGcStrategy`, `CiVideosGcStrategy`) — deliberately two classes, because their
-intended rules already diverge in kind (branch-scoped against byte-budgeted) and sharing a base
-would be the exact unification the plan forbids, demonstrated at the cheapest place. The stubs plan
-`nothingDies` at zero rows under a `note()` naming the intended rule, and **fail closed the day
-rows exist** — a plan over rows with no implemented rule is a guess. The maven strategy is the
-mirror's shape rather than the stubs': `maven-packages` has rows from its first hour, so it claims
-its type with a "nothing dies" plan under a note naming the snapshot cleanup rule, and never fails
-closed. A few things the strategies share cost time otherwise.
+Eight strategy classes exist, one per type, and **six of them are thin binders rather than rules** —
+`OciMirrorGcStrategy` and `NpmProxyGcStrategy` on the cache engine, `OciImageGcStrategy`,
+`DaemonBinariesGcStrategy`, `NpmPackagesGcStrategy` and `MavenPackagesGcStrategy` on the own
+engine, each naming its `*GcAdapter` and nothing else. A class that is four lines long is doing its
+job; a rule appearing in one is the settlement being unpicked one type at a time. The two CI stubs
+(`CiScreenshotsGcStrategy`, `CiVideosGcStrategy`) are the exception and are deliberately two
+classes, because their intended rules diverge in kind (branch-scoped against byte-budgeted) and one
+shared base for two unimplemented rules would decide their shape before either was designed. Both
+types are `excluded` in configuration, the stubs plan `nothingDies` at zero rows under a `note()`
+naming the intended rule, and they **fail closed the day rows exist** — a plan over rows with no
+implemented rule is a guess. A few things the strategies share cost time otherwise.
 
 - **All of them are `@Singleton`, not `@ApplicationScoped`, and the reason is the report.** `GcPlanner`
   names a strategy by its class's simple name, and a normal-scoped bean would answer that through its

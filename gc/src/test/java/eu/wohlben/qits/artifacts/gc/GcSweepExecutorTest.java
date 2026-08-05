@@ -254,8 +254,11 @@ class GcSweepExecutorTest extends GcFixture {
         executor.execute(census.take(), List.of(screenshotsStub(), videosStub()), GcPins.none());
     GcTypeSweepResult shots = typeResult(quiet, RepositoryType.CI_SCREENSHOTS);
     GcTypeSweepResult clips = typeResult(quiet, RepositoryType.CI_VIDEOS);
-    assertEquals(CiScreenshotsGcStrategy.NOTE, shots.note());
-    assertEquals(CiVideosGcStrategy.NOTE, clips.note());
+    // The receipt says what the plan says about absence: excluded by configuration, then the stub's
+    // own caption. A receipt that only carried the caption would leave an operator reading "nothing
+    // was deleted" with no way to tell a decision from a gap.
+    assertEquals(GcRules.EXCLUDED_NOTE + CiScreenshotsGcStrategy.NOTE, shots.note());
+    assertEquals(GcRules.EXCLUDED_NOTE + CiVideosGcStrategy.NOTE, clips.note());
     assertNull(shots.error());
     assertNull(clips.error());
     assertEquals(List.of(), shots.deleted());

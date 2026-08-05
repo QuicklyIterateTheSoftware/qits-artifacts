@@ -10,6 +10,7 @@ import eu.wohlben.qits.artifacts.control.LiveBlobCensus;
 import eu.wohlben.qits.artifacts.entity.RepositoryType;
 import eu.wohlben.qits.artifacts.gc.dto.GcIdentity;
 import eu.wohlben.qits.artifacts.gc.dto.GcPlanReport;
+import eu.wohlben.qits.artifacts.gc.dto.GcPlanSummary;
 import eu.wohlben.qits.artifacts.gc.dto.GcTypePlan;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -102,14 +103,17 @@ class GcPlanTest extends GcFixture {
         }
         case CI_SCREENSHOTS -> {
           assertEquals("CiScreenshotsGcStrategy", type.strategy());
-          assertEquals(CiScreenshotsGcStrategy.NOTE, type.note());
+          // Two facts, and the type's own line has to carry both: the configuration excludes it,
+          // and the stub names the rule it will eventually get. Without the first, `dead: []` beside
+          // a claimed strategy reads as a rule that ran and found nothing.
+          assertEquals(GcRules.EXCLUDED_NOTE + CiScreenshotsGcStrategy.NOTE, type.note());
           assertTrue(type.note().contains("branch-scoped"), "the note names the intended rule");
           assertNull(type.error(), "zero rows: the stub plans nothing rather than refusing");
           assertEquals(0, type.dead().size());
         }
         case CI_VIDEOS -> {
           assertEquals("CiVideosGcStrategy", type.strategy());
-          assertEquals(CiVideosGcStrategy.NOTE, type.note());
+          assertEquals(GcRules.EXCLUDED_NOTE + CiVideosGcStrategy.NOTE, type.note());
           assertTrue(type.note().contains("byte"), "the note names the intended rule");
           assertNull(type.error(), "zero rows: the stub plans nothing rather than refusing");
           assertEquals(0, type.dead().size());
@@ -123,6 +127,75 @@ class GcPlanTest extends GcFixture {
     assertEquals(List.of(store.rowless()), report.untouchable().blobIds());
     assertEquals(ROWLESS, report.untouchable().bytes());
     assertEquals("P7D", report.graceWindow());
+  }
+
+  @Test
+  void theSummaryIsWhatAReviewerReadsFirstAndItSaysWhetherThisCanRunAtAll() throws Exception {
+    // The report is eight types deep and a review that has to add them up before it can start is a
+    // review nobody performs. So the plan leads with the paragraph: can this be executed, what does
+    // it cost, and which type is doing the work. Here it cannot — no qits-cd, no qits-ci — and that
+    // has to be the first thing the summary says rather than a flag further down.
+    Store store = seed();
+    GcStrategy oci =
+        strategy(
+            RepositoryType.OCI_IMAGES,
+            new GcStrategy.Plan(
+                List.of(new GcIdentity("qits", "alpha:v2", "superseded")),
+                List.of(new GcIdentity("qits", "alpha:v1", "newest build")),
+                Set.of(store.layerDoomed()),
+                Set.of()));
+
+    GcPlanSummary executable =
+        planner.plan(census.take(), List.of(oci), GcPins.none()).summary();
+
+    assertTrue(executable.executable());
+    assertTrue(executable.headline().startsWith("a sweep run now would execute this plan"));
+    assertEquals(1, executable.identitiesCondemned());
+    assertEquals(1, executable.blobsSweepable());
+    assertEquals(LAYER_DOOMED, executable.reclaimableBytes());
+    assertEquals(GcSummary.bytes(LAYER_DOOMED), executable.reclaimable());
+    assertEquals(RepositoryType.values().length, executable.types().size());
+    assertTrue(
+        executable.types().stream()
+            .anyMatch(line -> line.startsWith("oci-images (own, P30D): 1 identities condemned")),
+        "a per-type line carries the configured engine and window beside the outcome: " + executable
+            .types());
+    assertTrue(
+        executable.types().stream()
+            .anyMatch(
+                line ->
+                    line.startsWith("ci-videos (excluded): excluded by configuration")
+                        && line.contains("a decision, not a gap")),
+        "the excluded types say so where the outcomes are read: " + executable.types());
+
+    GcPlanSummary refused = planner.plan().summary();
+
+    assertFalse(refused.executable());
+    assertTrue(refused.headline().startsWith("NOT EXECUTABLE"), refused.headline());
+    assertTrue(refused.headline().contains("qits-cd"), refused.headline());
+    assertTrue(
+        refused.types().stream()
+            .anyMatch(line -> line.endsWith("refused: live pins unavailable")),
+        "and the type lines say which refusal produced their zeros: " + refused.types());
+  }
+
+  @Test
+  void theSummaryCarriesTheH2HonestyLineWhereTheFiguresAreRead() throws Exception {
+    // reclaimableBytes: 0 beside a hundred condemned packuments reads as a broken collector. The
+    // full explanation is the type's note; what the summary owes is its first sentence, on the line
+    // where the zero is, because that is where the wrong conclusion is drawn.
+    seed();
+
+    GcPlanSummary summary = planner.plan(census.take(), planner.registered(), GcPins.none())
+        .summary();
+
+    assertTrue(
+        summary.types().stream()
+            .anyMatch(
+                line ->
+                    line.startsWith("npm-proxy (cache, P30D)")
+                        && line.contains("cached packuments are H2 CLOBs, not files")),
+        "the npm-proxy line has to carry it: " + summary.types());
   }
 
   @Test
