@@ -1208,20 +1208,33 @@ tombstone and the dist-tag refusal live in the mechanism, not the policy). A str
 condemns — the mirror, the CI stubs — keeps the default, which is correct for the empty set and
 loud for anything else.
 
-### `oci-images`, the first of the six strategies that exist
+### `oci-images`, on the own engine
 
-`OciImageGcStrategy` implements the row the table above gives it. Five rules, each named in the
-report beside the identity it saved:
+`OciImageGcStrategy` is a four-line bean now: the rule is `OwnArtifactsStrategy`'s, the wiring is
+`OwnGcStrategy`'s, and docker's facts are `OciImagesGcAdapter`'s. The settled rule, in one sentence:
+**the last two calver releases of every image stay, everything a live pin names stays, and the rest
+dies once nothing has pulled it for P30D.**
 
 | Kept because | Spelled |
 |---|---|
-| it is a release | a tag shaped like a calver version (`2026.801.85448`). There is no `-main.g<sha>` suffix in docker — the sha tag *is* the prerelease coordinate and a release adds a version tag beside it |
+| it is one of the last two releases | a tag shaped like a calver version (`2026.801.85448`), ranked by the version's own order — not by a row timestamp, so a release pulled last week is not thereby the newer release. There is no `-main.g<sha>` suffix in docker: the sha tag *is* the prerelease coordinate and a release adds a version tag beside it |
 | qits-cd pins it | any sha `GET /cd/api/pins` names for that image — what is serving, and what a rollback would restore. **One rule, cd's**: this used to be two rules derived here from raw deployment rows, and the derivation was wrong (it read a `FAILED` attempt as the rollback target and dropped the sha that actually served) |
-| the next deploy will pull it | the newest sha tag per image, by `oci_tag.updated_at`. This is the whole safety net for an image cd has never deployed |
-| nobody modelled it | belt and braces: a tag that is neither a calver version nor a build sha is kept and reported as unclassified. Only build coordinates are ever condemned |
+| the next deploy will pull it | the newest sha tag per image, by `oci_tag.updated_at`. This is the whole safety net for an image cd has never deployed, and it reads `updated_at` rather than the access time the window judges on — a cold, never-deployed image is exactly the case it exists for |
+| something still pulls it | anything else accessed inside P30D. This is where the old *unclassified-means-keep* backstop went: a coordinate nobody modelled is kept for as long as it is used, which is a better answer than "forever" and a safer one than the structural rule it replaces |
 
-Then every manifest row **no kept tag reaches** dies, index children included — which is what
-collects the store's 73 untagged manifests, left behind when a tag re-push moved the tag row.
+**Two rules changed direction, and both changes are the settlement's.** Calver releases used to be
+kept forever and are now kept as the last two per image; an older one survives on *use*. Build-sha
+tags used to die structurally the moment a newer build existed and now die only when cold — which
+loosens the rule: a sha something still pulls survives, where the structural rule condemned it.
+
+A manifest is an identity of its own **only when no tag names it and no tagged manifest reaches
+it** — a tagged manifest's identity is its tag, and an index child rides on the index's closure.
+That is the mirror's shape verbatim, and it has the mirror's consequence: a manifest whose tag this
+run condemns becomes an untagged manifest today and is collected on the *next* run. Its bytes are
+safe in the meantime — the sweep's pre-unlink re-census sees the surviving row and counts the blob
+as still referenced — so the dry-run's per-type figure is the one that runs a run ahead of reality.
+Collecting the store's measured 73 untagged manifests is the second half of this rule, and they are
+now access-gated like everything else.
 
 **Its pins come from the run**, fetched once at the start from qits-cd, never cached and never
 derived here — see "Live pins, and the whole-run abort" above.
@@ -1348,6 +1361,36 @@ artifact, snapshot version); releases never eligible* — and lands when someone
 back. `maven-proxy`, when its constant lands, is a `cache` in the settlement's mapping like the
 other two, and needs an adapter rather than a rule of its own.
 
+### `daemon-binaries`, on the own engine — the type the platform *executes*
+
+`DaemonBinariesGcStrategy` + `DaemonBinariesGcAdapter`, and it is the last type to be claimed: it
+reported "no strategy registered" until its pin source existed, because the keep-set here is partly
+qits-ci's answer and the blob class is the one a running service runs.
+
+**Every row is a release.** There is no prerelease coordinate: a `daemon_binary` row is written in
+the same transaction as a publish, publishes come from the release pipeline, and versions are
+immutable (`409` on republish). So the belt is the settlement's sentence with nothing to qualify —
+the last two versions of every daemon live whatever their age, both rungs of qits-ci's ladder live
+under qits-ci's own rule, and the rest dies once nothing has downloaded it for P90D.
+
+| Kept because | Spelled |
+|---|---|
+| it is one of the last two versions | per `(repository, name)`, ranked by version: an **adopted digest-hex version ranks below every calver one**, because the ops adoption carries the blob's own digest as the version and comparing 64 hex characters as a number would rank the oldest thing here as the newest |
+| qits-ci's ladder names it | `GET /ci/api/daemon`, both rungs — the version a run would launch and the fallback beneath it. A runner that has not started in months still fetches its rung the moment one does |
+| a pin names its bytes | the digest half of the same aggregate: `QITS_CI_DAEMON_VERSION` has been a sha256 since the daemon shipped, so a pinned digest keeps whichever row names those bytes |
+| something still downloads it | accessed inside P90D, by the **version-addressed** GET. The digest-addressed `/v2` blob route moves nothing and must not grow a twin — it carries no daemon identity, and the pin is what keeps a digest-fetched daemon alive |
+
+Deletion goes through `DaemonRegistryCollection` → `DaemonRegistryService.collect`, the fourth narrow
+door beside `BlobReclaim`, `OciRegistryCollection` and `NpmRegistryCollection`. **There is no
+tombstone here, deliberately**: npm has one because a deleted version re-opens its name for a publish
+with different bytes under somebody's lockfile, while a daemon version is resolved by a pin a
+bootstrap re-reads — so a re-release at a collected version is legitimate rather than a silent
+content swap, and a tombstone would refuse it forever.
+
+The row-less legacy ELF blobs are untouched by all of this and cannot be reached by any sweep: a blob
+becomes a candidate only by *losing* its last identity row, and those never had one. The settlement's
+answer to them is an ops action, once, by hand.
+
 ### What the plan says
 
 ```jsonc
@@ -1355,14 +1398,21 @@ other two, and needs an adapter rather than a rule of its own.
   "generatedAt": "2026-08-01T12:00:00Z",
   "dryRun": true,                       // always, on this route; the sweep's receipt is the twin with false
   "graceWindow": "P7D",
-  "types": [                            // all seven, always — including the ones nobody collects
+  "types": [                            // all eight, always — including the ones nobody collects
     { "type": "oci-images", "strategy": "OciImageGcStrategy",
       "note": null, "error": null,
       "dead": [{ "repository": "qits", "identity": "qits-ci:3ff84c05…",
-                 "rule": "build sha: no qits-cd deployment pins it and it is not this image's newest build" }],
+                 "rule": "superseded and unaccessed for longer than P30D" }],
       "kept": [{ "repository": "qits", "identity": "qits-stt:2026.801.85448",
-                 "rule": "calver release tag — releases are never eligible" }],
+                 "rule": "among the last 2 released versions of this identity group — releases are kept by policy, not by access" }],
       "blobsReleased": 0, "blobsSweepable": 0, "reclaimableBytes": 0 },
+    { "type": "daemon-binaries", "strategy": "DaemonBinariesGcStrategy",
+      "note": null, "error": null,
+      "dead": [{ "repository": "daemons", "identity": "qits-ci-daemon@2026.601.10",
+                 "rule": "superseded and unaccessed for longer than P90D" }],
+      "kept": [{ "repository": "daemons", "identity": "qits-ci-daemon@2026.802.40",
+                 "rule": "pinned by qits-ci daemon ladder" }],
+      "blobsReleased": 1, "blobsSweepable": 1, "reclaimableBytes": 43123792 },
     { "type": "npm-packages", "strategy": "NpmPackagesGcStrategy",
       "note": null, "error": null,
       "dead": [{ "repository": "npm", "identity": "@qits/ui-components@2026.801.63140-main.gab854a1",
@@ -1397,14 +1447,14 @@ other two, and needs an adapter rather than a rule of its own.
 Three details a reader trips over otherwise:
 
 - **A type with no strategy says so.** "Nothing to collect" and "nobody is collecting" are different
-  answers, and only one of them is fine. Seven types are claimed today (`oci-images`,
-  `npm-packages`, the two caches, `maven-packages` — whose policy is still "nothing dies", which is
-  a decision — and the two CI stubs, whose notes name their intended rules); only `daemon-binaries`
-  reports "no strategy registered", which is the honest state of a decision nobody has taken.
-- **Three types refuse when the pins are missing.** `oci-images` and both caches read `GcPins`, so a
-  run with qits-cd or qits-ci unreachable reports them as `live pins unavailable` rather than
-  planning them against "nothing is pinned". A cache is pinned only by *digest* — nothing names a
-  mirror tag or a cached version by coordinate — but blobs dedupe globally, so the check is real.
+  answers, and only one of them is fine. All eight types are claimed today, `daemon-binaries` last;
+  the line still has to be right, because it is what a **new** `RepositoryType` reads as on the day
+  it lands, and `GcPlanTest` proves it over an empty registration rather than leaving it untested.
+- **Four types refuse when the pins are missing.** `oci-images`, `daemon-binaries` and both caches
+  read `GcPins`, so a run with qits-cd or qits-ci unreachable reports them as `live pins
+  unavailable` rather than planning them against "nothing is pinned". A cache is pinned only by
+  *digest* — nothing names a mirror tag or a cached version by coordinate — but blobs dedupe
+  globally, so the check is real.
 - **`sweep` is not the sum of the per-type figures.** A blob dies once, and two types releasing the
   same content free it once. The per-type numbers answer "what does this rule buy on its own"; the
   sweep answers "what would a run free tonight".

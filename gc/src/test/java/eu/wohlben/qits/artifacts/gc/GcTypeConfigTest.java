@@ -12,6 +12,7 @@ import eu.wohlben.qits.artifacts.gc.dto.GcTypeConfiguration;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.LinkedHashMap;
@@ -24,11 +25,15 @@ import org.junit.jupiter.api.Test;
  * The settlement as shipped configuration, and the proof that switching the caches on changed
  * <b>only</b> the caches.
  *
- * <p>Three questions. What does this deployment have configured; does the report echo it; and — now
- * that the cache engine answers for {@code oci-mirror} and {@code npm-proxy} — is every other type's
- * plan still identity-for-identity what it was. The third is the one that carries: this is the first
- * behaviour change to what dies on this platform, so the comparison that used to prove "nothing
- * moved" is kept, with the two moving types named explicitly and the other six pinned as before.
+ * <p>Three questions. What does this deployment have configured; does the report echo it; and —
+ * type by type — is every plan this workstream did not touch still identity-for-identity what it
+ * was. The third is the one that carries, and it is why this comparison is edited <b>deliberately,
+ * once per workstream</b>: the types moving onto an engine get their new dead sets written out here,
+ * and every other type stays pinned exactly as it was. A diff that quietly widened would be the one
+ * change nobody could review.
+ *
+ * <p>Moved so far: {@code oci-mirror} and {@code npm-proxy} onto the cache engine, then {@code
+ * oci-images} and {@code daemon-binaries} onto the own engine.
  */
 @QuarkusTest
 class GcTypeConfigTest extends GcFixture {
@@ -100,20 +105,31 @@ class GcTypeConfigTest extends GcFixture {
   }
 
   @Test
-  void onlyTheTwoCacheTypesCollectNowAndTheOtherSixAreIdentityForIdentityUnchanged()
+  void thetwoCachesAndTheTwoOwnTypesCollectAndTheRestIsIdentityForIdentityUnchanged()
       throws Exception {
-    // The definition of done for the cache workstream, and the shape of the comparison it replaces.
-    // The same four seeded types as before, aged past the window; the plan is taken with complete
-    // pins so the change under test is the POLICY rather than this suite's closed pin ports.
+    // The definition of done for this workstream, and the shape of the comparison it inherits.
+    // Everything is seeded and aged past its own window; the plan is taken with complete pins so
+    // the change under test is the POLICY rather than this suite's closed pin ports.
     //
-    // What changed, deliberately: oci-mirror and npm-proxy now condemn their cold identities.
-    // What must not have changed: the other six types' dead and kept sets, which are still exactly
-    // what the per-type strategies produced before any engine was wired to anything.
+    // What changed, deliberately: oci-images condemns a cold build sha that no pin and no
+    // newest-build belt holds, and daemon-binaries condemns the third version down its belt.
+    // What must not have changed: npm-packages, maven-packages and the two CI types, which are
+    // still exactly what their own strategies produced.
     Store store = seed();
     MirrorStore mirror = seedMirror();
     seedMaven();
     ProxyStore proxy = seedProxy();
     ageMirrorRows(Duration.ofDays(60));
+    // One image, two build shas: the older one is what the access rule condemns, the newer one is
+    // the pull target the belt protects for an image cd has never deployed.
+    ociTag("alpha", COLD_SHA, store.manifestKept(), Instant.now().minus(Duration.ofDays(60)));
+    ociTag("alpha", WARM_SHA, store.manifestKept(), Instant.now());
+    String coldDaemon = store(filled(64, (byte) 64));
+    backdate(coldDaemon, Duration.ofDays(30));
+    daemonRepository();
+    daemonRow(DAEMON, "2026.601.10", coldDaemon, daysAgo(400), null);
+    daemonRow(DAEMON, "2026.701.20", store(filled(65, (byte) 65)), daysAgo(300), null);
+    daemonRow(DAEMON, "2026.801.30", store(filled(66, (byte) 66)), daysAgo(200), null);
 
     GcPlanReport report = planner.plan(census.take(), planner.registered(), GcPins.none());
 
@@ -131,7 +147,7 @@ class GcTypeConfigTest extends GcFixture {
                   plan.kept().stream().map(identity -> identity.identity()).sorted().toList());
             });
 
-    // The two that changed.
+    // The two caches, unchanged from the workstream that moved them.
     assertEquals(
         List.of(MIRROR_IMAGE + "@sha256:" + mirror.child(), MIRROR_IMAGE + ":jdk-25").stream()
             .sorted()
@@ -147,11 +163,30 @@ class GcTypeConfigTest extends GcFixture {
         kept.get(RepositoryType.NPM_PROXY),
         "a package installed yesterday keeps its tarball and its document");
 
-    // The other six, unchanged — condemning nothing, keeping exactly what they kept before.
-    for (RepositoryType type : RepositoryType.values()) {
-      if (type == RepositoryType.OCI_MIRROR || type == RepositoryType.NPM_PROXY) {
-        continue;
-      }
+    // The two that moved in this workstream.
+    assertEquals(
+        List.of("alpha:" + COLD_SHA),
+        dead.get(RepositoryType.OCI_IMAGES),
+        "a build sha no pin holds and no deploy would pull, cold past P30D");
+    assertEquals(
+        List.of("alpha:" + WARM_SHA, "alpha:v1", "alpha:v2"),
+        kept.get(RepositoryType.OCI_IMAGES),
+        "the newest build stays for the deploy that has not happened, and the warm tags stay on use");
+    assertEquals(
+        List.of(DAEMON + "@2026.601.10"),
+        dead.get(RepositoryType.DAEMON_BINARIES),
+        "the third version down a belt of two, and nothing has launched it in a year");
+    assertEquals(
+        List.of(DAEMON + "@2026.701.20", DAEMON + "@2026.801.30"),
+        kept.get(RepositoryType.DAEMON_BINARIES));
+
+    // The four this workstream did not touch — condemning nothing, keeping exactly what they kept.
+    for (RepositoryType type :
+        List.of(
+            RepositoryType.NPM_PACKAGES,
+            RepositoryType.MAVEN_PACKAGES,
+            RepositoryType.CI_SCREENSHOTS,
+            RepositoryType.CI_VIDEOS)) {
       assertEquals(List.of(), dead.get(type), type.wireName() + " must still condemn nothing");
     }
     assertEquals(
@@ -161,22 +196,18 @@ class GcTypeConfigTest extends GcFixture {
         kept.get(RepositoryType.MAVEN_PACKAGES));
     assertEquals(List.of(), kept.get(RepositoryType.CI_SCREENSHOTS));
     assertEquals(List.of(), kept.get(RepositoryType.CI_VIDEOS));
-    assertEquals(List.of(), kept.get(RepositoryType.DAEMON_BINARIES));
-    assertEquals(
-        List.of("alpha:v1", "alpha:v2"),
-        kept.get(RepositoryType.OCI_IMAGES),
-        "with pins in hand the hosted type plans as it always did: two tags, neither a build sha");
 
-    // The blob half of the same comparison, and it is the first time this platform's plan has
-    // proposed unlinking anything: the whole cached image, plus the cold package's tarball, once no
-    // identity of any type names them. Every other blob in the store is still named by something.
+    // The blob half of the same comparison: the whole cached image, the cold package's tarball, and
+    // now the cold daemon binary. The cold image tag frees nothing on its own — its manifest is
+    // still named by the tags beside it, which is the reconciliation doing its job.
     assertEquals(
         List.of(
                 mirror.child(),
                 mirror.config(),
                 mirror.index(),
                 mirror.layer(),
-                proxy.coldTarball())
+                proxy.coldTarball(),
+                coldDaemon)
             .stream()
             .sorted()
             .toList(),
@@ -185,10 +216,11 @@ class GcTypeConfigTest extends GcFixture {
   }
 
   @Test
-  void theTwoCacheTypesRefuseToPlanWhileThePinSourcesCannotAnswer() throws Exception {
+  void everyPinReadingTypeRefusesToPlanWhileThePinSourcesCannotAnswer() throws Exception {
     // The other side of the same wiring, on the report a deployment actually gets when qits-cd or
-    // qits-ci is down: both cache types read pins, so both are refused rather than planned against
-    // "nothing is pinned". This suite's pin urls are closed ports, which is that state exactly.
+    // qits-ci is down: every type on an engine reads pins, so every one of them is refused rather
+    // than planned against "nothing is pinned". This suite's pin urls are closed ports, which is
+    // that state exactly.
     seedMirror();
     seedProxy();
     ageMirrorRows(Duration.ofDays(60));
@@ -197,7 +229,11 @@ class GcTypeConfigTest extends GcFixture {
 
     assertFalse(report.executable());
     for (RepositoryType type :
-        List.of(RepositoryType.OCI_MIRROR, RepositoryType.NPM_PROXY, RepositoryType.OCI_IMAGES)) {
+        List.of(
+            RepositoryType.OCI_MIRROR,
+            RepositoryType.NPM_PROXY,
+            RepositoryType.OCI_IMAGES,
+            RepositoryType.DAEMON_BINARIES)) {
       assertTrue(
           typePlan(report, type).error().contains("live pins unavailable"),
           type.wireName() + ": " + typePlan(report, type).error());
@@ -218,6 +254,36 @@ class GcTypeConfigTest extends GcFixture {
     assertNotNull(note);
     assertTrue(note.contains("SHUTDOWN COMPACT"), note);
     assertTrue(note.contains("0 bytes"), note);
+  }
+
+  // --- fixture ---------------------------------------------------------------------------------
+
+  private static final String COLD_SHA = "a".repeat(40);
+  private static final String WARM_SHA = "b".repeat(40);
+  private static final String DAEMON = "qits-ci-daemon";
+
+  private void daemonRepository() {
+    repositoryService.ensure(DAEMON_REPO, RepositoryType.DAEMON_BINARIES);
+  }
+
+  /** One more tag on the substrate's own image, with {@code updated_at} under the case's control. */
+  private void ociTag(String image, String name, String digest, Instant updatedAt) {
+    io.quarkus.narayana.jta.QuarkusTransaction.requiringNew()
+        .run(
+            () -> {
+              eu.wohlben.qits.artifacts.entity.OciTag row =
+                  new eu.wohlben.qits.artifacts.entity.OciTag();
+              row.repository = "qits";
+              row.imageName = image;
+              row.tag = name;
+              row.manifestDigest = digest;
+              row.updatedAt = updatedAt;
+              ociTags.persist(row);
+            });
+  }
+
+  private static Instant daysAgo(int days) {
+    return Instant.now().minus(Duration.ofDays(days));
   }
 
   private static GcTypeConfiguration line(GcPlanReport report, RepositoryType type) {

@@ -589,9 +589,9 @@ class PackagedProcessIT {
     // nothing references. The store here holds blobs pushed by the cases above, so the row-less
     // figures are a real reading rather than a zero that would pass either way.
     //
-    // One of the eight types has no strategy and must say so — daemon-binaries joins npm-proxy as
-    // unclaimed. oci-images must name the one that
-    // does — and, with no qits-cd to answer, must report the refusal rather than a plan. That
+    // Every one of the eight types is claimed now. oci-images and daemon-binaries must name their
+    // strategy — and, with no qits-cd and no qits-ci to answer, must report the refusal rather than
+    // a plan. That
     // fail-closed path only exists in the binary if the JDK HttpClient survived the compile, so this
     // is the one assertion here that a JVM test cannot make on its behalf. npm-packages is the
     // opposite case, and worth its own line for it: its rules read rows this process really
@@ -613,13 +613,13 @@ class PackagedProcessIT {
         .body("types.find { it.type == 'npm-packages' }.error", nullValue())
         .body("types.find { it.type == 'npm-packages' }.dead", hasSize(0))
         .body("types.find { it.type == 'npm-packages' }.reclaimableBytes", equalTo(0))
+        .body("types.find { it.type == 'npm-proxy' }.strategy", equalTo("NpmProxyGcStrategy"))
+        .body("types.find { it.type == 'npm-proxy' }.error", containsString("live pins"))
         .body(
-            "types.find { it.type == 'npm-proxy' }.note", containsString("no strategy registered"))
-        .body("types.find { it.type == 'npm-proxy' }.strategy", nullValue())
-        .body(
-            "types.find { it.type == 'daemon-binaries' }.note",
-            containsString("no strategy registered"))
-        .body("types.find { it.type == 'daemon-binaries' }.strategy", nullValue())
+            "types.find { it.type == 'daemon-binaries' }.strategy",
+            equalTo("DaemonBinariesGcStrategy"))
+        .body("types.find { it.type == 'daemon-binaries' }.error", containsString("qits-ci"))
+        .body("types.find { it.type == 'daemon-binaries' }.dead", hasSize(0))
         .body(
             "types.find { it.type == 'maven-packages' }.strategy",
             equalTo("MavenPackagesGcStrategy"))

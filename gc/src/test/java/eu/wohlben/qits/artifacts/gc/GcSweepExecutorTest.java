@@ -49,6 +49,7 @@ import org.junit.jupiter.api.Test;
 class GcSweepExecutorTest extends GcFixture {
 
   @Inject GcSweepExecutor executor;
+  @Inject OciImageGcStrategy ociStrategy;
   @Inject NpmRegistryCollection npmRegistry;
   @Inject OciRegistryCollection ociRegistry;
   @Inject OciManifestFootprints footprints;
@@ -151,11 +152,15 @@ class GcSweepExecutorTest extends GcFixture {
   }
 
   @Test
-  void ociDeletesDeadTagsAndUnreachableManifestsNeverAKeptIdentityAndSharedContentSurvives()
+  void ociDeletesColdTagsAndUnreachableManifestsNeverAKeptIdentityAndSharedContentSurvives()
       throws Exception {
-    // The whole OCI chain plus the two survival rules in one store: a kept identity's rows are
+    // The whole OCI chain plus the three survival rules in one store: a kept identity's rows are
     // untouched, a blob the npm type still serves outlives its own type's deletion, and a row-less
     // blob outlives everything — asserted through the executor, not just the plan.
+    //
+    // Rows carry their ages here because the settled rule is access-gated: the dead sha tag is two
+    // months cold and the orphan manifest older still, while the calver release and the newest build
+    // were written moments ago.
     repositoryService.ensure("qits", RepositoryType.OCI_IMAGES);
     repositoryService.ensure("npm", RepositoryType.NPM_PACKAGES);
     String config = agedBlob(10);
@@ -165,10 +170,8 @@ class GcSweepExecutorTest extends GcFixture {
     String layerOrphan = agedBlob(150);
     String rowless = agedBlob(500);
 
-    byte[] keptBytes =
-        imageManifest(config, Map.of(layerKept, 100L, layerShared, 200L));
-    byte[] doomedBytes =
-        imageManifest(config, Map.of(layerDoomed, 300L, layerShared, 200L));
+    byte[] keptBytes = imageManifest(config, Map.of(layerKept, 100L, layerShared, 200L));
+    byte[] doomedBytes = imageManifest(config, Map.of(layerDoomed, 300L, layerShared, 200L));
     byte[] orphanBytes = imageManifest(config, Map.of(layerOrphan, 150L));
     String manifestKept = agedStore(keptBytes);
     String manifestDoomed = agedStore(doomedBytes);
@@ -176,62 +179,66 @@ class GcSweepExecutorTest extends GcFixture {
 
     String deadSha = "a".repeat(40);
     String newestSha = "b".repeat(40);
+    Instant cold = Instant.now().minus(Duration.ofDays(60));
     QuarkusTransaction.requiringNew()
         .run(
             () -> {
-              ociManifests.persist(qitsManifest(manifestKept, keptBytes.length));
-              ociManifests.persist(qitsManifest(manifestDoomed, doomedBytes.length));
-              ociManifests.persist(qitsManifest(manifestOrphan, orphanBytes.length));
+              ociManifests.persist(qitsManifest(manifestKept, keptBytes.length, Instant.now()));
+              ociManifests.persist(qitsManifest(manifestDoomed, doomedBytes.length, Instant.now()));
+              ociManifests.persist(qitsManifest(manifestOrphan, orphanBytes.length, cold));
               ociTags.persist(qitsTag("2026.801.5", manifestKept, Instant.now()));
               ociTags.persist(qitsTag(newestSha, manifestKept, Instant.now()));
-              ociTags.persist(
-                  qitsTag(deadSha, manifestDoomed, Instant.now().minus(Duration.ofHours(1))));
+              ociTags.persist(qitsTag(deadSha, manifestDoomed, cold));
             });
     // The cross-type case: the npm registry serves the doomed layer's bytes as a release tarball.
     versionRow(PKG, RELEASE, layerDoomed);
 
     GcSweepReport report =
-        executor.execute(census.take(), List.of(ociStrategy(), npmStrategy()), GcPins.none());
+        executor.execute(census.take(), List.of(ociStrategy, npmStrategy()), GcPins.none());
 
     GcTypeSweepResult oci = typeResult(report, RepositoryType.OCI_IMAGES);
     assertNull(oci.error());
     assertEquals(
-        List.of(
-                "alpha8:" + deadSha,
-                "alpha8@sha256:" + manifestDoomed,
-                "alpha8@sha256:" + manifestOrphan)
-            .stream()
-            .sorted()
-            .toList(),
-        identities(oci.deleted()).stream().sorted().toList());
+        List.of("alpha8:" + deadSha, "alpha8@sha256:" + manifestOrphan),
+        identities(oci.deleted()).stream().sorted().toList(),
+        "the cold tag, and the manifest no tag has ever named");
     assertEquals(List.of(), oci.withheldByGraceWindow());
 
     // Never a kept identity: both kept tag rows and the kept manifest row are exactly where they
-    // were, and the dead rows are gone.
+    // were, and the dead rows are gone. The manifest the dead tag named is NOT gone — a tagged
+    // manifest's identity is its tag, so it becomes an untagged manifest today and is collected on
+    // the next run, which is the mirror's shape verbatim.
     detachEntities();
     assertTrue(ociTags.findOne("qits", "alpha8", "2026.801.5").isPresent());
     assertTrue(ociTags.findOne("qits", "alpha8", newestSha).isPresent());
     assertTrue(ociManifests.findOne("qits", "alpha8", manifestKept).isPresent());
     assertTrue(ociTags.findOne("qits", "alpha8", deadSha).isEmpty());
-    assertTrue(ociManifests.findOne("qits", "alpha8", manifestDoomed).isEmpty());
     assertTrue(ociManifests.findOne("qits", "alpha8", manifestOrphan).isEmpty());
+    assertTrue(
+        ociManifests.findOne("qits", "alpha8", manifestDoomed).isPresent(),
+        "one run, one class of identity — the row that lost its tag goes next time");
 
-    // The blobs: dead-only content goes, shared content survives on the side that kept it.
+    // The blobs: dead-only content goes, and everything a surviving ROW still names stays. The
+    // pre-unlink re-census is what enforces that second half — the plan released the doomed
+    // manifest's closure with the tag, and the fresh census answers that a live row still holds it.
     assertEquals(
-        List.of(layerOrphan, manifestDoomed, manifestOrphan).stream().sorted().toList(),
+        List.of(layerOrphan, manifestOrphan).stream().sorted().toList(),
         report.sweep().unlinkedBlobIds());
-    assertFalse(blobStore.exists(manifestDoomed));
     assertFalse(blobStore.exists(manifestOrphan));
     assertFalse(blobStore.exists(layerOrphan));
+    assertTrue(blobStore.exists(manifestDoomed), "its row outlived its tag by one run");
     assertTrue(blobStore.exists(layerDoomed), "npm still serves these bytes as a tarball");
     assertTrue(blobStore.exists(layerShared), "the kept manifest still names it");
     assertTrue(blobStore.exists(config), "the kept manifest still names it");
     assertTrue(blobStore.exists(layerKept));
+    assertEquals(
+        1,
+        report.sweep().stillReferenced(),
+        "the doomed manifest's own bytes: released by the plan, held by a row that survived it");
 
     // Row-less blobs are untouchable straight through an executed sweep, matured or not.
     assertTrue(blobStore.exists(rowless), "no identity ever named it, so nothing can reach it");
     assertTrue(report.untouchable().blobIds().contains(rowless));
-    assertEquals(0, report.sweep().stillReferenced());
   }
 
   @Test
@@ -274,16 +281,6 @@ class GcSweepExecutorTest extends GcFixture {
     strategy.versions = npmVersions;
     strategy.distTags = npmDistTags;
     strategy.npm = npmRegistry;
-    return strategy;
-  }
-
-  private OciImageGcStrategy ociStrategy() {
-    OciImageGcStrategy strategy = new OciImageGcStrategy();
-    strategy.repositories = repositories;
-    strategy.tags = ociTags;
-    strategy.manifests = ociManifests;
-    strategy.footprints = footprints;
-    strategy.registry = ociRegistry;
     return strategy;
   }
 
@@ -371,14 +368,14 @@ class GcSweepExecutorTest extends GcFixture {
             });
   }
 
-  private OciManifest qitsManifest(String digest, long size) {
+  private OciManifest qitsManifest(String digest, long size, Instant createdAt) {
     OciManifest row = new OciManifest();
     row.repository = "qits";
     row.imageName = "alpha8";
     row.digest = digest;
     row.mediaType = OciMediaTypes.OCI_MANIFEST_V1;
     row.size = size;
-    row.createdAt = Instant.now();
+    row.createdAt = createdAt;
     return row;
   }
 

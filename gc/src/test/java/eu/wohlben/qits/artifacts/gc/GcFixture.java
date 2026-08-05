@@ -5,6 +5,7 @@ import eu.wohlben.qits.artifacts.control.BlobDiskIndex;
 import eu.wohlben.qits.artifacts.control.BlobStore;
 import eu.wohlben.qits.artifacts.control.LiveBlobCensus;
 import eu.wohlben.qits.artifacts.control.OciMediaTypes;
+import eu.wohlben.qits.artifacts.entity.DaemonBinary;
 import eu.wohlben.qits.artifacts.entity.MavenArtifact;
 import eu.wohlben.qits.artifacts.entity.NpmProxyPackument;
 import eu.wohlben.qits.artifacts.entity.NpmVersion;
@@ -419,6 +420,31 @@ abstract class GcFixture {
       backdate(blobId, Duration.ofDays(30));
     }
     return new MavenStore(jar, pom);
+  }
+
+  static final String DAEMON_REPO = "daemons";
+
+  /**
+   * One published daemon version, with both of V11's timestamps under the case's control.
+   *
+   * <p>{@code accessedAt} may be null, which is what a version nothing has downloaded since tracking
+   * began really carries — the adapter folds {@code published_at} in as the first access, and a
+   * fixture that always set both could not show that.
+   */
+  void daemonRow(String name, String version, String blobId, Instant publishedAt, Instant accessedAt) {
+    QuarkusTransaction.requiringNew()
+        .run(
+            () -> {
+              DaemonBinary row = new DaemonBinary();
+              row.repository = DAEMON_REPO;
+              row.name = name;
+              row.version = version;
+              row.blobId = blobId;
+              row.sizeBytes = 1;
+              row.publishedAt = publishedAt;
+              row.accessedAt = accessedAt;
+              daemonBinaries.persist(row);
+            });
   }
 
   private static MavenArtifact mavenArtifact(String path, String blobId, long size) {

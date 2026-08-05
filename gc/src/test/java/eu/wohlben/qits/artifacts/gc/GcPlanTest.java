@@ -27,10 +27,10 @@ import org.junit.jupiter.api.Test;
  *
  * <p>The strategies here are fakes constructed in the test rather than beans, and that is
  * deliberate: the reconciliation is what these cases are about, and a real strategy would answer
- * with its own policy instead of the shape a case needs. Registering one as a bean would also take
- * away the "nobody collects this type" case, which {@code daemon-binaries} is still in. The
- * registered beans are exercised on their own rules in their own suites and appear here only in the
- * first case, as the report's shape.
+ * with its own policy instead of the shape a case needs. The registered beans are exercised on
+ * their own rules in their own suites and appear here only in the first case, as the report's
+ * shape — and the "nobody collects this type" line, which no shipped type is in any more, is proved
+ * over an empty registration rather than left untested.
  */
 @QuarkusTest
 class GcPlanTest extends GcFixture {
@@ -38,21 +38,21 @@ class GcPlanTest extends GcFixture {
   @Inject GcPlanner planner;
 
   @Test
-  void sevenTypesAreClaimedAndTheLastOneSaysSoRatherThanGoMissing() throws Exception {
-    // The report a reviewer sees first. "No plan", "nothing to collect" and "refused to plan" are
+  void everyTypeIsClaimedAndEachLineSaysWhichOfThreeAnswersItIs() throws Exception {
+    // The report a reviewer sees first. "Nothing to collect", "refused to plan" and a real plan are
     // three different facts, so every type is listed with its own reason rather than omitted — and
-    // three types demonstrate the third here: oci-images, oci-mirror and npm-proxy all read live
-    // pins, this suite has no qits-cd or qits-ci, and a keep-set that cannot be established
-    // reclaims nothing. npm-packages demonstrates the second: its rules run over the fixture's two
-    // released versions and condemn neither. The two CI stubs are the second form with a caption:
-    // zero rows, a named intended rule, and a note saying the loop has never produced content.
-    // daemon-binaries is the first — nobody claims it yet.
+    // four types demonstrate the refusal here: oci-images, daemon-binaries and both caches read live
+    // pins, this suite has no qits-cd or qits-ci, and a keep-set that cannot be established reclaims
+    // nothing. npm-packages demonstrates the second: its rules run over the fixture's two released
+    // versions and condemn neither. The two CI stubs are that with a caption — zero rows, a named
+    // intended rule, and a note saying the loop has never produced content.
     Store store = seed();
 
     assertEquals(
         List.of(
             "CiScreenshotsGcStrategy",
             "CiVideosGcStrategy",
+            "DaemonBinariesGcStrategy",
             "MavenPackagesGcStrategy",
             "NpmPackagesGcStrategy",
             "NpmProxyGcStrategy",
@@ -69,6 +69,14 @@ class GcPlanTest extends GcFixture {
           assertEquals("OciImageGcStrategy", type.strategy());
           assertNull(type.note());
           assertNotNull(type.error(), "no qits-cd here, so the type must abort rather than plan");
+        }
+        case DAEMON_BINARIES -> {
+          assertEquals("DaemonBinariesGcStrategy", type.strategy());
+          assertNull(type.note());
+          assertNotNull(
+              type.error(),
+              "the binary every CI step downloads: no qits-ci, no plan, on purpose");
+          assertEquals(0, type.dead().size(), "a refused type plans nothing");
         }
         case NPM_PACKAGES -> {
           assertEquals("NpmPackagesGcStrategy", type.strategy());
@@ -108,10 +116,6 @@ class GcPlanTest extends GcFixture {
           assertNull(type.error(), "zero rows: the stub plans nothing rather than refusing");
           assertEquals(0, type.dead().size());
         }
-        default -> {
-          assertNull(type.strategy());
-          assertEquals("no strategy registered for " + type.type().wireName(), type.note());
-        }
       }
       assertEquals(0, type.blobsSweepable());
       assertEquals(0L, type.reclaimableBytes());
@@ -121,6 +125,25 @@ class GcPlanTest extends GcFixture {
     assertEquals(List.of(store.rowless()), report.untouchable().blobIds());
     assertEquals(ROWLESS, report.untouchable().bytes());
     assertEquals("P7D", report.graceWindow());
+  }
+
+  @Test
+  void aTypeNoStrategyClaimsIsReportedAsSuchRatherThanOmitted() throws Exception {
+    // No shipped type is in this state any more — daemon-binaries was the last one — and the line
+    // still has to be right, because it is what a NEW RepositoryType reads as on the day it lands.
+    // "No plan" and "nothing to collect" are different facts, and a missing entry would read as the
+    // second.
+    seed();
+
+    GcPlanReport report = planner.plan(census.take(), List.of(), GcPins.none());
+
+    assertEquals(RepositoryType.values().length, report.types().size());
+    for (GcTypePlan type : report.types()) {
+      assertNull(type.strategy());
+      assertEquals("no strategy registered for " + type.type().wireName(), type.note());
+      assertEquals(List.of(), type.dead());
+    }
+    assertEquals(0, report.sweep().blobCount(), "and nothing of an unclaimed type is ever swept");
   }
 
   @Test

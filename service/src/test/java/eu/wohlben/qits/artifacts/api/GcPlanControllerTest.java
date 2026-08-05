@@ -15,11 +15,11 @@ import org.junit.jupiter.api.Test;
  * The GC plan on the wire, and the things it must say when there is nothing to say.
  *
  * <p>The report is all zeros here — and the whole point of this suite is that zeros arrive with
- * reasons attached: one type naming that nobody collects it, the three pin-reading types
- * ({@code oci-images} and both caches) naming the strategy that would and the reason it refused,
- * {@code npm-packages} naming the strategy that ran and found nothing to condemn, a sweep that would
- * unlink nothing, and the row-less pool listed as untouchable. A report that answered {@code {}}
- * would be indistinguishable from a broken one.
+ * reasons attached: the four pin-reading types ({@code oci-images}, {@code daemon-binaries} and both
+ * caches) naming the strategy that would collect them and the reason it refused, {@code
+ * npm-packages} naming the strategy that ran and found nothing to condemn, a sweep that would unlink
+ * nothing, and the row-less pool listed as untouchable. A report that answered {@code {}} would be
+ * indistinguishable from a broken one.
  *
  * <p>{@code npm-packages} planning <b>zero</b> reclaimable bytes is a fact about the npm suite, not
  * a coincidence: every case there publishes under a uniquely generated package name and at most one
@@ -76,15 +76,16 @@ class GcPlanControllerTest {
         .body("types.find { it.type == 'maven-packages' }.note",
             org.hamcrest.Matchers.containsString("snapshot"))
         .body("types.find { it.type == 'npm-proxy' }.strategy", is("NpmProxyGcStrategy"))
-        // daemon-binaries is unclaimed on purpose: its strategy is workstream BK, and it needs a
-        // pin surface (GET /ci/api/daemon) that does not exist yet. "No strategy registered" is the
-        // honest report of a decision nobody has taken; a strategy shipped ahead of its pin source
-        // would be a plan on facts it could not fetch, over the one blob class a running service
-        // executes.
+        // daemon-binaries is claimed now, and it refuses here for the reason it was unclaimed
+        // before: its keep-set is qits-ci's ladder, this suite has no qits-ci, and the one blob
+        // class a running service EXECUTES must never be planned against "nothing is pinned".
         .body(
-            "types.find { it.type == 'daemon-binaries' }.note",
-            is("no strategy registered for daemon-binaries"))
-        .body("types.find { it.type == 'daemon-binaries' }.strategy", nullValue())
+            "types.find { it.type == 'daemon-binaries' }.strategy",
+            is("DaemonBinariesGcStrategy"))
+        .body(
+            "types.find { it.type == 'daemon-binaries' }.error",
+            org.hamcrest.Matchers.containsString("live pins unavailable"))
+        .body("types.find { it.type == 'daemon-binaries' }.dead", hasSize(0))
         .body("types.reclaimableBytes", everyItem(is(0)));
   }
 

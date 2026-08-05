@@ -141,6 +141,47 @@ public class DaemonRegistryService {
     return flatten(row);
   }
 
+  /**
+   * Deletes one published version — the whole of a daemon collection, and the only way a {@code
+   * daemon_binary} row ever leaves this service.
+   *
+   * <p><b>Package-private, reached only through {@link DaemonRegistryCollection}</b> and called only
+   * by the {@code gc} module's {@code DaemonBinariesGcAdapter} — the same shape and the same reason
+   * as {@code NpmRegistryService.collect}, {@code OciRegistryService.collectTag} and {@code
+   * BlobStore.delete}. There is no client-facing delete on {@code /artifacts/daemons} and this does
+   * not add one. Which versions die is the engine's rule; this only knows how a row is removed.
+   *
+   * <p><b>There is no tombstone here, and that is a decision rather than an omission.</b> npm has
+   * one because a deleted version re-opens its name for a publish with different bytes, and a
+   * consumer's lockfile would then resolve the same coordinate to different content. A daemon
+   * version is resolved by a pin that a bootstrap re-reads, and a re-publish of a collected version
+   * is a release pipeline running again at the same version — which is already {@code 409} while the
+   * row exists and is a legitimate re-release once it does not. Adding a tombstone would refuse that
+   * re-release forever to protect a lockfile nothing here has.
+   *
+   * <p>The binary's blob is not touched. Blobs dedupe across every repository type, so what may be
+   * unlinked is never one type's question; the sweep answers it.
+   *
+   * @throws IllegalStateException no such row — the store moved since the plan was computed, and a
+   *     plan that raced a publish must surface rather than delete by coordinates alone
+   */
+  @ActivateRequestContext
+  @Transactional
+  void collect(String repository, String name, String version) {
+    DaemonBinary row =
+        binaries
+            .findOne(repository, name, version)
+            .orElseThrow(
+                () ->
+                    new IllegalStateException(
+                        "no such daemon binary "
+                            + name
+                            + "@"
+                            + version
+                            + " to collect — the store moved since the plan was computed"));
+    binaries.delete(row);
+  }
+
   private static StoredBinary flatten(DaemonBinary row) {
     return new StoredBinary(row.name, row.version, row.blobId, row.sizeBytes, row.publishedAt);
   }

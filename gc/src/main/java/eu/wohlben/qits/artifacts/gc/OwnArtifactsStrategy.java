@@ -73,7 +73,22 @@ public final class OwnArtifactsStrategy {
    */
   public GcStrategy.Plan plan(
       GcTypeAdapter adapter, Duration window, Instant now, GcPinned pins) {
-    List<GcCandidate> candidates = adapter.enumerate();
+    return plan(adapter, adapter.enumerate(), window, now, pins);
+  }
+
+  /**
+   * The same rule over an enumeration the caller already has.
+   *
+   * <p>Exists because a coordinate pin can only be answered over the whole enumeration ({@link
+   * GcTypeAdapter#pinnedBy}), and a binder that enumerated a second time here would judge one run
+   * against two snapshots of the store.
+   */
+  public GcStrategy.Plan plan(
+      GcTypeAdapter adapter,
+      List<GcCandidate> candidates,
+      Duration window,
+      Instant now,
+      GcPinned pins) {
     Instant cut = now.minus(window);
     Set<GcCandidate> keptReleases = lastReleasesPerGroup(candidates, adapter);
 
