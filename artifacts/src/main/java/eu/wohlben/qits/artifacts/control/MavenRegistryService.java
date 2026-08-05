@@ -160,6 +160,43 @@ public class MavenRegistryService {
   }
 
   /**
+   * Deletes one deployed file — the whole of a maven collection, and the only way a {@code
+   * maven_artifact} row ever leaves this service.
+   *
+   * <p><b>Package-private, reached only through {@link MavenRegistryCollection}</b> and called only
+   * by the {@code gc} module's {@code MavenPackagesGcAdapter} — the same shape and the same reason
+   * as {@code NpmRegistryService.collect}, {@code OciRegistryService.collectTag} and {@code
+   * BlobStore.delete}. There is no client-facing {@code DELETE} on {@code /artifacts/maven} and this
+   * does not add one.
+   *
+   * <p><b>One file at a time, and the caller collects a whole version's set.</b> That split is
+   * deliberate: which files belong to one coordinate is a question about the layout, which the
+   * collector already answers, while what a row deletion <em>is</em> stays here. Both derived
+   * documents follow for free — {@code maven-metadata.xml} and every checksum are computed from the
+   * surviving rows per request, so removing a row removes the coordinate from the document with
+   * nothing left to rewrite, and there is no second source of truth to keep in step.
+   *
+   * <p>The file's blob is not touched. Blobs dedupe across every repository type, so what may be
+   * unlinked is never one type's question; the sweep answers it.
+   *
+   * @throws IllegalStateException no such row — the store moved since the plan was computed
+   */
+  @ActivateRequestContext
+  @Transactional
+  void collect(String repository, String path) {
+    MavenArtifact row =
+        artifacts
+            .findOne(repository, path)
+            .orElseThrow(
+                () ->
+                    new IllegalStateException(
+                        "no such maven path "
+                            + path
+                            + " to collect — the store moved since the plan was computed"));
+    artifacts.delete(row);
+  }
+
+  /**
    * Every row under a metadata prefix, for the derived document.
    *
    * <p>A prefix scan on the primary key's leading columns — an index read at this store's scale

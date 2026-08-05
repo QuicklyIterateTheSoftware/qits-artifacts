@@ -40,12 +40,11 @@ class GcPlanTest extends GcFixture {
   @Test
   void everyTypeIsClaimedAndEachLineSaysWhichOfThreeAnswersItIs() throws Exception {
     // The report a reviewer sees first. "Nothing to collect", "refused to plan" and a real plan are
-    // three different facts, so every type is listed with its own reason rather than omitted — and
-    // four types demonstrate the refusal here: oci-images, daemon-binaries and both caches read live
-    // pins, this suite has no qits-cd or qits-ci, and a keep-set that cannot be established reclaims
-    // nothing. npm-packages demonstrates the second: its rules run over the fixture's two released
-    // versions and condemn neither. The two CI stubs are that with a caption — zero rows, a named
-    // intended rule, and a note saying the loop has never produced content.
+    // three different facts, so every type is listed with its own reason rather than omitted. Six
+    // types demonstrate the refusal here: every type on an engine reads live pins, this suite has no
+    // qits-cd and no qits-ci, and a keep-set that cannot be established reclaims nothing. The two CI
+    // stubs are the second — zero rows, a named intended rule, and a note saying the loop has never
+    // produced content.
     Store store = seed();
 
     assertEquals(
@@ -81,15 +80,14 @@ class GcPlanTest extends GcFixture {
         case NPM_PACKAGES -> {
           assertEquals("NpmPackagesGcStrategy", type.strategy());
           assertNull(type.note());
-          assertNull(type.error());
-          assertEquals(0, type.dead().size(), "both fixture versions are releases");
+          assertNotNull(type.error(), "the own engine reads pins, and there are none here");
+          assertEquals(0, type.dead().size(), "a refused type plans nothing");
         }
         case MAVEN_PACKAGES -> {
           assertEquals("MavenPackagesGcStrategy", type.strategy());
-          assertEquals(MavenPackagesGcStrategy.NOTE, type.note());
-          assertTrue(type.note().contains("snapshot"), "the note names the intended cleanup rule");
-          assertNull(type.error(), "it depends on nothing outside this service, so it cannot fail");
-          assertEquals(0, type.dead().size(), "append-only: this type condemns nothing, ever");
+          assertNull(type.note(), "the append-only note went with the append-only posture");
+          assertNotNull(type.error(), "the own engine reads pins, and there are none here");
+          assertEquals(0, type.dead().size(), "a refused type plans nothing");
         }
         case OCI_MIRROR -> {
           assertEquals("OciMirrorGcStrategy", type.strategy());

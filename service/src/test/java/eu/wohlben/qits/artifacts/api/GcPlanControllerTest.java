@@ -15,22 +15,15 @@ import org.junit.jupiter.api.Test;
  * The GC plan on the wire, and the things it must say when there is nothing to say.
  *
  * <p>The report is all zeros here — and the whole point of this suite is that zeros arrive with
- * reasons attached: the four pin-reading types ({@code oci-images}, {@code daemon-binaries} and both
- * caches) naming the strategy that would collect them and the reason it refused, {@code
- * npm-packages} naming the strategy that ran and found nothing to condemn, a sweep that would unlink
+ * reasons attached: the six types on an engine naming the strategy that would collect them and the
+ * reason it refused, the two CI stubs naming the rule they intend, a sweep that would unlink
  * nothing, and the row-less pool listed as untouchable. A report that answered {@code {}} would be
  * indistinguishable from a broken one.
  *
- * <p>{@code npm-packages} planning <b>zero</b> reclaimable bytes is a fact about the npm suite, not
- * a coincidence: every case there publishes under a uniquely generated package name and at most one
- * {@code -main.g<sha>} build per name, so no build is ever superseded. A new npm case that published
- * two builds of one package would condemn one of them and land here — which is the right place to
- * find that out.
- *
- * <p>{@code oci-images} refusing is the deployed behaviour under a broken dependency, not a test
- * artefact: its keep-set is fetched from qits-cd at plan time, this repository has no qits-cd, and
- * the suite points the base url at a closed port. Fail-closed on the wire is worth an assertion of
- * its own — a plan that answered with an empty keep-set would condemn every sha tag on the platform.
+ * <p>Refusing is the deployed behaviour under a broken dependency, not a test artefact: every type
+ * on an engine reads live pins, this repository has no qits-cd and no qits-ci, and the suite points
+ * both base urls at a closed port. Fail-closed on the wire is worth an assertion of its own — a plan
+ * that answered with an empty keep-set would condemn every sha tag on the platform.
  *
  * <p>The execute route exists now — {@code POST /gc/sweep}, landed after the user reviewed the
  * dry-run — and here it never gets as far as the store: the pin sources are closed ports, so the
@@ -73,8 +66,12 @@ class GcPlanControllerTest {
         .body(
             "types.find { it.type == 'maven-packages' }.strategy", is("MavenPackagesGcStrategy"))
         .body("types.find { it.type == 'maven-packages' }.dead", hasSize(0))
-        .body("types.find { it.type == 'maven-packages' }.note",
-            org.hamcrest.Matchers.containsString("snapshot"))
+        .body(
+            "types.find { it.type == 'maven-packages' }.error",
+            org.hamcrest.Matchers.containsString("live pins unavailable"))
+        .body(
+            "types.find { it.type == 'npm-packages' }.error",
+            org.hamcrest.Matchers.containsString("live pins unavailable"))
         .body("types.find { it.type == 'npm-proxy' }.strategy", is("NpmProxyGcStrategy"))
         // daemon-binaries is claimed now, and it refuses here for the reason it was unclaimed
         // before: its keep-set is qits-ci's ladder, this suite has no qits-ci, and the one blob
@@ -170,18 +167,18 @@ class GcPlanControllerTest {
   }
 
   @Test
-  void npmPackagesPlansForItselfAndTheProxyIsCollectedByItsOwnEngine() {
+  void theTwoNpmTypesAreClaimedByDifferentEnginesOverOneTable() {
     // The scope, on the wire. npm-proxy shares the npm_version table with the hosted registry, and
-    // the two are now collected by different ENGINES over that one table: the hosted rows by the
-    // own-artifacts rule, the cached ones by eviction. npm-proxy used to be unclaimed here — "no
-    // strategy registered", the honest report of a decision nobody had taken. The settlement took
-    // it, so the line is a strategy's now.
+    // the two are collected by different ENGINES over that one table: the hosted rows by the
+    // own-artifacts rule, the cached ones by eviction. Both refuse here for the same reason every
+    // engine type does — no qits-cd and no qits-ci — which is what makes the two strategy names the
+    // thing this case is really pinning.
     given()
         .when()
         .get("/artifacts/api/gc/plan")
         .then()
         .statusCode(200)
-        .body("types.find { it.type == 'npm-packages' }.error", nullValue())
+        .body("types.find { it.type == 'npm-packages' }.strategy", is("NpmPackagesGcStrategy"))
         .body("types.find { it.type == 'npm-packages' }.note", nullValue())
         .body("types.find { it.type == 'npm-packages' }.dead", hasSize(0))
         .body("types.find { it.type == 'npm-proxy' }.strategy", is("NpmProxyGcStrategy"));

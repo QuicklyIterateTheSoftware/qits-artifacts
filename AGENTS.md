@@ -158,7 +158,8 @@ Two top-level packages, deliberately kept apart:
   - Where a strategy needs one of the store's package-private funnels, `artifacts` opens a **narrow
     public door** — `BlobReclaim` (over `BlobStore.delete`/`lastWrittenAt`/`blobGracePeriod`),
     `OciRegistryCollection` (`collectTag`/`collectManifest`), `NpmRegistryCollection` (`collect`) —
-    each javadoc'd as the gc module's alone, plus `DaemonRegistryCollection` (`collect`). The funnels
+    each javadoc'd as the gc module's alone, plus `DaemonRegistryCollection` and
+    `MavenRegistryCollection` (`collect`). The funnels
     stay package-private: widening them to public would hand their constraints to every package on
     the classpath to serve one module.
 - `eu.wohlben.qits.githost` — the git host. Mostly `service/`, plus `eu.wohlben.qits.githost.storage`
@@ -359,15 +360,14 @@ collection" section is the contract; these are the rules that get "helpfully" re
   `qits.artifacts.gc.oci.cd-*`, and they live in the `gc` jar's own
   `META-INF/microprofile-config.properties`. A deployment carrying the old spelling silently loses
   the value.
-- **Both engines are live. Four types have moved so far; `npm-packages` and `maven-packages` have
-  not.** The settlement (`artifacts-gc-plan.md`, 2026-08-05) replaces the bespoke strategies with
-  `CacheEvictionStrategy` + `OwnArtifactsStrategy`, mapped onto types by
-  `qits.artifacts.gc.type.<wire-name>.strategy|window` (`GcTypeConfig`). `oci-mirror` and
-  `npm-proxy` run the cache engine over real adapters; `oci-images` and `daemon-binaries` run the
-  own engine over theirs. `GcTypeConfigTest` is the guard on the split, and it is edited
+- **Both engines are live over every configured type.** The settlement (`artifacts-gc-plan.md`,
+  2026-08-05) replaced the bespoke strategies with `CacheEvictionStrategy` + `OwnArtifactsStrategy`,
+  mapped onto types by `qits.artifacts.gc.type.<wire-name>.strategy|window` (`GcTypeConfig`).
+  `oci-mirror` and `npm-proxy` run the cache engine; `oci-images`, `daemon-binaries`,
+  `npm-packages` and `maven-packages` run the own engine; only the two CI types are `excluded`, and
+  that is a decision rather than a gap. `GcTypeConfigTest` is the guard, and it is edited
   **deliberately, once per workstream**: the moving types' new dead sets are written out there, and
-  every other type stays identity-for-identity as it was. Moving a further type over is its own
-  workstream with its own review; do not do it as a side effect of something else.
+  every other type stays identity-for-identity as it was.
 - **The two binders are `CacheGcStrategy` and `OwnGcStrategy`; read one before touching a live
   type.** Both are wiring, not policy: read the configured window, refuse if a deployment
   reconfigured the type onto the other engine, hand the engine a `GcPinned`, route `apply` back to
@@ -391,6 +391,13 @@ collection" section is the contract; these are the rules that get "helpfully" re
   its own — the mirror's rule, now `oci-images`' too. The bytes are safe in the meantime because the
   sweep's pre-unlink re-census sees the surviving row; what runs a run ahead of reality is the
   dry-run's per-type figure, not the store.
+- **`maven-packages`' identity is a COORDINATE, not a row.** A version is a set of files, and half
+  a version is a broken resolve, so `MavenPackagesGcAdapter` folds rows into
+  `groupId:artifactId:version` (timestamped snapshots into their own resolvable coordinate) and the
+  grace window withholds the whole set. Its one derived belt is **the newest deployable set of every
+  snapshot line** — what `maven-metadata.xml` redirects `1.0.1-SNAPSHOT` to; deleting it would point
+  the document at a file the store no longer has. No N-per-line rule was invented: §3.6 named the
+  shape and never priced it, so the window decides.
 - **`daemon-binaries` has no tombstone and must not grow one.** npm has one because a deleted
   version re-opens its name under somebody's lockfile; a daemon version is resolved by a pin a
   bootstrap re-reads, so a re-release at a collected version is legitimate. Its funnel is
@@ -424,11 +431,10 @@ collection" section is the contract; these are the rules that get "helpfully" re
   `qits.artifacts.gc`: a mapping rooted at the wider prefix would claim `blob-grace-period` and the
   pin urls, which other classes read.
 
-Eight strategies exist, one per type. Four are engine beans over an adapter — `OciMirrorGcStrategy`
-and `NpmProxyGcStrategy` on the cache engine (`OciMirrorGcAdapter`/`NpmProxyGcAdapter`),
-`OciImageGcStrategy` and `DaemonBinariesGcStrategy` on the own engine
-(`OciImagesGcAdapter`/`DaemonBinariesGcAdapter`). Two are still bespoke: `NpmPackagesGcStrategy`
-(`npm-packages`) and `MavenPackagesGcStrategy` (`maven-packages`). Then the two CI stubs
+Eight strategies exist, one per type. Six are engine beans over an adapter — `OciMirrorGcStrategy`
+and `NpmProxyGcStrategy` on the cache engine, `OciImageGcStrategy`, `DaemonBinariesGcStrategy`,
+`NpmPackagesGcStrategy` and `MavenPackagesGcStrategy` on the own engine, each with its
+`*GcAdapter`. Then the two CI stubs
 (`CiScreenshotsGcStrategy`, `CiVideosGcStrategy`) — deliberately two classes, because their
 intended rules already diverge in kind (branch-scoped against byte-budgeted) and sharing a base
 would be the exact unification the plan forbids, demonstrated at the cheapest place. The stubs plan
@@ -444,18 +450,17 @@ closed. A few things the strategies share cost time otherwise.
   pseudo-scope, so there is no proxy and still one instance. `GcPlanner.nameOf` also unwraps a proxy
   if it gets one, so a strategy that forgets is merely inconsistent rather than misreported; both
   names are asserted.
-- **Only the maven strategy reads the census.** The census carries blobs, not identities, so every
+- **No strategy reads the census any more.** The census carries blobs, not identities, so every
   rule is computed from the type's own rows — `oci_tag`/`oci_manifest` plus `OciManifestFootprints`
-  for one, `npm_version`/`npm_dist_tag` for the other, `daemon_binary` for the third. The two blob
-  sets they return are in the census's vocabulary, which is what the substrate reconciles over, and
-  each suite asserts `blobsRetained` equals the census's own live set for the type when nothing dies.
-- **No strategy performs an HTTP call any more** — the four that need pins (`oci-images`,
-  `daemon-binaries` and the two caches) declare `readsPins()` and are handed the run's `GcPins`. See
-  "Adding a dependency on another context" above; the suites point
-  `qits.artifacts.gc.pins.cd-base-url` and `.ci-base-url` at a closed port, so `GcPinsTest` and
-  `GcPlanControllerTest` assert the refusal path rather than avoiding it. `NpmPackagesGcStrategy` and
-  `MavenPackagesGcStrategy` read no pins and therefore never fail on their own — an `error` on those
-  lines means something else is wrong.
+  for one, `npm_version`/`npm_dist_tag` for the next, `maven_artifact` and `daemon_binary` for the
+  other two. The two blob sets they return are in the census's vocabulary, which is what the
+  substrate reconciles over, and each suite asserts `blobsRetained` equals the census's own live set
+  for the type when nothing dies.
+- **No strategy performs an HTTP call any more** — every type on an engine declares `readsPins()`
+  and is handed the run's `GcPins`. See "Adding a dependency on another context" above; the suites
+  point `qits.artifacts.gc.pins.cd-base-url` and `.ci-base-url` at a closed port, so `GcPinsTest` and
+  `GcPlanControllerTest` assert the refusal path rather than avoiding it. Only the two CI stubs plan
+  on a run whose pins failed, which is what keeps such a report readable at all.
 
 Two things are npm's alone, and the plan is explicit that docker needs neither:
 
@@ -466,7 +471,7 @@ Two things are npm's alone, and the plan is explicit that docker needs neither:
   not there. A separate table rather than a flag on `npm_version`, because the packument is assembled
   from those rows at read time and a marker column would need a `where` clause in every reader.
 - **`NpmRegistryService.collect` is package-private with exactly one caller**,
-  `NpmPackagesGcStrategy.apply`, which reaches it across the jar boundary through the
+  `NpmPackagesGcAdapter.delete`, which reaches it across the jar boundary through the
   `NpmRegistryCollection` facade: it is the only way a version row is ever removed, it writes the
   tombstone in the same transaction, and it refuses a version a dist-tag still names (a dist-tag
   pointing at a version the packument no longer lists is a broken package to every npm client). It
@@ -488,8 +493,8 @@ discharged, so the pin its suite held was replaced deliberately rather than erod
 adapter cost time otherwise: a manifest a tag names is never a candidate of its own (its tag is its
 identity), and a child of a kept index *is* one — evicting an architecture nobody pulls is the
 lazy-pull bargain, not corruption, and its bytes survive through the index's closure anyway.
-`MavenPackagesGcStrategy` is now the only strategy left whose whole rule is "nothing dies", and it
-still reads the census for that reason: with no rules of its own, the type's live set is its answer.
+No strategy is left whose whole rule is "nothing dies" — `maven-packages` was the last, and the
+settlement priced it with every other own type.
 
 `npm-proxy` is claimed by `NpmProxyGcStrategy`. It shares `npm_version` with the hosted registry, so
 the scope is filtered by the repository row's **type** and asserted from both sides
@@ -521,7 +526,7 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 
 ## Tests
 
-- `mvn verify` runs 517 tests (115 in `artifacts/`, 18 in `git-storage/`, 101 in `gc/`, 283 in
+- `mvn verify` runs 526 tests (115 in `artifacts/`, 18 in `git-storage/`, 110 in `gc/`, 283 in
   `service/`) in about two minutes — counted from the surefire reports, which the previous figure
   here was not. Nothing here
   needs docker — and that is the constraint that shapes the registry suite: `docker`, `podman` and

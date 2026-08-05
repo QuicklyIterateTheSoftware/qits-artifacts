@@ -1,89 +1,44 @@
 package eu.wohlben.qits.artifacts.gc;
 
-import eu.wohlben.qits.artifacts.control.LiveBlobCensus;
-import eu.wohlben.qits.artifacts.entity.ArtifactRepository;
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
-import eu.wohlben.qits.artifacts.gc.dto.GcIdentity;
-import eu.wohlben.qits.artifacts.persistence.ArtifactRepositoryRepository;
-import eu.wohlben.qits.artifacts.persistence.MavenArtifactRepository;
 import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.List;
-import java.util.Set;
 
 /**
- * The maven repository's rule: nothing dies, said out loud — the mirror's shape, not the CI stubs'.
+ * The platform's own maven repository, live on the settled rule: <b>the last two release versions of
+ * every artifact stay, the newest deployable set of every snapshot line stays, and the rest ages out
+ * after P90D unaccessed.</b>
  *
- * <p><b>Releases are never eligible</b>, which is the purest form of the rule npm and docker both
- * reduce to: a maven release repository exists so that a coordinate, once resolved, resolves to the
- * same bytes forever. Timestamped snapshot builds <b>accumulate</b> — one file-set per snapshot
- * deploy — at a price stated up front: jar plus pom at the platform library's tens-of-kilobytes
- * scale is noise, and even a CI cadence of snapshot deploys is single-digit MiB per library per
- * year. The cleanup rule is named in {@link #NOTE} so the type is never silently absorbed into
- * "misc" when someone wants the bytes back; until it is implemented the posture is append-only, the
- * mirror's precedent exactly.
+ * <p>This class used to say "nothing dies", under a note naming a cleanup rule nobody had
+ * implemented. That was a decision with a condition attached — {@code maven-repository-plan.md}
+ * §3.6 named the shape and never priced the deletion — and the settlement discharged it by pricing
+ * every own type the same way. So the append-only posture is replaced deliberately rather than
+ * eroded, and the note goes with it: the rule is the report line now.
  *
- * <p>Why this shape rather than the CI stubs' fail-closed-at-first-row: that shape made sense for
- * types expected to stay empty. This type has rows from its first hour — that is its purpose — so a
- * stub would report {@code error} on every GC plan forever, training the reader to ignore the one
- * signal that means something.
+ * <p>The rule is {@link OwnArtifactsStrategy}'s, the wiring {@link OwnGcStrategy}'s, and the facts —
+ * what a coordinate is, what a release is, which of two versions is newer, what a resolver would
+ * break without, how a row goes — are {@link MavenPackagesGcAdapter}'s.
  *
- * <p>The class exists at all for the mirror's reason: an unclaimed type reports "no strategy
- * registered", which is the honest report of a decision nobody has taken — and here one <em>has</em>
- * been taken (maven-repository-plan.md §3.8). {@code maven-proxy} is deliberately in the other
- * state, the {@code npm-proxy} line verbatim: its content is a re-fetchable cache of upstream, its
- * policy is eviction rather than retention, and eviction is access-based — {@code
- * artifact-access-tracking.md}'s territory.
+ * <p><b>Where this type is conservative, and why.</b> §3.6 sketched "keep the newest N timestamped
+ * builds per snapshot version" and never settled N or priced it, so no N is invented here: the
+ * window decides, and the only structural keep beyond the release belt is the one a resolver would
+ * break without — the newest deployable set of each snapshot line, which is what the derived {@code
+ * maven-metadata.xml} redirects {@code 1.0.1-SNAPSHOT} to. The identity is a <b>coordinate rather
+ * than a path</b> for the same reason: the settlement counts versions, and a jar whose pom was
+ * collected out from under it is a broken resolve rather than a smaller version.
  *
- * <p>Like the mirror's, this strategy reads the census for its retained set — with nothing
- * condemned, what this type retains is exactly what the census says it reaches — and depends on
- * nothing outside this service, so an {@code error} on its line means something is genuinely wrong.
+ * <p>{@code maven-proxy}, when its constant lands, is a {@code cache} in the settlement's mapping
+ * like the other two and needs an adapter rather than a rule of its own.
  *
  * <p>{@code @Singleton} rather than {@code @ApplicationScoped}, for the report's sake: a
  * normal-scoped bean answers {@code getClass().getSimpleName()} through its client proxy.
  */
 @Singleton
-public class MavenPackagesGcStrategy implements GcStrategy {
+public class MavenPackagesGcStrategy extends OwnGcStrategy {
 
-  /** The rule every maven identity is kept under. */
-  static final String KEPT_APPEND_ONLY =
-      "append-only: releases are never eligible; timestamped snapshot builds accumulate";
-
-  /** The cleanup rule, named so the type is never absorbed into "misc" when the bytes are wanted back. */
-  static final String NOTE =
-      "append-only pending snapshot cleanup — the intended rule is keep the newest N timestamped"
-          + " builds per (group, artifact, snapshot version); releases never eligible.";
-
-  @Inject ArtifactRepositoryRepository repositories;
-  @Inject MavenArtifactRepository artifacts;
+  @Inject MavenPackagesGcAdapter packages;
 
   @Override
-  public RepositoryType type() {
-    return RepositoryType.MAVEN_PACKAGES;
-  }
-
-  @Override
-  public String note() {
-    return NOTE;
-  }
-
-  @Override
-  public Plan plan(LiveBlobCensus.Census census, GcPins pins) {
-    List<GcIdentity> kept = new ArrayList<>();
-    for (ArtifactRepository repository : repositories.listAll()) {
-      if (repository.type != RepositoryType.MAVEN_PACKAGES) {
-        continue;
-      }
-      for (String path : artifacts.listPaths(repository.name)) {
-        kept.add(new GcIdentity(repository.name, path, KEPT_APPEND_ONLY));
-      }
-    }
-    kept.sort(Comparator.comparing(GcIdentity::repository).thenComparing(GcIdentity::identity));
-    // The type's whole live set, verbatim: with nothing condemned, what this type retains is exactly
-    // what the census says it reaches. Recomputing it here would be a second answer to a question
-    // that already has one.
-    return Plan.nothingDies(kept, Set.copyOf(census.live(RepositoryType.MAVEN_PACKAGES).keySet()));
+  GcTypeAdapter adapter() {
+    return packages;
   }
 }

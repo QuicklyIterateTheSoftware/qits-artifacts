@@ -6,10 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import eu.wohlben.qits.artifacts.control.NpmRegistryCollection;
-import eu.wohlben.qits.artifacts.control.OciManifestFootprints;
 import eu.wohlben.qits.artifacts.control.OciMediaTypes;
-import eu.wohlben.qits.artifacts.control.OciRegistryCollection;
 import eu.wohlben.qits.artifacts.entity.ArtifactRecord;
 import eu.wohlben.qits.artifacts.entity.NpmDistTag;
 import eu.wohlben.qits.artifacts.entity.NpmVersion;
@@ -39,10 +36,10 @@ import org.junit.jupiter.api.Test;
  * matured content whose last identity a strategy's own rule condemned. Each deletion case asserts
  * the whole chain: the row, the tombstone where the type has one, the file, and the receipt.
  *
- * <p>Strategies are wired by hand, as their own suites wire them, so a case controls exactly what
- * is registered, and the pins are passed in as a value — {@link GcPins#none()} for the cases below,
- * which is "nothing is pinned and nothing is broken". The npm strategy gets the real registry
- * service, because {@code collect}'s tombstone-and-refusal mechanics are half of what is on trial.
+ * <p>Strategies are passed in one by one rather than taken from the registry, so a case controls
+ * exactly what runs, and the pins are passed in as a value — {@link GcPins#none()} for the cases below,
+ * which is "nothing is pinned and nothing is broken". The strategies are the real beans, because
+ * {@code collect}'s tombstone-and-refusal mechanics are half of what is on trial.
  * The whole-run abort, which is what an incomplete aggregate causes, is {@code GcPinsTest}'s.
  */
 @QuarkusTest
@@ -50,9 +47,7 @@ class GcSweepExecutorTest extends GcFixture {
 
   @Inject GcSweepExecutor executor;
   @Inject OciImageGcStrategy ociStrategy;
-  @Inject NpmRegistryCollection npmRegistry;
-  @Inject OciRegistryCollection ociRegistry;
-  @Inject OciManifestFootprints footprints;
+  @Inject NpmPackagesGcStrategy npmStrategy;
 
   private static final String PKG = "@qits/sweep-case";
   private static final String RELEASE = "2026.801.85149";
@@ -60,19 +55,20 @@ class GcSweepExecutorTest extends GcFixture {
   private static final String NEWEST = RELEASE + "-main.g2222222";
 
   @Test
-  void aMaturedSupersededBuildLosesItsRowGainsATombstoneAndItsTarballIsUnlinked()
-      throws Exception {
-    // The full npm chain, executed: the strategy condemns, collect() deletes the row and writes the
+  void aColdPrereleaseLosesItsRowGainsATombstoneAndItsTarballIsUnlinked() throws Exception {
+    // The full npm chain, executed: the engine condemns, collect() deletes the row and writes the
     // tombstone in one transaction, and the sweep unlinks the tarball nothing references any more.
+    // The release is as cold as the condemned build and survives on the belt; the newer build was
+    // published moments ago and survives on the window.
     repositoryService.ensure("npm", RepositoryType.NPM_PACKAGES);
     String releaseBlob = agedBlob(41);
     String supersededBlob = agedBlob(42);
     String newestBlob = agedBlob(43);
-    versionRow(PKG, RELEASE, releaseBlob);
-    versionRow(PKG, SUPERSEDED, supersededBlob);
-    versionRow(PKG, NEWEST, newestBlob);
+    versionRow(PKG, RELEASE, releaseBlob, daysAgo(400));
+    versionRow(PKG, SUPERSEDED, supersededBlob, daysAgo(400));
+    versionRow(PKG, NEWEST, newestBlob, Instant.now());
 
-    GcSweepReport report = executor.execute(census.take(), List.of(npmStrategy()), GcPins.none());
+    GcSweepReport report = executor.execute(census.take(), List.of(npmStrategy), GcPins.none());
 
     assertFalse(report.dryRun());
     assertNotNull(report.executedAt());
@@ -107,10 +103,12 @@ class GcSweepExecutorTest extends GcFixture {
     repositoryService.ensure("npm", RepositoryType.NPM_PACKAGES);
     String supersededBlob = store(filled(52, (byte) 52)); // NOT backdated: as young as a fresh push
     String newestBlob = store(filled(53, (byte) 53));
-    versionRow(PKG, SUPERSEDED, supersededBlob);
-    versionRow(PKG, NEWEST, newestBlob);
+    // The ROW is cold even though its file is young — a republish of the same bytes after a long
+    // silence, which is exactly the shape the two clocks exist to tell apart.
+    versionRow(PKG, SUPERSEDED, supersededBlob, daysAgo(400));
+    versionRow(PKG, NEWEST, newestBlob, Instant.now());
 
-    GcSweepReport report = executor.execute(census.take(), List.of(npmStrategy()), GcPins.none());
+    GcSweepReport report = executor.execute(census.take(), List.of(npmStrategy), GcPins.none());
 
     GcTypeSweepResult npm = typeResult(report, RepositoryType.NPM_PACKAGES);
     assertEquals(List.of(), npm.deleted());
@@ -132,17 +130,20 @@ class GcSweepExecutorTest extends GcFixture {
     // receipt's error column instead of breaking the packument.
     repositoryService.ensure("npm", RepositoryType.NPM_PACKAGES);
     String taggedBlob = agedBlob(62);
-    versionRow(PKG, SUPERSEDED, taggedBlob);
+    versionRow(PKG, SUPERSEDED, taggedBlob, daysAgo(400));
     distTagRow(PKG, "main", SUPERSEDED);
     GcStrategy.Plan condemned =
         new GcStrategy.Plan(
             List.of(
-                new GcIdentity("npm", PKG + "@" + SUPERSEDED, NpmPackagesGcStrategy.DEAD_BUILD)),
+                new GcIdentity(
+                    "npm",
+                    PKG + "@" + SUPERSEDED,
+                    OwnArtifactsStrategy.deadUnaccessed(Duration.ofDays(30)))),
             List.of(),
             Set.of(taggedBlob),
             Set.of());
 
-    GcStrategy.Applied applied = npmStrategy().apply(condemned, blobId -> false);
+    GcStrategy.Applied applied = npmStrategy.apply(condemned, blobId -> false);
 
     assertEquals(List.of(), applied.deleted());
     assertEquals(1, applied.errors().size());
@@ -191,10 +192,10 @@ class GcSweepExecutorTest extends GcFixture {
               ociTags.persist(qitsTag(deadSha, manifestDoomed, cold));
             });
     // The cross-type case: the npm registry serves the doomed layer's bytes as a release tarball.
-    versionRow(PKG, RELEASE, layerDoomed);
+    versionRow(PKG, RELEASE, layerDoomed, Instant.now());
 
     GcSweepReport report =
-        executor.execute(census.take(), List.of(ociStrategy, npmStrategy()), GcPins.none());
+        executor.execute(census.take(), List.of(ociStrategy, npmStrategy), GcPins.none());
 
     GcTypeSweepResult oci = typeResult(report, RepositoryType.OCI_IMAGES);
     assertNull(oci.error());
@@ -275,15 +276,6 @@ class GcSweepExecutorTest extends GcFixture {
 
   // --- wiring ----------------------------------------------------------------------------------
 
-  private NpmPackagesGcStrategy npmStrategy() {
-    NpmPackagesGcStrategy strategy = new NpmPackagesGcStrategy();
-    strategy.repositories = repositories;
-    strategy.versions = npmVersions;
-    strategy.distTags = npmDistTags;
-    strategy.npm = npmRegistry;
-    return strategy;
-  }
-
   private CiScreenshotsGcStrategy screenshotsStub() {
     CiScreenshotsGcStrategy strategy = new CiScreenshotsGcStrategy();
     strategy.repositories = repositories;
@@ -323,7 +315,7 @@ class GcSweepExecutorTest extends GcFixture {
     return blobId;
   }
 
-  private void versionRow(String packageName, String version, String blobId) {
+  private void versionRow(String packageName, String version, String blobId, Instant createdAt) {
     QuarkusTransaction.requiringNew()
         .run(
             () -> {
@@ -333,9 +325,13 @@ class GcSweepExecutorTest extends GcFixture {
               row.version = version;
               row.tarballBlobId = blobId;
               row.manifestJson = "{}";
-              row.createdAt = Instant.now();
+              row.createdAt = createdAt;
               npmVersions.persist(row);
             });
+  }
+
+  private static Instant daysAgo(int days) {
+    return Instant.now().minus(Duration.ofDays(days));
   }
 
   private void distTagRow(String packageName, String tag, String version) {

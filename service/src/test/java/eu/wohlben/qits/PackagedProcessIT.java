@@ -593,10 +593,8 @@ class PackagedProcessIT {
     // strategy — and, with no qits-cd and no qits-ci to answer, must report the refusal rather than
     // a plan. That
     // fail-closed path only exists in the binary if the JDK HttpClient survived the compile, so this
-    // is the one assertion here that a JVM test cannot make on its behalf. npm-packages is the
-    // opposite case, and worth its own line for it: its rules read rows this process really
-    // published, run with no outbound call at all, and condemn nothing — both packages above are
-    // releases, and releases are never eligible. The two CI stubs carry their captions.
+    // is the one assertion here that a JVM test cannot make on its behalf, and every type on an
+    // engine takes the same path. The two CI stubs carry their captions.
     given()
         .when()
         .get("/artifacts/api/gc/plan")
@@ -610,7 +608,7 @@ class PackagedProcessIT {
         .body("types.find { it.type == 'oci-images' }.dead", hasSize(0))
         .body(
             "types.find { it.type == 'npm-packages' }.strategy", equalTo("NpmPackagesGcStrategy"))
-        .body("types.find { it.type == 'npm-packages' }.error", nullValue())
+        .body("types.find { it.type == 'npm-packages' }.error", containsString("live pins"))
         .body("types.find { it.type == 'npm-packages' }.dead", hasSize(0))
         .body("types.find { it.type == 'npm-packages' }.reclaimableBytes", equalTo(0))
         .body("types.find { it.type == 'npm-proxy' }.strategy", equalTo("NpmProxyGcStrategy"))
@@ -623,8 +621,7 @@ class PackagedProcessIT {
         .body(
             "types.find { it.type == 'maven-packages' }.strategy",
             equalTo("MavenPackagesGcStrategy"))
-        .body("types.find { it.type == 'maven-packages' }.note", containsString("snapshot"))
-        .body("types.find { it.type == 'maven-packages' }.error", nullValue())
+        .body("types.find { it.type == 'maven-packages' }.error", containsString("live pins"))
         .body("types.find { it.type == 'maven-packages' }.dead", hasSize(0))
         .body("types.find { it.type == 'oci-mirror' }.strategy", equalTo("OciMirrorGcStrategy"))
         .body("types.find { it.type == 'oci-mirror' }.note", nullValue())

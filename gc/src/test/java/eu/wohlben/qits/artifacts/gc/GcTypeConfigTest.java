@@ -33,7 +33,9 @@ import org.junit.jupiter.api.Test;
  * change nobody could review.
  *
  * <p>Moved so far: {@code oci-mirror} and {@code npm-proxy} onto the cache engine, then {@code
- * oci-images} and {@code daemon-binaries} onto the own engine.
+ * oci-images} and {@code daemon-binaries} onto the own engine, then {@code npm-packages} and
+ * {@code maven-packages}. Only the two CI types are left unmoved, and they are excluded by the
+ * settlement rather than pending.
  */
 @QuarkusTest
 class GcTypeConfigTest extends GcFixture {
@@ -105,16 +107,16 @@ class GcTypeConfigTest extends GcFixture {
   }
 
   @Test
-  void thetwoCachesAndTheTwoOwnTypesCollectAndTheRestIsIdentityForIdentityUnchanged()
-      throws Exception {
+  void everyConfiguredTypeCollectsAndTheExcludedOnesStillCondemnNothing() throws Exception {
     // The definition of done for this workstream, and the shape of the comparison it inherits.
     // Everything is seeded and aged past its own window; the plan is taken with complete pins so
     // the change under test is the POLICY rather than this suite's closed pin ports.
     //
-    // What changed, deliberately: oci-images condemns a cold build sha that no pin and no
-    // newest-build belt holds, and daemon-binaries condemns the third version down its belt.
-    // What must not have changed: npm-packages, maven-packages and the two CI types, which are
-    // still exactly what their own strategies produced.
+    // What changed, deliberately: npm-packages condemns a cold prerelease, and maven-packages
+    // condemns the third release version of an artifact — as ONE coordinate, jar and pom together,
+    // which is the visible half of maven's new identity model. What must not have changed: the four
+    // types moved by earlier workstreams, and the two CI types, which condemn nothing by
+    // configuration.
     Store store = seed();
     MirrorStore mirror = seedMirror();
     seedMaven();
@@ -130,6 +132,22 @@ class GcTypeConfigTest extends GcFixture {
     daemonRow(DAEMON, "2026.601.10", coldDaemon, daysAgo(400), null);
     daemonRow(DAEMON, "2026.701.20", store(filled(65, (byte) 65)), daysAgo(300), null);
     daemonRow(DAEMON, "2026.801.30", store(filled(66, (byte) 66)), daysAgo(200), null);
+    // A cold prerelease beside the fixture's two warm releases, and a third release version of a
+    // second maven artifact — the two identities this workstream's rules condemn.
+    String coldTarball = store(filled(67, (byte) 67));
+    backdate(coldTarball, Duration.ofDays(30));
+    npmVersionRow("@qits/thing", "0.9.0-main.gaaaaaa1", coldTarball, daysAgo(400));
+    String coldJar = store(filled(68, (byte) 68));
+    backdate(coldJar, Duration.ofDays(30));
+    mavenRow(OTHER_ARTIFACT + "/1.0.0/qits-other-1.0.0.jar", coldJar, daysAgo(400));
+    mavenRow(
+        OTHER_ARTIFACT + "/1.1.0/qits-other-1.1.0.jar",
+        store(filled(69, (byte) 69)),
+        daysAgo(390));
+    mavenRow(
+        OTHER_ARTIFACT + "/2.0.0/qits-other-2.0.0.jar",
+        store(filled(70, (byte) 70)),
+        daysAgo(380));
 
     GcPlanReport report = planner.plan(census.take(), planner.registered(), GcPins.none());
 
@@ -180,26 +198,36 @@ class GcTypeConfigTest extends GcFixture {
         List.of(DAEMON + "@2026.701.20", DAEMON + "@2026.801.30"),
         kept.get(RepositoryType.DAEMON_BINARIES));
 
-    // The four this workstream did not touch — condemning nothing, keeping exactly what they kept.
-    for (RepositoryType type :
-        List.of(
-            RepositoryType.NPM_PACKAGES,
-            RepositoryType.MAVEN_PACKAGES,
-            RepositoryType.CI_SCREENSHOTS,
-            RepositoryType.CI_VIDEOS)) {
-      assertEquals(List.of(), dead.get(type), type.wireName() + " must still condemn nothing");
-    }
+    // The two that moved in this workstream.
+    assertEquals(
+        List.of("@qits/thing@0.9.0-main.gaaaaaa1"),
+        dead.get(RepositoryType.NPM_PACKAGES),
+        "a prerelease earns no belt, and nothing has installed it in a year");
     assertEquals(
         List.of("@qits/thing@1.0.0", "@qits/thing@1.1.0"), kept.get(RepositoryType.NPM_PACKAGES));
     assertEquals(
-        List.of(MAVEN_JAR_PATH, MAVEN_POM_PATH).stream().sorted().toList(),
-        kept.get(RepositoryType.MAVEN_PACKAGES));
-    assertEquals(List.of(), kept.get(RepositoryType.CI_SCREENSHOTS));
-    assertEquals(List.of(), kept.get(RepositoryType.CI_VIDEOS));
+        List.of("eu.wohlben.qits:qits-other:1.0.0"),
+        dead.get(RepositoryType.MAVEN_PACKAGES),
+        "one coordinate, not one path — the jar of a version the belt no longer covers");
+    assertEquals(
+        List.of(
+            "eu.wohlben.qits:qits-eventstream:1.0.0",
+            "eu.wohlben.qits:qits-other:1.1.0",
+            "eu.wohlben.qits:qits-other:2.0.0"),
+        kept.get(RepositoryType.MAVEN_PACKAGES),
+        "the jar and pom of the fixture's release are one identity now");
 
-    // The blob half of the same comparison: the whole cached image, the cold package's tarball, and
-    // now the cold daemon binary. The cold image tag frees nothing on its own — its manifest is
-    // still named by the tags beside it, which is the reconciliation doing its job.
+    // The two nobody collects — excluded by the settlement, and still saying so.
+    for (RepositoryType type :
+        List.of(RepositoryType.CI_SCREENSHOTS, RepositoryType.CI_VIDEOS)) {
+      assertEquals(List.of(), dead.get(type), type.wireName() + " must still condemn nothing");
+      assertEquals(List.of(), kept.get(type));
+    }
+
+    // The blob half of the same comparison: the whole cached image, the cold proxied tarball, the
+    // cold daemon binary, the cold published tarball and the cold jar. The cold image tag frees
+    // nothing on its own — its manifest is still named by the tags beside it, which is the
+    // reconciliation doing its job.
     assertEquals(
         List.of(
                 mirror.child(),
@@ -207,7 +235,9 @@ class GcTypeConfigTest extends GcFixture {
                 mirror.index(),
                 mirror.layer(),
                 proxy.coldTarball(),
-                coldDaemon)
+                coldDaemon,
+                coldTarball,
+                coldJar)
             .stream()
             .sorted()
             .toList(),
@@ -261,6 +291,7 @@ class GcTypeConfigTest extends GcFixture {
   private static final String COLD_SHA = "a".repeat(40);
   private static final String WARM_SHA = "b".repeat(40);
   private static final String DAEMON = "qits-ci-daemon";
+  private static final String OTHER_ARTIFACT = "eu/wohlben/qits/qits-other";
 
   private void daemonRepository() {
     repositoryService.ensure(DAEMON_REPO, RepositoryType.DAEMON_BINARIES);
@@ -279,6 +310,39 @@ class GcTypeConfigTest extends GcFixture {
               row.manifestDigest = digest;
               row.updatedAt = updatedAt;
               ociTags.persist(row);
+            });
+  }
+
+  /** One published npm version, with its publish time under the case's control. */
+  private void npmVersionRow(String packageName, String version, String blobId, Instant createdAt) {
+    io.quarkus.narayana.jta.QuarkusTransaction.requiringNew()
+        .run(
+            () -> {
+              eu.wohlben.qits.artifacts.entity.NpmVersion row =
+                  new eu.wohlben.qits.artifacts.entity.NpmVersion();
+              row.repository = "npm";
+              row.packageName = packageName;
+              row.version = version;
+              row.tarballBlobId = blobId;
+              row.manifestJson = "{}";
+              row.createdAt = createdAt;
+              npmVersions.persist(row);
+            });
+  }
+
+  /** One deployed maven file, with its deploy time under the case's control. */
+  private void mavenRow(String path, String blobId, Instant createdAt) {
+    io.quarkus.narayana.jta.QuarkusTransaction.requiringNew()
+        .run(
+            () -> {
+              eu.wohlben.qits.artifacts.entity.MavenArtifact row =
+                  new eu.wohlben.qits.artifacts.entity.MavenArtifact();
+              row.repository = MAVEN_REPO;
+              row.path = path;
+              row.blobId = blobId;
+              row.sizeBytes = 1;
+              row.createdAt = createdAt;
+              mavenArtifacts.persist(row);
             });
   }
 

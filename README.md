@@ -1239,17 +1239,26 @@ now access-gated like everything else.
 **Its pins come from the run**, fetched once at the start from qits-cd, never cached and never
 derived here — see "Live pins, and the whole-run abort" above.
 
-### `npm-packages`, the second — and the tombstone only it needs
+### `npm-packages`, on the own engine — and the tombstone only it needs
 
-`NpmPackagesGcStrategy` implements its own row of the table. It shares no code with the strategy
-above beyond the seam, and the resemblance stops as soon as the rules are spelled out:
+`NpmPackagesGcStrategy` is a four-line bean now: the rule is `OwnArtifactsStrategy`'s, the wiring is
+`OwnGcStrategy`'s, and npm's facts are `NpmPackagesGcAdapter`'s. The settled rule: **the last two
+releases of every package stay, anything a dist-tag names stays, and the rest dies once nothing has
+installed it for P30D.**
 
 | Kept because | Spelled |
 |---|---|
-| it is a release | the version has **no prerelease part** — `0.0.1` through `2026.801.85149`. Consumers pin ranges, and `^2026.801.85149` has to keep resolving. Never eligible: not by age, not because a newer release exists |
-| it is the current main build | the newest `-main.g<sha7>` per package, by **semver precedence** (`NpmSemver`), which is what `@main` resolves to. `…85149-main.gd43d710` outranks `…85149-main.g21655ba` because prerelease identifiers compare as ASCII |
-| a pointer names it | belt and braces: any version a dist-tag currently names. Today it changes no outcome, which is exactly when a backstop is worth having — a packument naming a version its `versions` does not list is a broken package |
-| nobody modelled it | a prerelease of an unrecognised shape (an `-rc.1`), or a version that is not semver at all and so cannot be proved superseded. Only main builds are ever condemned |
+| it is one of the last two releases | the version has **no prerelease part** — `0.0.1` through `2026.801.85149` — ranked by **semver precedence** (`NpmSemver`), not by publish order. Consumers pin ranges, and `^2026.801.85149` has to keep resolving |
+| a pointer names it | any version a dist-tag currently names. A packument whose `dist-tags` names a version its `versions` does not list is a broken package to every npm client, so this is checked before the window rather than left to it |
+| something still installs it | accessed inside P30D. This is where both of the old structural rules went: what `@main` resolves to was published minutes ago and is young by construction, and an `-rc.1` somebody made by hand is kept for as long as anything installs it |
+
+**Two rules changed direction, and both changes are the settlement's.** Releases used to be kept
+forever and are now kept as the last two per package; an older one survives on *use*, which is what a
+lockfile install already does to `accessed_at`. And a prerelease used to die structurally the moment
+a newer main build existed and now dies only when cold — which loosens the rule.
+
+A version that does not parse as semver is never a release (it cannot be ordered, so it cannot be
+one of the last two of anything) and is not thereby condemned either: the window decides.
 
 `npm-proxy` shares the `npm_version` table and is collected by a **different engine over the same
 table**: the hosted rows by the rules above, the cached ones by eviction (`NpmProxyGcStrategy`, its
@@ -1269,11 +1278,12 @@ on that side.
 
 `NpmRegistryService.collect` is the only way a version row ever leaves, it writes the tombstone in the
 same transaction, and it refuses a version a dist-tag still names. It is package-private, reached
-only through the `NpmRegistryCollection` facade, and its one caller is `NpmPackagesGcStrategy.apply` — it shipped ahead of that caller precisely so the tombstone
+only through the `NpmRegistryCollection` facade, and its one caller is
+`NpmPackagesGcAdapter.delete` — it shipped ahead of that caller precisely so the tombstone
 was never a step someone had to remember, and both guarantees live in the mechanism where no path
 around them exists.
 
-### The two caches — the first types that actually delete something
+### The two caches — the first types that ever deleted something
 
 `oci-mirror` and `npm-proxy` run one engine (`CacheEvictionStrategy`) over one rule: **everything
 unaccessed for longer than `P30D` is evicted, and a live pin outranks the window.** Both used to
@@ -1343,23 +1353,42 @@ Take a copy of the file first, as with any offline database operation. A compact
 interrupted leaves the old file behind, which is recoverable; a compaction nobody has a copy of is
 not something to find out about during one.
 
-### `maven-packages`, the sixth — the mirror's shape, on purpose
+### `maven-packages`, on the own engine — the one type whose identity is not a row
 
-`MavenPackagesGcStrategy` claims the type and plans `nothingDies` under a note, keeping the default
-`apply` that refuses any condemning plan. It takes the mirror's shape rather than the CI stubs':
-the stubs fail closed *when rows appear*, which made sense for types expected to stay empty — this
-type has rows from its first hour, that being its purpose, so a fail-closed-at-rows stub would
-report `error` on every plan forever and train the reader to ignore the one signal that means
-something.
+`MavenPackagesGcStrategy` + `MavenPackagesGcAdapter`. This type used to plan "nothing dies" under a
+note naming a cleanup rule nobody had implemented; the settlement priced every own type at once, so
+the append-only posture is replaced deliberately rather than eroded, and the note goes with it.
 
-The rule itself, said out loud: **releases are never eligible** (a maven release repository is the
-purest form of the rule npm and docker both reduce to), and **timestamped snapshot builds
-accumulate** — priced honestly: jar plus pom at the platform library's tens-of-kilobytes scale is
-noise, and even a CI cadence of snapshot deploys is single-digit MiB per library per year. The
-cleanup rule is named in the strategy's note — *keep the newest N timestamped builds per (group,
-artifact, snapshot version); releases never eligible* — and lands when someone wants the bytes
-back. `maven-proxy`, when its constant lands, is a `cache` in the settlement's mapping like the
-other two, and needs an adapter rather than a rule of its own.
+**A coordinate is the identity, not a path.** A maven version is a *set* of files — a jar, its pom,
+sometimes sources — and half a version is not a smaller version, it is a broken resolve. The settled
+rule counts **versions** ("the last 2 release versions per artifact"), which an engine counting paths
+could not express at all, so one identity here is one resolvable coordinate and every file under it
+lives or dies together:
+
+- `eu.wohlben.qits:qits-eventstream:1.0.0` — a release version directory. A **release**.
+- `eu.wohlben.qits:qits-eventstream:1.0.1-20260802.123456-3` — one timestamped snapshot deploy,
+  exactly the coordinate the derived version-level metadata resolves `1.0.1-SNAPSHOT` to.
+- `eu.wohlben.qits:qits-eventstream:1.0.1-SNAPSHOT` — the literal-filename snapshot, the one mutable
+  path class (`uniqueVersion=false`).
+
+| Kept because | Spelled |
+|---|---|
+| it is one of the last two release versions | per `(groupId, artifactId)`, by **maven's own version order** (`MavenVersionOrder`) — `1.0.10` above `1.0.9`, which a lexical compare gets backwards |
+| a resolver would break without it | **the newest deployable set of every snapshot version line**: the newest timestamped set if the line has any, else the literal `-SNAPSHOT` set. `maven-metadata.xml` is computed from the surviving rows at read time, so deleting that one would point the document at a file the store no longer has — the single failure this type must not produce |
+| something still resolves it | the **newest** `max(created_at, accessed_at)` across the coordinate's files. A pom read is a resolve of the version, so one warm file keeps the set |
+
+**Where this is deliberately conservative.** `maven-repository-plan.md` §3.6 sketched "keep the
+newest N timestamped builds per snapshot version" and never settled N or priced the deletion, so no N
+is invented: the window decides, and the only structural keep beyond the release belt is the one a
+resolver would break without. The grace window gates the whole coordinate too — one young file
+withholds every row of it, because deleting the mature rows and keeping the young one would produce
+exactly the half-version the identity model exists to prevent.
+
+Deletion goes through `MavenRegistryCollection` → `MavenRegistryService.collect`, one file at a time
+with the collector removing a whole coordinate's set. No tombstone: a collected release path is a
+coordinate the repository no longer serves at all, and a re-deploy there is a fresh deploy rather
+than a mutation of a live one. `maven-proxy`, when its constant lands, is a `cache` in the
+settlement's mapping and needs an adapter rather than a rule of its own.
 
 ### `daemon-binaries`, on the own engine — the type the platform *executes*
 
@@ -1416,10 +1445,17 @@ answer to them is an ops action, once, by hand.
     { "type": "npm-packages", "strategy": "NpmPackagesGcStrategy",
       "note": null, "error": null,
       "dead": [{ "repository": "npm", "identity": "@qits/ui-components@2026.801.63140-main.gab854a1",
-                 "rule": "superseded main build: a newer one exists and no dist-tag names it" }],
+                 "rule": "superseded and unaccessed for longer than P30D" }],
       "kept": [{ "repository": "npm", "identity": "@qits/ui-components@2026.801.85149",
-                 "rule": "release version — no prerelease part, so consumers' ranges resolve to it; releases are never eligible" }],
+                 "rule": "among the last 2 released versions of this identity group — releases are kept by policy, not by access" }],
       "blobsReleased": 1, "blobsSweepable": 1, "reclaimableBytes": 17904 },
+    { "type": "maven-packages", "strategy": "MavenPackagesGcStrategy",
+      "note": null, "error": null,
+      "dead": [{ "repository": "maven", "identity": "eu.wohlben.qits:qits-eventstream:1.0.1-20260601.101010-1",
+                 "rule": "superseded and unaccessed for longer than P90D" }],
+      "kept": [{ "repository": "maven", "identity": "eu.wohlben.qits:qits-eventstream:1.0.1-20260802.123456-3",
+                 "rule": "the newest deployable set of this snapshot version — what the derived maven-metadata.xml resolves to, so a resolver would 404 without it" }],
+      "blobsReleased": 2, "blobsSweepable": 2, "reclaimableBytes": 41216 },
     { "type": "oci-mirror", "strategy": "OciMirrorGcStrategy",
       "note": null, "error": null,
       "dead": [{ "repository": "hub", "identity": "library/node@sha256:9f2c…",
@@ -1450,11 +1486,10 @@ Three details a reader trips over otherwise:
   answers, and only one of them is fine. All eight types are claimed today, `daemon-binaries` last;
   the line still has to be right, because it is what a **new** `RepositoryType` reads as on the day
   it lands, and `GcPlanTest` proves it over an empty registration rather than leaving it untested.
-- **Four types refuse when the pins are missing.** `oci-images`, `daemon-binaries` and both caches
-  read `GcPins`, so a run with qits-cd or qits-ci unreachable reports them as `live pins
-  unavailable` rather than planning them against "nothing is pinned". A cache is pinned only by
-  *digest* — nothing names a mirror tag or a cached version by coordinate — but blobs dedupe
-  globally, so the check is real.
+- **Every type on an engine refuses when the pins are missing** — all six of them. A run with
+  qits-cd or qits-ci unreachable reports them as `live pins unavailable` rather than planning them
+  against "nothing is pinned". Two of them are pinned by *coordinate* (an image sha, a daemon
+  version); the rest only by **digest**, and blobs dedupe globally, so the check is real everywhere.
 - **`sweep` is not the sum of the per-type figures.** A blob dies once, and two types releasing the
   same content free it once. The per-type numbers answer "what does this rule buy on its own"; the
   sweep answers "what would a run free tonight".

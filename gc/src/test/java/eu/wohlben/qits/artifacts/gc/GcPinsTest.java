@@ -109,9 +109,15 @@ class GcPinsTest extends GcFixture {
     assertEquals(0, oci.dead().size());
     assertEquals(0, oci.kept().size(), "not planned at all, rather than planned against no pins");
 
+    // Every type on an engine reads pins now, so the useful half of a broken run is the CI stubs:
+    // they carry their caption rather than an error, which is what keeps the report readable when
+    // half of it is a refusal.
     GcTypePlan npm = typePlan(report, RepositoryType.NPM_PACKAGES);
-    assertNull(npm.error(), "a type that reads no pins is still planned — the report stays useful");
+    assertNotNull(npm.error(), "the own engine reads pins too");
     assertEquals(0, npm.dead().size());
+    GcTypePlan videos = typePlan(report, RepositoryType.CI_VIDEOS);
+    assertNull(videos.error(), "a type that reads no pins is still planned");
+    assertNotNull(videos.note());
     assertEquals(0, report.sweep().blobCount());
   }
 
