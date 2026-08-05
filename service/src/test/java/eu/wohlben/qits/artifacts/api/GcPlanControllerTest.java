@@ -15,10 +15,11 @@ import org.junit.jupiter.api.Test;
  * The GC plan on the wire, and the things it must say when there is nothing to say.
  *
  * <p>The report is all zeros here — and the whole point of this suite is that zeros arrive with
- * reasons attached: two types naming that nobody collects them, {@code oci-images} naming the
- * strategy that does and the reason it refused, {@code npm-packages} naming the strategy that ran
- * and found nothing to condemn, a sweep that would unlink nothing, and the row-less pool listed as
- * untouchable. A report that answered {@code {}} would be indistinguishable from a broken one.
+ * reasons attached: one type naming that nobody collects it, the three pin-reading types
+ * ({@code oci-images} and both caches) naming the strategy that would and the reason it refused,
+ * {@code npm-packages} naming the strategy that ran and found nothing to condemn, a sweep that would
+ * unlink nothing, and the row-less pool listed as untouchable. A report that answered {@code {}}
+ * would be indistinguishable from a broken one.
  *
  * <p>{@code npm-packages} planning <b>zero</b> reclaimable bytes is a fact about the npm suite, not
  * a coincidence: every case there publishes under a uniquely generated package name and at most one
@@ -74,8 +75,7 @@ class GcPlanControllerTest {
         .body("types.find { it.type == 'maven-packages' }.dead", hasSize(0))
         .body("types.find { it.type == 'maven-packages' }.note",
             org.hamcrest.Matchers.containsString("snapshot"))
-        .body("types.find { it.type == 'npm-proxy' }.note", is("no strategy registered for npm-proxy"))
-        .body("types.find { it.type == 'npm-proxy' }.strategy", nullValue())
+        .body("types.find { it.type == 'npm-proxy' }.strategy", is("NpmProxyGcStrategy"))
         // daemon-binaries is unclaimed on purpose: its strategy is workstream BK, and it needs a
         // pin surface (GET /ci/api/daemon) that does not exist yet. "No strategy registered" is the
         // honest report of a decision nobody has taken; a strategy shipped ahead of its pin source
@@ -169,11 +169,12 @@ class GcPlanControllerTest {
   }
 
   @Test
-  void npmPackagesPlansForItselfAndLeavesTheProxyToItsOwnDecision() {
-    // The scope, on the wire. npm-proxy shares the npm_version table with the hosted registry and is
-    // deliberately unclaimed — its content is a cache, so its policy is eviction and the plan parks
-    // it. "No strategy registered" is the honest report of a decision nobody has taken yet, and a
-    // strategy quietly claiming the type to answer "nothing to do" would erase it.
+  void npmPackagesPlansForItselfAndTheProxyIsCollectedByItsOwnEngine() {
+    // The scope, on the wire. npm-proxy shares the npm_version table with the hosted registry, and
+    // the two are now collected by different ENGINES over that one table: the hosted rows by the
+    // own-artifacts rule, the cached ones by eviction. npm-proxy used to be unclaimed here — "no
+    // strategy registered", the honest report of a decision nobody had taken. The settlement took
+    // it, so the line is a strategy's now.
     given()
         .when()
         .get("/artifacts/api/gc/plan")
@@ -182,27 +183,32 @@ class GcPlanControllerTest {
         .body("types.find { it.type == 'npm-packages' }.error", nullValue())
         .body("types.find { it.type == 'npm-packages' }.note", nullValue())
         .body("types.find { it.type == 'npm-packages' }.dead", hasSize(0))
-        .body("types.find { it.type == 'npm-proxy' }.strategy", nullValue())
-        .body(
-            "types.find { it.type == 'npm-proxy' }.note",
-            is("no strategy registered for npm-proxy"));
+        .body("types.find { it.type == 'npm-proxy' }.strategy", is("NpmProxyGcStrategy"));
   }
 
   @Test
-  void theMirrorClaimsItsTypeToSayItKeepsEverythingOnPurpose() {
-    // The contrast with npm-proxy one line above is the whole point of both. "No strategy
-    // registered" is a decision nobody has taken; a strategy reporting nothing dead is a decision
-    // that was taken and can be argued with — append-only until access tracking exists (⚖2). A
-    // report cannot distinguish the two unless the second one claims its type.
+  void bothCacheTypesReadPinsSoBothRefuseWhileTheSourcesAreClosedPorts() {
+    // The mirror used to answer "nothing dies, append-only pending access tracking" here. Access
+    // tracking shipped, the settlement configured both caches onto the eviction engine, and the
+    // engine checks live pins before the access rule — so with no qits-cd and no qits-ci both types
+    // now refuse rather than plan against "nothing is pinned". Zeros with a reason, which is the
+    // one property every line of this report has to keep.
     given()
         .when()
         .get("/artifacts/api/gc/plan")
         .then()
         .statusCode(200)
-        .body("types.find { it.type == 'oci-mirror' }.note", nullValue())
-        .body("types.find { it.type == 'oci-mirror' }.error", nullValue())
+        .body("types.find { it.type == 'oci-mirror' }.strategy", is("OciMirrorGcStrategy"))
+        .body(
+            "types.find { it.type == 'oci-mirror' }.error",
+            org.hamcrest.Matchers.containsString("live pins unavailable"))
         .body("types.find { it.type == 'oci-mirror' }.dead", hasSize(0))
-        .body("types.find { it.type == 'oci-mirror' }.blobsSweepable", is(0));
+        .body("types.find { it.type == 'oci-mirror' }.blobsSweepable", is(0))
+        .body(
+            "types.find { it.type == 'npm-proxy' }.error",
+            org.hamcrest.Matchers.containsString("live pins unavailable"))
+        .body("types.find { it.type == 'npm-proxy' }.dead", hasSize(0))
+        .body("types.find { it.type == 'npm-proxy' }.blobsSweepable", is(0));
   }
 
   @Test

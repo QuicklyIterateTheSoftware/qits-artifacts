@@ -126,11 +126,15 @@ public enum RepositoryType {
    * drift from one meaning to the other because {@code ArtifactRepositoryService.ensure} makes a
    * type immutable. The refusal is {@code 405}, not a configuration.
    *
-   * <p>Garbage collection is <b>append-only</b> ({@code OciMirrorGcStrategy}, ⚖2): a cache's
-   * eviction is access-based, and access tracking is its own feature. The separate type is what
-   * keeps that decision from distorting {@link #OCI_IMAGES}'s rules — a mirror tag like {@code
+   * <p>Garbage collection <b>evicts</b> what nothing has pulled inside the configured window
+   * ({@code OciMirrorGcStrategy} on the cache engine). It used to be append-only pending access
+   * tracking (⚖2); that condition is discharged — V9 tracks access on {@code oci_tag} and {@code
+   * oci_manifest}, and the settlement configured this type as a cache. The separate type is still
+   * what keeps the decision from distorting {@link #OCI_IMAGES}'s rules — a mirror tag like {@code
    * jdk-25} is neither a calver release nor a build sha, and would otherwise be kept by docker's
-   * unclassified-means-keep rule and reported as if somebody had decided something.
+   * unclassified-means-keep rule and reported as if somebody had decided something. Upstream's
+   * releases earn no protection here: version protection is own-ness's, and a cache holds none of
+   * ours.
    */
   OCI_MIRROR(Set.of(), Set.of(), 0L),
 

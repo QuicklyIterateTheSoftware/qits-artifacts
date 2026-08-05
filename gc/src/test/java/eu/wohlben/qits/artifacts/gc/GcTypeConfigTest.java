@@ -1,6 +1,7 @@
 package eu.wohlben.qits.artifacts.gc;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -20,13 +21,14 @@ import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
 /**
- * The settlement as shipped configuration, and the proof that shipping it changed nothing yet.
+ * The settlement as shipped configuration, and the proof that switching the caches on changed
+ * <b>only</b> the caches.
  *
- * <p>Three questions, and the third is the one that matters most today. What does this deployment
- * have configured; does the report echo it; and — with the two engines present but wired to nothing
- * — is what the collector would delete <b>exactly what it would have deleted before</b>. The engines
- * ship dark on purpose: the per-type strategies still answer the planner, and the day that changes
- * is a workstream with its own review.
+ * <p>Three questions. What does this deployment have configured; does the report echo it; and — now
+ * that the cache engine answers for {@code oci-mirror} and {@code npm-proxy} — is every other type's
+ * plan still identity-for-identity what it was. The third is the one that carries: this is the first
+ * behaviour change to what dies on this platform, so the comparison that used to prove "nothing
+ * moved" is kept, with the two moving types named explicitly and the other six pinned as before.
  */
 @QuarkusTest
 class GcTypeConfigTest extends GcFixture {
@@ -98,17 +100,22 @@ class GcTypeConfigTest extends GcFixture {
   }
 
   @Test
-  void theEnginesAreDarkSoWhatDiesAndWhatIsKeptIsUnchanged() throws Exception {
-    // The definition of done for this workstream, asserted rather than asserted-by-absence. Three
-    // seeded types with real rows, and the plan is identity-for-identity the one the six per-type
-    // strategies produced before the engines and the configuration existed: nothing dies anywhere,
-    // oci-images still aborts on an unreachable qits-cd, and every keep is still the rule its own
-    // strategy names.
+  void onlyTheTwoCacheTypesCollectNowAndTheOtherSixAreIdentityForIdentityUnchanged()
+      throws Exception {
+    // The definition of done for the cache workstream, and the shape of the comparison it replaces.
+    // The same four seeded types as before, aged past the window; the plan is taken with complete
+    // pins so the change under test is the POLICY rather than this suite's closed pin ports.
+    //
+    // What changed, deliberately: oci-mirror and npm-proxy now condemn their cold identities.
+    // What must not have changed: the other six types' dead and kept sets, which are still exactly
+    // what the per-type strategies produced before any engine was wired to anything.
     Store store = seed();
     MirrorStore mirror = seedMirror();
     seedMaven();
+    ProxyStore proxy = seedProxy();
+    ageMirrorRows(Duration.ofDays(60));
 
-    GcPlanReport report = planner.plan();
+    GcPlanReport report = planner.plan(census.take(), planner.registered(), GcPins.none());
 
     Map<RepositoryType, List<String>> dead = new LinkedHashMap<>();
     Map<RepositoryType, List<String>> kept = new LinkedHashMap<>();
@@ -116,12 +123,35 @@ class GcTypeConfigTest extends GcFixture {
         .types()
         .forEach(
             plan -> {
-              dead.put(plan.type(), plan.dead().stream().map(identity -> identity.identity()).toList());
+              dead.put(
+                  plan.type(),
+                  plan.dead().stream().map(identity -> identity.identity()).sorted().toList());
               kept.put(
-                  plan.type(), plan.kept().stream().map(identity -> identity.identity()).sorted().toList());
+                  plan.type(),
+                  plan.kept().stream().map(identity -> identity.identity()).sorted().toList());
             });
 
+    // The two that changed.
+    assertEquals(
+        List.of(MIRROR_IMAGE + "@sha256:" + mirror.child(), MIRROR_IMAGE + ":jdk-25").stream()
+            .sorted()
+            .toList(),
+        dead.get(RepositoryType.OCI_MIRROR),
+        "cold cached content is what the settlement configured this type to delete");
+    assertEquals(List.of(), kept.get(RepositoryType.OCI_MIRROR));
+    assertEquals(
+        List.of(PROXY_COLD_PACKAGE + NpmProxyGcAdapter.PACKUMENT, PROXY_COLD_PACKAGE + "@1.3.0"),
+        dead.get(RepositoryType.NPM_PROXY));
+    assertEquals(
+        List.of(PROXY_WARM_PACKAGE + NpmProxyGcAdapter.PACKUMENT, PROXY_WARM_PACKAGE + "@5.3.0"),
+        kept.get(RepositoryType.NPM_PROXY),
+        "a package installed yesterday keeps its tarball and its document");
+
+    // The other six, unchanged — condemning nothing, keeping exactly what they kept before.
     for (RepositoryType type : RepositoryType.values()) {
+      if (type == RepositoryType.OCI_MIRROR || type == RepositoryType.NPM_PROXY) {
+        continue;
+      }
       assertEquals(List.of(), dead.get(type), type.wireName() + " must still condemn nothing");
     }
     assertEquals(
@@ -129,21 +159,65 @@ class GcTypeConfigTest extends GcFixture {
     assertEquals(
         List.of(MAVEN_JAR_PATH, MAVEN_POM_PATH).stream().sorted().toList(),
         kept.get(RepositoryType.MAVEN_PACKAGES));
-    assertEquals(
-        List.of(MIRROR_IMAGE + "@sha256:" + mirror.child(), MIRROR_IMAGE + ":jdk-25").stream()
-            .sorted()
-            .toList(),
-        kept.get(RepositoryType.OCI_MIRROR));
     assertEquals(List.of(), kept.get(RepositoryType.CI_SCREENSHOTS));
     assertEquals(List.of(), kept.get(RepositoryType.CI_VIDEOS));
-    assertEquals(List.of(), kept.get(RepositoryType.NPM_PROXY));
     assertEquals(List.of(), kept.get(RepositoryType.DAEMON_BINARIES));
-    assertNotNull(
-        typePlan(report, RepositoryType.OCI_IMAGES).error(),
-        "no qits-cd in this suite: the type still aborts fail-closed rather than planning");
+    assertEquals(
+        List.of("alpha:v1", "alpha:v2"),
+        kept.get(RepositoryType.OCI_IMAGES),
+        "with pins in hand the hosted type plans as it always did: two tags, neither a build sha");
 
-    assertEquals(0, report.sweep().blobCount(), "nothing is swept, exactly as before");
+    // The blob half of the same comparison, and it is the first time this platform's plan has
+    // proposed unlinking anything: the whole cached image, plus the cold package's tarball, once no
+    // identity of any type names them. Every other blob in the store is still named by something.
+    assertEquals(
+        List.of(
+                mirror.child(),
+                mirror.config(),
+                mirror.index(),
+                mirror.layer(),
+                proxy.coldTarball())
+            .stream()
+            .sorted()
+            .toList(),
+        report.sweep().blobIds());
     assertEquals(List.of(store.rowless()), report.untouchable().blobIds());
+  }
+
+  @Test
+  void theTwoCacheTypesRefuseToPlanWhileThePinSourcesCannotAnswer() throws Exception {
+    // The other side of the same wiring, on the report a deployment actually gets when qits-cd or
+    // qits-ci is down: both cache types read pins, so both are refused rather than planned against
+    // "nothing is pinned". This suite's pin urls are closed ports, which is that state exactly.
+    seedMirror();
+    seedProxy();
+    ageMirrorRows(Duration.ofDays(60));
+
+    GcPlanReport report = planner.plan();
+
+    assertFalse(report.executable());
+    for (RepositoryType type :
+        List.of(RepositoryType.OCI_MIRROR, RepositoryType.NPM_PROXY, RepositoryType.OCI_IMAGES)) {
+      assertTrue(
+          typePlan(report, type).error().contains("live pins unavailable"),
+          type.wireName() + ": " + typePlan(report, type).error());
+      assertEquals(List.of(), typePlan(report, type).dead());
+    }
+    assertEquals(0, report.sweep().blobCount(), "a refusal reclaims nothing, by construction");
+  }
+
+  @Test
+  void everyReportCarriesTheProxysH2HonestyLine() throws Exception {
+    // reclaimableBytes counts files, and a packument is not one. Without this line on the type's
+    // own report line, a run that condemned a hundred documents reads as a run that did nothing.
+    seedProxy();
+
+    GcPlanReport report = planner.plan(census.take(), planner.registered(), GcPins.none());
+
+    String note = typePlan(report, RepositoryType.NPM_PROXY).note();
+    assertNotNull(note);
+    assertTrue(note.contains("SHUTDOWN COMPACT"), note);
+    assertTrue(note.contains("0 bytes"), note);
   }
 
   private static GcTypeConfiguration line(GcPlanReport report, RepositoryType type) {

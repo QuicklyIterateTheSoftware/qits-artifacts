@@ -6,8 +6,14 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import eu.wohlben.qits.artifacts.gc.CacheEvictionStrategy;
+import eu.wohlben.qits.artifacts.gc.GcPinned;
+import eu.wohlben.qits.artifacts.gc.GcStrategy;
+import eu.wohlben.qits.artifacts.gc.NpmProxyGcAdapter;
+import eu.wohlben.qits.artifacts.gc.dto.GcIdentity;
 import eu.wohlben.qits.artifacts.persistence.NpmProxyPackumentRepository;
 import eu.wohlben.qits.artifacts.persistence.NpmVersionRepository;
+import eu.wohlben.qits.artifacts.persistence.NpmVersionTombstoneRepository;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
@@ -17,8 +23,11 @@ import jakarta.inject.Inject;
 import java.net.URI;
 import java.net.URL;
 import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -54,6 +63,8 @@ class NpmProxyTest {
 
   @Inject NpmVersionRepository versions;
   @Inject NpmProxyPackumentRepository packuments;
+  @Inject NpmVersionTombstoneRepository tombstones;
+  @Inject NpmProxyGcAdapter proxyAdapter;
 
   @TestHTTPResource("/")
   URL root;
@@ -233,6 +244,78 @@ class NpmProxyTest {
           packuments.findOne("npmjs", subject.name()).orElseThrow().fetchedAt,
           "a tarball read revalidates no document");
     }
+  }
+
+  @Test
+  void anEvictedPackageIsPulledThroughAgainAndReCachedWithNoTombstoneInTheWay() {
+    // Garbage collection's whole claim about this type, proved the only way it can be: by COUNTING
+    // upstream requests. The package is cached (one packument request, one tarball request), then
+    // its rows are evicted through the real doors, and the next install pays upstream exactly once
+    // more for each and lands back in the cache. A collector that broke the re-fetch — a tombstone
+    // left behind, a row half-removed — would show up here as a 403, a 404, or a count that never
+    // moved.
+    TinyPackage subject = upstreamPackage("1.3.0");
+
+    try (NpmClient npm = client()) {
+      String url = NpmClient.tarballUrl(npm.packumentJson("npmjs", subject.name()), "1.3.0");
+      assertArrayEquals(subject.tarball(), npm.tarball(url).body());
+      assertEquals(1, StubNpmRegistry.INSTANCE.packumentRequests());
+      assertEquals(1, StubNpmRegistry.INSTANCE.tarballRequests());
+
+      evict(subject.name());
+
+      versions.getEntityManager().clear();
+      assertTrue(versions.findOne("npmjs", subject.name(), "1.3.0").isEmpty(), "the row is gone");
+      assertTrue(packuments.findOne("npmjs", subject.name()).isEmpty(), "the document is gone");
+      assertTrue(
+          tombstones.findOne("npmjs", subject.name(), "1.3.0").isEmpty(),
+          "and no tombstone: a proxy that spent the version's name could never re-cache it");
+
+      JsonNode refetched = npm.packumentJson("npmjs", subject.name());
+      assertEquals("1.3.0", refetched.path("dist-tags").path("latest").asText());
+      assertArrayEquals(subject.tarball(), npm.tarball(NpmClient.tarballUrl(refetched, "1.3.0")).body());
+      assertEquals(
+          2,
+          StubNpmRegistry.INSTANCE.packumentRequests(),
+          "the evicted document is fetched again, once");
+      assertEquals(
+          2,
+          StubNpmRegistry.INSTANCE.tarballRequests(),
+          "and so are the bytes — this count is the whole proof that eviction happened and healed");
+
+      versions.getEntityManager().clear();
+      assertTrue(
+          versions.findOne("npmjs", subject.name(), "1.3.0").isPresent(), "re-cached, not merely served");
+      assertTrue(packuments.findOne("npmjs", subject.name()).isPresent());
+    }
+  }
+
+  /**
+   * Evicts one cached package the way a sweep does: the real engine over the real adapter, narrowed
+   * to this case's own package so the rest of the suite's cache is left alone.
+   *
+   * <p>The window is zero and the clock is a minute ahead, which is how a case gets a shipped P30D
+   * rule to condemn something cached seconds ago without reconfiguring the deployment's policy. The
+   * grace window answers "nothing is young" for the same reason: what is on trial here is the
+   * re-fetch, and the window has its own cases in the gc module.
+   */
+  private void evict(String packageName) {
+    GcStrategy.Plan everything =
+        new CacheEvictionStrategy()
+            .plan(proxyAdapter, Duration.ZERO, Instant.now().plusSeconds(60), GcPinned.NONE);
+    List<GcIdentity> mine =
+        everything.dead().stream()
+            .filter(
+                dead ->
+                    dead.identity().equals(packageName + "@1.3.0")
+                        || dead.identity().equals(packageName + NpmProxyGcAdapter.PACKUMENT))
+            .toList();
+    assertEquals(2, mine.size(), "the version and its document are both condemned");
+    GcStrategy.Applied applied =
+        proxyAdapter.delete(
+            new GcStrategy.Plan(mine, List.of(), Set.of(), Set.of()), blobId -> false);
+    assertEquals(List.of(), applied.errors(), "eviction goes through the proxy door cleanly");
+    assertEquals(2, applied.deleted().size());
   }
 
   private TinyPackage upstreamPackage(String version) {

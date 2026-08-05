@@ -1011,8 +1011,8 @@ if a change would let one strategy reuse another's policy, it is the wrong chang
 | `npm-packages` | suffixed `-main.g<sha7>` versions except the newest per package | every unsuffixed version; anything a dist-tag names | newest prerelease per package | tarball blob ids of kept versions | dry-run reviewed |
 | `ci-screenshots` | records of deleted branches; superseded per (branch, userflow) | — | newest per (branch, userflow) | `artifact_record.blob_id` | **stub claims the type** (`CiScreenshotsGcStrategy`): plans nothing at zero rows under a note naming the rule, fails closed once rows exist |
 | `ci-videos` | superseded per userflow beyond a byte budget | — | newest N per userflow, N in bytes | `artifact_record.blob_id` | **stub claims the type** (`CiVideosGcStrategy`): same posture, deliberately its own class — byte-budgeted is not branch-scoped |
-| `npm-proxy` | **parked** — cache eviction is access-based, which is `artifact-access-tracking`'s territory, not a structural rule | — | — | — | not this design |
-| `oci-mirror` | **nothing yet** — access is tracked, but no retention window/eviction policy is settled | every cached tag and manifest | — | manifest closure over the namespace | claimed, so the report says so |
+| `npm-proxy` | cached versions and cached packuments unaccessed for `P30D` | — | anything a live pin names by digest | `npm_version.tarball_blob_id` of surviving versions | **live** (`NpmProxyGcStrategy`, the cache engine) |
+| `oci-mirror` | cached tags, and manifests no tag names, unaccessed for `P30D` | — | anything a live pin names by digest | manifest closure over surviving tags and manifests | **live** (`OciMirrorGcStrategy`, the cache engine) |
 | `maven-packages` | **nothing** — releases are never eligible; timestamped snapshot builds accumulate at a recorded price, with the cleanup rule named (keep the newest N per snapshot version) | every deployed file | — | `maven_artifact.blob_id`, sized from the row | claimed, so the report says so |
 | `daemon-binaries` | **nothing yet** — the pin source exists now (`GET /ci/api/daemon`, read by every run), so what is missing is the adapter, not the facts | the pinned version and its predecessor | — | `daemon_binary.blob_id`, sized from the row | **unclaimed**, so the report says "no strategy registered": a strategy shipped before its adapter would be a guess about the one blob class a running service executes |
 | git host (not an `artifact_repository` type) | superseded pack descriptions after a repack | every ref | current packs | `PackCatalog.list` per repo | the DFS migration |
@@ -1069,12 +1069,17 @@ a type nobody configured is a decision nobody took.
 | `maven-packages`, `daemon-binaries` | `own` | `P90D` |
 | `ci-screenshots`, `ci-videos` | `excluded` | — (a window beside a type nobody collects reads as a running rule) |
 
-**The engines are dark.** They are written, unit-tested and configured, and nothing is wired to them
-— the six per-type strategies still answer the planner, and what a plan condemns is unchanged
-(asserted, `GcTypeConfigTest`). What the report gains meanwhile is the **configuration echo**:
-`configuration[]` in `GET /gc/plan`, one line per type carrying the configured strategy, the window
-and the effective rule as a sentence. It is the half of a plan the outcomes cannot show — "nothing
-died" reads identically whether the rule is right or the window is a year.
+**The cache engine is live; the own engine is not yet.** `oci-mirror` and `npm-proxy` run
+`CacheEvictionStrategy` over real adapters, which is the **first change to what dies on this
+platform** — both types used to condemn nothing. The four own types still answer through their own
+per-type strategies until their adapters land, and that split is asserted rather than assumed:
+`GcTypeConfigTest` pins the two caches' new dead sets and the other six types' sets as
+identity-for-identity what they were.
+
+The report carries the **configuration echo** beside the outcomes: `configuration[]` in
+`GET /gc/plan`, one line per type with the configured strategy, the window and the effective rule as
+a sentence. It is the half of a plan the outcomes cannot show — "nothing died" reads identically
+whether the rule is right or the window is a year.
 
 ### Live pins, and the whole-run abort
 
@@ -1233,9 +1238,10 @@ above beyond the seam, and the resemblance stops as soon as the rules are spelle
 | a pointer names it | belt and braces: any version a dist-tag currently names. Today it changes no outcome, which is exactly when a backstop is worth having — a packument naming a version its `versions` does not list is a broken package |
 | nobody modelled it | a prerelease of an unrecognised shape (an `-rc.1`), or a version that is not semver at all and so cannot be proved superseded. Only main builds are ever condemned |
 
-`npm-proxy` is **not** claimed, though it shares the `npm_version` table: its content is a cache of
-upstream, so its policy is eviction rather than retention and the design parks it. "No strategy
-registered for npm-proxy" is the honest report of a decision nobody has taken.
+`npm-proxy` shares the `npm_version` table and is collected by a **different engine over the same
+table**: the hosted rows by the rules above, the cached ones by eviction (`NpmProxyGcStrategy`, its
+own section below). The scope is filtered by the repository row's *type*, and asserted in both
+suites, because a leak in either direction is the one mistake these two types can make.
 
 **The tombstone is npm's alone, and docker needs nothing like it.** Version immutability is enforced
 by looking for the row (publish over an existing version is `403`), so deleting a row would quietly
@@ -1254,30 +1260,75 @@ only through the `NpmRegistryCollection` facade, and its one caller is `NpmPacka
 was never a step someone had to remember, and both guarantees live in the mechanism where no path
 around them exists.
 
-### `oci-mirror`, the third — a rule of "nothing dies", said out loud
+### The two caches — the first types that actually delete something
 
-`OciMirrorGcStrategy` keeps every cached tag and every cached manifest, under one rule:
-**`append-only pending an access-based retention policy`**. That is the settled posture, not a
-placeholder for an invented structural rule.
+`oci-mirror` and `npm-proxy` run one engine (`CacheEvictionStrategy`) over one rule: **everything
+unaccessed for longer than `P30D` is evicted, and a live pin outranks the window.** Both used to
+condemn nothing — the mirror said `append-only pending access tracking` out loud, npm-proxy was
+unclaimed — and both conditions are discharged: access tracking shipped (V9 for the OCI tables, V11
+for `npm_version`) and the settlement configured both types as `cache`.
 
-A cache's eviction is access-based — *which of these has nobody pulled in a year*. This store now
-tracks that fact, but the retention window and deletion policy remain deliberately unsettled, so it
-keeps everything at a price stated up front. The price: an estimated 1.5–2.5 GiB one-time fill for
-the platform's real base images, then low-GiB-per-year drift as upstreams move mutable tags like
-`jdk-25` and strand the manifests they used to name. A later GC policy can now use the same
-access-filtered explorer view operators inspect.
+What each one calls an identity, and what deleting it costs:
 
-**Why a class at all, when the answer is "no".** An unclaimed type reports "no strategy registered",
-which is the honest report of a decision nobody has taken — and here one *was* taken. Claiming the
-type is how the report tells the two apart, and the contrast with the `npm-proxy` line beside it is
-the point of both. It is also why mirrors are a separate type: `jdk-25` and `9.6` are neither calver
-releases nor build shas, so inside docker's rules every mirrored tag would land on the
-unclassified-means-keep backstop — same outcome, dishonest report, and the one case that backstop
-exists to catch buried under hundreds that are not it.
+| | identity | effective access | eviction costs |
+|---|---|---|---|
+| `oci-mirror` | a cached tag; a manifest **no tag names** (an index's child, or a manifest an upstream tag moved off) | `max(updated_at/created_at, accessed_at)` | one upstream pull, per architecture actually asked for |
+| `npm-proxy` | a cached version (`npm_version` row, proxy repositories only); a cached packument (`npm_proxy_packument` row) | version: `max(created_at, accessed_at)`; packument: `max(fetched_at, the newest access among that package's versions)` | one upstream request per document and per tarball |
 
-This is the one strategy that reads the census: with no rules of its own, the type's live set *is*
-its answer. It also depends on nothing outside this service, so it can never fail closed — an
-`error` on this type's line means something is genuinely wrong.
+Three things are load-bearing and each one is a way this could have gone wrong:
+
+- **A manifest a tag names is never a candidate of its own** — its tag is its identity. A child of a
+  *kept* index is, though, and evicting one is not corruption: a mirror pull binds an index first and
+  fetches children lazily, so an index referencing a child with no local row is the normal state of a
+  partially-pulled image. Its bytes survive regardless, because the surviving index still reaches
+  them in the census's closure.
+- **A packument is judged with its versions' access folded in.** `fetched_at` says when the
+  *document* was last revalidated upstream, which a TTL moves on its own; a package whose tarballs
+  are being installed weekly is in use whatever its document's timestamp says.
+- **Proxy eviction writes no tombstone.** A tombstone records "this version's name is spent
+  forever", which is what a hosted registry owes its consumers and the exact opposite of what a cache
+  owes: the version is upstream's and re-fetching it is the point. So the proxy has its own doors —
+  `NpmRegistryCollection.evictProxiedVersion`/`evictProxiedPackument` — which refuse any repository
+  that is not `npm-proxy`, because one table holds both kinds of row.
+
+Mirrors stay a **separate type** for the reason they always were: `jdk-25` and `9.6` are neither
+calver releases nor build shas, so under docker's rules every mirrored tag would land on the
+unclassified-means-keep backstop. The engines sharpen it — own-ness earns version protection, and a
+cache has none of ours to protect. A mirrored `jdk-25` is *upstream's* release, and keeping it
+forever on that basis is how a mirror never shrinks.
+
+The mirror's tag eviction also clears the tag's `oci_mirror_tag_check` row, **inside
+`OciRegistryService.collectTag`** rather than in the caller: a freshness row for a tag that no longer
+exists is a row nothing would ever read or delete again, and a funnel is the only place a rule like
+that cannot be forgotten by a second caller. The same funnel serves `oci-images`; nothing in it
+reads a repository's type, so no widening was needed to let the mirror through — only that one extra
+line.
+
+#### Reclaiming the H2 file after a sweep (ops)
+
+**Evicting a packument frees no disk, and the report says so on every run.** The documents are CLOBs
+inside the H2 file (660 MB of an 747 MB database, measured 2026-08-01), so a delete returns their
+pages to H2's own free list and the file stays exactly the size it was. `reclaimableBytes` on the
+`npm-proxy` line therefore counts tarball blobs and nothing else, and the type's `note` carries the
+character figure beside that zero — without it a run that condemned a hundred documents reads as a
+run that did nothing.
+
+The file shrinks only under `SHUTDOWN COMPACT`, which closes the database, so **nothing in this
+service runs it** — a GC route may not take the platform's store offline. It is a maintenance
+restart, in this order:
+
+1. Run the sweep and read the receipt. Compacting before the rows are gone compacts nothing.
+2. Stop qits-artifacts (the H2 file is embedded; a live process holds it open).
+3. Open the file with the H2 shell — the same JDBC url the service uses, from the same jar:
+   `java -cp h2.jar org.h2.tools.Shell -url "jdbc:h2:file:<data-dir>/artifacts" -user … -sql "SHUTDOWN COMPACT"`.
+   It rewrites the file and exits; the runtime is roughly linear in *live* data, and on the measured
+   747 MB file it is a matter of minutes, not seconds.
+4. Start qits-artifacts and check `GET /artifacts/api/store/summary` — the blob figures are unchanged
+   (this touches no blob), and the database file on the volume is the number that moved.
+
+Take a copy of the file first, as with any offline database operation. A compaction that is
+interrupted leaves the old file behind, which is recoverable; a compaction nobody has a copy of is
+not something to find out about during one.
 
 ### `maven-packages`, the sixth — the mirror's shape, on purpose
 
@@ -1294,8 +1345,8 @@ accumulate** — priced honestly: jar plus pom at the platform library's tens-of
 noise, and even a CI cadence of snapshot deploys is single-digit MiB per library per year. The
 cleanup rule is named in the strategy's note — *keep the newest N timestamped builds per (group,
 artifact, snapshot version); releases never eligible* — and lands when someone wants the bytes
-back. `maven-proxy` is deliberately unclaimed, the `npm-proxy` line verbatim: a re-fetchable cache
-of upstream, whose eviction is `artifact-access-tracking`'s third waiting client.
+back. `maven-proxy`, when its constant lands, is a `cache` in the settlement's mapping like the
+other two, and needs an adapter rather than a rule of its own.
 
 ### What the plan says
 
@@ -1321,14 +1372,21 @@ of upstream, whose eviction is `artifact-access-tracking`'s third waiting client
       "blobsReleased": 1, "blobsSweepable": 1, "reclaimableBytes": 17904 },
     { "type": "oci-mirror", "strategy": "OciMirrorGcStrategy",
       "note": null, "error": null,
-      "dead": [],                       // never; the rule is the posture, not a placeholder
+      "dead": [{ "repository": "hub", "identity": "library/node@sha256:9f2c…",
+                 "rule": "cached content unaccessed for longer than P30D" }],
       "kept": [{ "repository": "quay", "identity": "quarkus/ubi9-quarkus-mandrel-builder-image:jdk-25",
-                 "rule": "append-only pending access tracking" }],
-      "blobsReleased": 0, "blobsSweepable": 0, "reclaimableBytes": 0 },
-    { "type": "npm-proxy", "strategy": null,
-      "note": "no strategy registered for npm-proxy", "error": null,
-      "dead": [], "kept": [],
-      "blobsReleased": 0, "blobsSweepable": 0, "reclaimableBytes": 0 }
+                 "rule": "accessed inside the P30D window" }],
+      "blobsReleased": 12, "blobsSweepable": 9, "reclaimableBytes": 402653184 },
+    { "type": "npm-proxy", "strategy": "NpmProxyGcStrategy",
+      "note": "cached packuments are H2 CLOBs, not files: 660287820 characters are cached as this report was produced. Evicting one … reclaims 0 bytes on disk … SHUTDOWN COMPACT …",
+      "error": null,
+      "dead": [{ "repository": "npmjs", "identity": "left-pad (packument)",
+                 "rule": "cached content unaccessed for longer than P30D" },
+               { "repository": "npmjs", "identity": "left-pad@1.3.0",
+                 "rule": "cached content unaccessed for longer than P30D" }],
+      "kept": [{ "repository": "npmjs", "identity": "chalk@5.3.0",
+                 "rule": "accessed inside the P30D window" }],
+      "blobsReleased": 1, "blobsSweepable": 1, "reclaimableBytes": 20480 }
   ],
   "sweep":       { "blobCount": 0, "reclaimableBytes": 0,
                    "withheldByGraceWindow": 0, "withheldBytes": 0, "blobIds": [] },
@@ -1339,10 +1397,14 @@ of upstream, whose eviction is `artifact-access-tracking`'s third waiting client
 Three details a reader trips over otherwise:
 
 - **A type with no strategy says so.** "Nothing to collect" and "nobody is collecting" are different
-  answers, and only one of them is fine. Six types are claimed today (`oci-images`, `npm-packages`,
-  `oci-mirror`, `maven-packages` — whose whole policies are "nothing dies", which is still a
-  decision — and the two CI stubs, whose notes name their intended rules); only `npm-proxy` reports
-  "no strategy registered", which is the honest state of a decision nobody has taken.
+  answers, and only one of them is fine. Seven types are claimed today (`oci-images`,
+  `npm-packages`, the two caches, `maven-packages` — whose policy is still "nothing dies", which is
+  a decision — and the two CI stubs, whose notes name their intended rules); only `daemon-binaries`
+  reports "no strategy registered", which is the honest state of a decision nobody has taken.
+- **Three types refuse when the pins are missing.** `oci-images` and both caches read `GcPins`, so a
+  run with qits-cd or qits-ci unreachable reports them as `live pins unavailable` rather than
+  planning them against "nothing is pinned". A cache is pinned only by *digest* — nothing names a
+  mirror tag or a cached version by coordinate — but blobs dedupe globally, so the check is real.
 - **`sweep` is not the sum of the per-type figures.** A blob dies once, and two types releasing the
   same content free it once. The per-type numbers answer "what does this rule buy on its own"; the
   sweep answers "what would a run free tonight".

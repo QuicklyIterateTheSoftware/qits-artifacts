@@ -251,6 +251,89 @@ public class NpmRegistryService {
   }
 
   /**
+   * Evicts one <b>cached</b> version of a proxy repository — the row goes and <b>no tombstone is
+   * written</b>.
+   *
+   * <p>The missing tombstone is the whole difference from {@link #collect}, and it is the point
+   * rather than a shortcut. A tombstone records "this name was published here and its bytes are
+   * gone, so the name is spent forever" — the immutability guarantee a hosted registry owes its
+   * consumers. A proxy owes the opposite: the version is upstream's, evicting it is a cache
+   * decision, and the very next {@code npm install} must be able to pull the same version through
+   * again and re-cache it. A tombstone here would turn an eviction into an unpublish of somebody
+   * else's package.
+   *
+   * <p><b>The repository's type is checked, not assumed.</b> {@code npm_version} is one table for
+   * both npm types, so a coordinate is all that separates a cached row from a published one, and a
+   * caller that got the type wrong would silently strip a published version of its tombstone. The
+   * refusal is what makes "no tombstone" safe to say out loud.
+   *
+   * <p>Dist-tags are not consulted: a proxy has no {@code npm_dist_tag} rows — its packument is
+   * upstream's document verbatim — so there is no pointer here to break.
+   *
+   * <p>Package-private, reached only through {@link NpmRegistryCollection}, and called only by the
+   * {@code gc} module's {@code NpmProxyGcAdapter}. The tarball blob is not touched; what may be
+   * unlinked is the sweep's question, from the census.
+   *
+   * @throws NpmException {@code 404} if there is no such row, {@code 409} if the repository is not
+   *     a proxy
+   */
+  @ActivateRequestContext
+  @Transactional
+  void evictProxiedVersion(String repository, String packageName, String version) {
+    requireProxy(repository, packageName + "@" + version);
+    NpmVersion row =
+        versions
+            .findOne(repository, packageName, version)
+            .orElseThrow(
+                () ->
+                    new NpmException(
+                        404, "no such version " + packageName + "@" + version + " to evict"));
+    versions.delete(row);
+  }
+
+  /**
+   * Evicts one cached packument document. Same door, same type check, same reason for writing no
+   * tombstone: the next request revalidates against upstream and caches the answer again.
+   *
+   * <p>Deleting the document while cached versions of the package survive is a supported state and
+   * not a repair case — the packument is re-fetched on the next read, and the tarball rows go on
+   * serving from disk meanwhile.
+   *
+   * @throws NpmException {@code 404} if nothing is cached, {@code 409} if the repository is not a
+   *     proxy
+   */
+  @ActivateRequestContext
+  @Transactional
+  void evictProxiedPackument(String repository, String packageName) {
+    requireProxy(repository, packageName);
+    NpmProxyPackument cached =
+        packuments
+            .findOne(repository, packageName)
+            .orElseThrow(
+                () ->
+                    new NpmException(
+                        404, "no cached packument for " + packageName + " to evict"));
+    packuments.delete(cached);
+  }
+
+  /** Refuses anything but an {@code npm-proxy} repository — see {@link #evictProxiedVersion}. */
+  private void requireProxy(String repository, String coordinate) {
+    ArtifactRepository row = repository == null ? null : repositories.findById(repository);
+    if (row == null || row.type != RepositoryType.NPM_PROXY) {
+      throw new NpmException(
+          409,
+          "refusing to evict "
+              + coordinate
+              + " from '"
+              + repository
+              + "' — eviction without a tombstone is a cache operation, and this repository is "
+              + (row == null ? "not registered" : row.type.wireName())
+              + ". A published version leaves only through collect(), which writes the tombstone"
+              + " that keeps its name from being reused");
+    }
+  }
+
+  /**
    * Records a version the proxy just pulled through, if it is not already known.
    *
    * <p>Written lazily on the first tarball fetch rather than when a packument is cached, so the

@@ -28,9 +28,9 @@ import org.junit.jupiter.api.Test;
  * <p>The strategies here are fakes constructed in the test rather than beans, and that is
  * deliberate: the reconciliation is what these cases are about, and a real strategy would answer
  * with its own policy instead of the shape a case needs. Registering one as a bean would also take
- * away the "nobody collects this type" case, which {@code npm-proxy} is still in. The two
- * registered beans — {@code OciImageGcStrategy} and {@code NpmPackagesGcStrategy} — are exercised on
- * their own rules in their own suites and appear here only in the first case, as the report's shape.
+ * away the "nobody collects this type" case, which {@code daemon-binaries} is still in. The
+ * registered beans are exercised on their own rules in their own suites and appear here only in the
+ * first case, as the report's shape.
  */
 @QuarkusTest
 class GcPlanTest extends GcFixture {
@@ -38,16 +38,15 @@ class GcPlanTest extends GcFixture {
   @Inject GcPlanner planner;
 
   @Test
-  void fiveTypesAreCollectedAndTheLastOneSaysSoRatherThanGoMissing() throws Exception {
+  void sevenTypesAreClaimedAndTheLastOneSaysSoRatherThanGoMissing() throws Exception {
     // The report a reviewer sees first. "No plan", "nothing to collect" and "refused to plan" are
     // three different facts, so every type is listed with its own reason rather than omitted — and
-    // oci-images demonstrates the third: this suite has no qits-cd, its pin fetch is refused at a
-    // closed port, and a keep-set that cannot be established reclaims nothing. npm-packages
-    // demonstrates the second: its rules run over the fixture's two released versions and condemn
-    // neither. oci-mirror is the second's sharper form: a type whose whole policy is "nothing dies",
-    // which is a decision and therefore claims its type, unlike npm-proxy beside it. The two CI
-    // stubs are the second form again with a caption: zero rows, a named intended rule, and a note
-    // saying the loop has never produced content.
+    // three types demonstrate the third here: oci-images, oci-mirror and npm-proxy all read live
+    // pins, this suite has no qits-cd or qits-ci, and a keep-set that cannot be established
+    // reclaims nothing. npm-packages demonstrates the second: its rules run over the fixture's two
+    // released versions and condemn neither. The two CI stubs are the second form with a caption:
+    // zero rows, a named intended rule, and a note saying the loop has never produced content.
+    // daemon-binaries is the first — nobody claims it yet.
     Store store = seed();
 
     assertEquals(
@@ -56,6 +55,7 @@ class GcPlanTest extends GcFixture {
             "CiVideosGcStrategy",
             "MavenPackagesGcStrategy",
             "NpmPackagesGcStrategy",
+            "NpmProxyGcStrategy",
             "OciImageGcStrategy",
             "OciMirrorGcStrategy"),
         planner.registered().stream().map(GcPlanner::nameOf).sorted().toList());
@@ -86,8 +86,13 @@ class GcPlanTest extends GcFixture {
         case OCI_MIRROR -> {
           assertEquals("OciMirrorGcStrategy", type.strategy());
           assertNull(type.note());
-          assertNull(type.error(), "it depends on nothing outside this service, so it cannot fail");
-          assertEquals(0, type.dead().size(), "append-only: this type condemns nothing, ever");
+          assertNotNull(type.error(), "the cache engine reads pins, and there are none here");
+          assertEquals(0, type.dead().size(), "a refused type plans nothing");
+        }
+        case NPM_PROXY -> {
+          assertEquals("NpmProxyGcStrategy", type.strategy());
+          assertNotNull(type.error(), "the cache engine reads pins, and there are none here");
+          assertEquals(0, type.dead().size(), "a refused type plans nothing");
         }
         case CI_SCREENSHOTS -> {
           assertEquals("CiScreenshotsGcStrategy", type.strategy());

@@ -36,9 +36,9 @@ import java.util.Map;
  * <p><b>The report also echoes the configuration</b> ({@link GcRules}): per type, the configured
  * engine, its window and the effective rule as a sentence. The settlement moved the policy into
  * configuration, and configuration is the half of a plan the dead and kept lists cannot show —
- * "nothing died" reads identically whether the rule is right or the window is a year. The echo is
- * what a reviewer checks the mapping against today, while the two engines are still dark and the
- * per-type strategies below are what actually answer.
+ * "nothing died" reads identically whether the rule is right or the window is a year. For the two
+ * cache types the echo now reads as the rule that actually ran: {@link CacheEvictionStrategy}
+ * writes the sentence and the same class produced the plan beside it.
  */
 @ApplicationScoped
 public class GcPlanner {

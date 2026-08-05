@@ -308,13 +308,23 @@ public class OciRegistryService {
   }
 
   /**
-   * Deletes one tag row — the only way a tag ever leaves this registry.
+   * Deletes one tag row, and the mirror freshness row beside it — the only way a tag ever leaves
+   * this registry.
    *
    * <p><b>Package-private, reached only through {@link OciRegistryCollection}</b> and called only
-   * by the {@code gc} module's {@code OciImageGcStrategy.apply} — the same shape and the same reason
-   * as {@code NpmRegistryService.collect} and {@code BlobStore.delete}: the client-facing {@code
-   * 405} on {@code /v2} deletes stays exactly as it is, and no route reaches this. Which tags die is
-   * the strategy's rule; this only knows how a row is removed.
+   * by the {@code gc} module's {@code OciImageGcStrategy} and {@code OciMirrorGcAdapter} — the same
+   * shape and the same reason as {@code NpmRegistryService.collect} and {@code BlobStore.delete}:
+   * the client-facing {@code 405} on {@code /v2} deletes stays exactly as it is, and no route
+   * reaches this. Which tags die is the strategy's rule; this only knows how a row is removed.
+   *
+   * <p><b>Both OCI types come through here, and always did.</b> Nothing in this method reads a
+   * repository's type — a tag row is a tag row — so the mirror's eviction needed no widening of the
+   * door itself. What it needed is the line below: an {@code oci_mirror_tag_check} row keyed by the
+   * same {@code (repository, image, tag)} outlives the tag it describes, and a freshness row for a
+   * tag that no longer exists is a row nothing will ever read or delete. Doing it here rather than
+   * in the caller is the funnel's whole point — the auxiliary row cannot be forgotten by a second
+   * caller, because there is no second way in. A hosted repository never has one, so this is a
+   * no-op for {@code oci-images}.
    *
    * <p>The manifest the tag named is not touched — whether it survives is a reachability question
    * the strategy answers, and its blobs are the sweep's question after that.
@@ -336,15 +346,17 @@ public class OciRegistryService {
                             + tag
                             + " to collect — the store moved since the plan was computed"));
     tags.delete(row);
+    tagChecks.findOne(repository, imageName, tag).ifPresent(tagChecks::delete);
   }
 
   /**
    * Deletes one manifest row — the untagged-manifest half of OCI garbage collection.
    *
-   * <p>Package-private, same rule as {@link #collectTag}. One guarantee is the mechanism's rather
-   * than the policy's: <b>a manifest a tag still names is refused.</b> The strategy never condemns
-   * one — reachability from kept tags is its whole rule — so this firing means the plan was stale
-   * or wrong, and refusing beats serving a tag whose manifest row is gone.
+   * <p>Package-private, same rule as {@link #collectTag}, and called by both OCI types' collectors.
+   * One guarantee is the mechanism's rather than the policy's: <b>a manifest a tag still names is
+   * refused.</b> Neither collector condemns one — reachability from kept tags is docker's whole
+   * rule, and the mirror only ever enumerates manifests no tag names — so this firing means the
+   * plan was stale or wrong, and refusing beats serving a tag whose manifest row is gone.
    *
    * <p>The manifest's blobs — its own bytes included — are not touched. Blobs dedupe across every
    * repository type, so what may be unlinked is never one type's question; the sweep answers it.
