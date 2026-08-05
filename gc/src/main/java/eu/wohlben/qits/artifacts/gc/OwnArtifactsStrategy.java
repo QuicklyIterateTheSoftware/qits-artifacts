@@ -1,0 +1,134 @@
+package eu.wohlben.qits.artifacts.gc;
+
+import eu.wohlben.qits.artifacts.gc.dto.GcIdentity;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+/**
+ * The own-artifacts engine: the last two released versions of every identity group live forever,
+ * everything a live pin names lives, and the rest ages out.
+ *
+ * <p>The settlement's second rule, and the belt in it is deliberately narrow: <b>last 2</b> releases
+ * per group, not every release. Anything older survives on use — an old release someone still
+ * installs is accessed, so lockfile and range pulls keep it alive by being used rather than by
+ * policy — or on a live pin. That is what makes this a collector at all rather than an archive with
+ * extra steps.
+ *
+ * <p><b>The order of the three keep-classes is the safety property.</b> A pin is checked first
+ * because it is the only fact that comes from outside this service and the only one an access
+ * timestamp cannot imply: a container that has been running untouched for months still pulls its
+ * image sha on restart. Releases come next, because they are kept whatever their age. The access
+ * window is last, and it is the only rule that can condemn anything.
+ *
+ * <p><b>What a release is, what a group is, and which of two is newer are all the adapter's</b>
+ * ({@link GcTypeAdapter}). This engine counts to two. That split is what lets one engine serve
+ * npm-packages, oci-images, maven-packages and daemon-binaries without a line of shared policy
+ * between those four types — the framing's rule survives the settlement, it just moved: the types no
+ * longer share a <em>rule</em>, they share an <em>engine</em>, and each still owns its own facts.
+ *
+ * <p>Stateless and not a bean; deletion is {@link GcTypeAdapter#delete}, as for the cache engine.
+ */
+public final class OwnArtifactsStrategy {
+
+  /** How many released versions per identity group are kept whatever their age. */
+  public static final int RELEASES_KEPT = 2;
+
+  /** The rule sentence a report echoes for a type configured as own. */
+  public static String rule(Duration window) {
+    return "own: always keep the last "
+        + RELEASES_KEPT
+        + " released versions of every identity group and everything a live pin names; delete the"
+        + " rest once unaccessed for longer than "
+        + GcPlanner.iso(window)
+        + ". An older release still being installed is accessed, so use keeps it alive where policy"
+        + " no longer does.";
+  }
+
+  static final String KEPT_RELEASE =
+      "among the last " + RELEASES_KEPT + " released versions of this identity group — releases are"
+          + " kept by policy, not by access";
+
+  static String keptAccessed(Duration window) {
+    return "accessed inside the " + GcPlanner.iso(window) + " window";
+  }
+
+  static String deadUnaccessed(Duration window) {
+    return "superseded and unaccessed for longer than " + GcPlanner.iso(window);
+  }
+
+  /**
+   * Reads the adapter's identities and says what would die. Deletes nothing.
+   *
+   * @param adapter the type's own facts — what exists, what a release is, and how it orders two of
+   *     them by age
+   * @param window the configured window for that type
+   * @param now the run's clock, so a plan and its receipt judge every identity against one instant
+   * @param pins what a live service is holding on to, checked before every other rule
+   */
+  public GcStrategy.Plan plan(
+      GcTypeAdapter adapter, Duration window, Instant now, GcPinned pins) {
+    List<GcCandidate> candidates = adapter.enumerate();
+    Instant cut = now.minus(window);
+    Set<GcCandidate> keptReleases = lastReleasesPerGroup(candidates, adapter);
+
+    List<GcIdentity> dead = new ArrayList<>();
+    List<GcIdentity> kept = new ArrayList<>();
+    Set<String> released = new HashSet<>();
+    Set<String> retained = new HashSet<>();
+
+    for (GcCandidate candidate : candidates) {
+      String pin = pins.pinnedBy(candidate);
+      if (pin != null) {
+        keep(candidate, pin, kept, retained);
+      } else if (keptReleases.contains(candidate)) {
+        keep(candidate, KEPT_RELEASE, kept, retained);
+      } else if (candidate.unaccessedSince(cut)) {
+        dead.add(new GcIdentity(candidate.repository(), candidate.identity(), deadUnaccessed(window)));
+        released.addAll(candidate.blobs());
+      } else {
+        keep(candidate, keptAccessed(window), kept, retained);
+      }
+    }
+
+    dead.sort(CacheEvictionStrategy.BY_IDENTITY);
+    kept.sort(CacheEvictionStrategy.BY_IDENTITY);
+    return dead.isEmpty()
+        ? GcStrategy.Plan.nothingDies(kept, retained)
+        : new GcStrategy.Plan(dead, kept, released, retained);
+  }
+
+  /**
+   * Each group's newest {@link #RELEASES_KEPT} releases, by the adapter's own ordering.
+   *
+   * <p>Groups are kept in enumeration order and compared by identity, so a group with fewer
+   * releases than the belt simply keeps all of them — the honest answer for a package that has
+   * published once.
+   */
+  private static Set<GcCandidate> lastReleasesPerGroup(
+      List<GcCandidate> candidates, GcTypeAdapter adapter) {
+    Map<String, List<GcCandidate>> releasesByGroup = new LinkedHashMap<>();
+    for (GcCandidate candidate : candidates) {
+      if (candidate.released()) {
+        releasesByGroup.computeIfAbsent(candidate.group(), group -> new ArrayList<>()).add(candidate);
+      }
+    }
+    Set<GcCandidate> keep = new HashSet<>();
+    for (List<GcCandidate> releases : releasesByGroup.values()) {
+      releases.sort(adapter.byAge());
+      keep.addAll(releases.subList(Math.max(0, releases.size() - RELEASES_KEPT), releases.size()));
+    }
+    return keep;
+  }
+
+  private static void keep(
+      GcCandidate candidate, String rule, List<GcIdentity> kept, Set<String> retained) {
+    kept.add(new GcIdentity(candidate.repository(), candidate.identity(), rule));
+    retained.addAll(candidate.blobs());
+  }
+}

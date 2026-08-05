@@ -21,7 +21,7 @@ with `domain.repository` — see `migration-plan.md` §3.4 in the home repo.
 |---|---|
 | `artifacts/` | `eu.wohlben.qits.artifacts.*` — entity, persistence, dto, mapper, control, error. The blob store proper. No web, no JAX-RS. |
 | `git-storage/` | `eu.wohlben.qits.githost.storage` — a JGit `DfsRepository` whose packs, pack indexes and refs are blobs, plus the two ports it declares and does not implement (`PackBlobStore`, `PackCatalog`). One compile dependency: JGit. |
-| `gc/` | `eu.wohlben.qits.artifacts.gc` (+ `.dto`) — garbage collection: the six per-type strategies, the planner, the reconciliation and the sweep, plus the `CdDeploymentPins` port and its HTTP adapter. A *process* modelled from within qits-artifacts, not artifacts domain. Depends on `artifacts` and on nothing else here. No web, no JAX-RS — `GcPlanController` is in `service/`. |
+| `gc/` | `eu.wohlben.qits.artifacts.gc` (+ `.dto`) — garbage collection: the six per-type strategies, the two configured engines that will replace them, the planner, the reconciliation and the sweep, plus the `CdDeploymentPins` port and its HTTP adapter. A *process* modelled from within qits-artifacts, not artifacts domain. Depends on `artifacts` and on nothing else here. No web, no JAX-RS — `GcPlanController` is in `service/`. |
 | `service/` | `eu.wohlben.qits.artifacts.api` (the JAX-RS boundary), `eu.wohlben.qits.githost` (the Vert.x + JGit smart-HTTP host), `eu.wohlben.qits.githost.persistence` (the two adapters and the git host's entities), `eu.wohlben.qits.registry` (the Vert.x OCI Distribution API), `eu.wohlben.qits.npm` (the Vert.x npm registry and its upstream proxy) and `eu.wohlben.qits.maven` (the Vert.x maven repository). |
 | `service/src/main/webui/` | The `qits-spa-artifacts` submodule — an Angular SPA, built into the app by Quinoa and served at `/artifacts`. Not Java, and not a Maven module. |
 
@@ -1020,6 +1020,62 @@ if a change would let one strategy reuse another's policy, it is the wrong chang
 The OCI keep-set is **fetched at plan time and fail-closed**: qits-cd unreachable aborts that type's
 plan with nothing planned, never a plan on stale pins. The seam supports that directly — see below.
 
+### The settlement: two engines, configured per type
+
+The table above is what ships and answers today. What replaces it is the user's settlement of
+2026-08-05 (`artifacts-gc-plan.md`): **two generic strategies, not six bespoke ones, mapped onto the
+types by configuration.**
+
+- **`CacheEvictionStrategy`** — a pull-through cache holds somebody else's re-fetchable content, so
+  everything unaccessed past the window goes and a live pin is the only thing that stays regardless.
+  It has no release rule on purpose: keeping a mirrored tag because *upstream* calls it a release is
+  how a mirror never shrinks.
+- **`OwnArtifactsStrategy`** — the platform's own artifacts keep the **last 2 released versions per
+  identity group** whatever their age, plus everything a live pin names; the rest ages out. Anything
+  older survives on *use* — an old release someone still installs is accessed — rather than on
+  policy.
+
+Both check pins **before** the access rule, because a pin is the one fact no timestamp implies: a
+container running untouched for months still pulls its image sha on restart.
+
+The rules live in the engines; the **facts** live in a `GcTypeAdapter`, one per type, sharing no
+policy code — what an identity is, what a release is, which of two is newer, when each was last
+touched, and how a row is deleted. So the framing's rule survives the settlement rather than being
+overturned by it: the types no longer share a *rule*, they share an *engine*, and each still owns
+everything that makes it different.
+
+```java
+public interface GcTypeAdapter {
+  RepositoryType type();
+  List<GcCandidate> enumerate();                 // identities, each with its effective access time
+  Comparator<GcCandidate> byAge();               // oldest first — "newest" is a per-type fact
+  GcStrategy.Applied delete(Plan, GraceWindow);  // this type's own collection funnel
+}
+```
+
+**Effective access time is `max(created/published/fetched, accessed_at)`** — creation counts as a
+first access, so something cached or published an hour ago reads as young rather than never-read.
+The adapter folds that in; an engine only compares it.
+
+The mapping is `qits.artifacts.gc.type.<wire-name>.strategy` (`cache`, `own`, `excluded`) and
+`….window` (ISO-8601), shipped in the `gc` jar's own `META-INF/microprofile-config.properties`.
+Every `RepositoryType` must have an entry — a type with none is **refused**, not defaulted, because
+a type nobody configured is a decision nobody took.
+
+| type | strategy | window |
+|---|---|---|
+| `oci-mirror`, `npm-proxy` | `cache` | `P30D` |
+| `oci-images`, `npm-packages` | `own` | `P30D` |
+| `maven-packages`, `daemon-binaries` | `own` | `P90D` |
+| `ci-screenshots`, `ci-videos` | `excluded` | — (a window beside a type nobody collects reads as a running rule) |
+
+**The engines are dark.** They are written, unit-tested and configured, and nothing is wired to them
+— the six per-type strategies still answer the planner, and what a plan condemns is unchanged
+(asserted, `GcTypeConfigTest`). What the report gains meanwhile is the **configuration echo**:
+`configuration[]` in `GET /gc/plan`, one line per type carrying the configured strategy, the window
+and the effective rule as a sentence. It is the half of a plan the outcomes cannot show — "nothing
+died" reads identically whether the rule is right or the window is a year.
+
 ### One census, never two
 
 `LiveBlobCensus` is the reference set, and both the store summary and every GC plan read it. It was
@@ -1303,6 +1359,8 @@ app's `application.properties` overrides them.
 | `qits.artifacts.gc.blob-grace-period` | `P7D` | how long a blob file must sit untouched before the sweep may unlink it — see "Garbage collection" |
 | `qits.artifacts.gc.oci.cd-base-url` | `http://qits-cd:8080/cd/api` | where the `oci-images` strategy reads its keep-set — the **only** service this one dials. Unreachable is fail-closed: that type reclaims nothing |
 | `qits.artifacts.gc.oci.cd-timeout` | `PT10S` | per-request timeout on that fetch |
+| `qits.artifacts.gc.type.<wire-name>.strategy` | per type, see "The settlement" | which engine collects a repository type: `cache`, `own` or `excluded`. Every type must have one — a missing entry is refused, not defaulted |
+| `qits.artifacts.gc.type.<wire-name>.window` | `P30D` / `P90D` per type | how long an identity may sit unaccessed before it is eligible, ISO-8601. Absent for an `excluded` type |
 | `qits.auth.machine.required` | `false` | the machine-token rollout gate. Off, the JSON admin write surface is open — network trust. On, its writes need a bearer with `aud=qits-artifacts` |
 | `qits.auth.machine.audience` | `qits-artifacts` | this service's own id, and the `aud` its tokens must carry |
 | `qits.artifacts.startup-seed.enabled` | `true` | self-seed `ci-screenshots` + `ci-videos` + the `qits` image repository + the two npm roots (`npm`, `npmjs`) |

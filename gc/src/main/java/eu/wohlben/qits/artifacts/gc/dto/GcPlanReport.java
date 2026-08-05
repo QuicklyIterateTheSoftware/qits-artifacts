@@ -12,6 +12,9 @@ import java.util.List;
  * @param dryRun always true today, and a field rather than a comment so a client cannot mistake this
  *     for a receipt of work done
  * @param graceWindow how long a blob's file must have sat untouched before it may be unlinked, ISO-8601
+ * @param configuration what this deployment has configured per type, and what each setting means in
+ *     a sentence. The half of a plan the outcomes cannot show: "nothing died" reads the same whether
+ *     the rule is right or the window is a year.
  * @param types one entry per repository type, always all of them — a type with no strategy says so
  *     rather than being absent, because "nothing to collect" and "nobody is collecting" are
  *     different answers and only one of them is fine
@@ -22,6 +25,7 @@ public record GcPlanReport(
     Instant generatedAt,
     boolean dryRun,
     String graceWindow,
+    List<GcTypeConfiguration> configuration,
     List<GcTypePlan> types,
     GcSweepPlan sweep,
     GcUntouchablePool untouchable) {}

@@ -333,6 +333,29 @@ collection" section is the contract; these are the rules that get "helpfully" re
   `POST /artifacts/api/gc/sweep`) applies only plans it computed in the same request, and on a
   store younger than the window a sweep provably deletes nothing.
 
+- **Two engines are written and dark, and "dark" is the invariant to preserve.** The settlement
+  (`artifacts-gc-plan.md`, 2026-08-05) replaces the six bespoke strategies with
+  `CacheEvictionStrategy` + `OwnArtifactsStrategy`, mapped onto types by
+  `qits.artifacts.gc.type.<wire-name>.strategy|window` (`GcTypeConfig`). They are unit-tested, the
+  plan echoes the configuration, and **nothing is wired to them** — the six strategies below still
+  answer the planner, and `GcTypeConfigTest` asserts a seeded plan's dead and kept sets are
+  identical to what they were before the engines existed. Switching a type over is its own
+  workstream with its own review; do not do it as a side effect of something else.
+- **Engines hold rules, `GcTypeAdapter` holds facts, and neither may grow the other's half.** No
+  engine may switch on `RepositoryType`; no adapter may carry a window or a keep-count. The facts
+  are: what identities exist, what a release is here, which of two is older, and how a row is
+  deleted. Effective access time is `max(created/published/fetched, accessed_at)` — creation counts
+  as the first access, folded in by the adapter — so a freshly published artifact is young rather
+  than never-read.
+- **Pins are a keep-class checked before the access rule** (`GcPinned`), and the rule comes back as
+  a sentence so the report names which service saved an identity. A pin is the one fact no timestamp
+  implies: a container running untouched for months still pulls its image sha on restart.
+- **Every `RepositoryType` needs a configuration entry.** `GcTypeConfig.of` refuses rather than
+  defaulting to `excluded`, so adding a constant means adding two lines to the `gc` jar's
+  `META-INF/microprofile-config.properties`. The mapping's prefix is `qits.artifacts.gc.type`, not
+  `qits.artifacts.gc`: a mapping rooted at the wider prefix would claim `blob-grace-period` and the
+  pin urls, which other classes read.
+
 Six strategies exist: `OciImageGcStrategy` (`oci-images`), `NpmPackagesGcStrategy`
 (`npm-packages`), `OciMirrorGcStrategy` (`oci-mirror`), `MavenPackagesGcStrategy` (`maven-packages`)
 and the two CI stubs
@@ -415,7 +438,7 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 
 ## Tests
 
-- `mvn verify` runs 452 tests (115 in `artifacts/`, 18 in `git-storage/`, 38 in `gc/`, 281 in
+- `mvn verify` runs 511 tests (156 in `artifacts/`, 18 in `git-storage/`, 56 in `gc/`, 281 in
   `service/`) in about two minutes. Nothing here
   needs docker — and that is the constraint that shapes the registry suite: `docker`, `podman` and
   `skopeo` may not be assumed present, so `registry/OciClient` + `registry/TinyImage` synthesise a

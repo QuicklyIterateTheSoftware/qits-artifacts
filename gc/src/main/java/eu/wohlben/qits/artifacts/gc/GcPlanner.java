@@ -32,6 +32,13 @@ import java.util.Map;
  * <p>Two failure shapes are reported rather than thrown, because a report that 500s tells a reviewer
  * nothing about the other four types: a strategy that refuses to plan (fail-closed — its type keeps
  * every blob), and two strategies claiming one type, which is a policy collision and never a merge.
+ *
+ * <p><b>The report also echoes the configuration</b> ({@link GcRules}): per type, the configured
+ * engine, its window and the effective rule as a sentence. The settlement moved the policy into
+ * configuration, and configuration is the half of a plan the dead and kept lists cannot show —
+ * "nothing died" reads identically whether the rule is right or the window is a year. The echo is
+ * what a reviewer checks the mapping against today, while the two engines are still dark and the
+ * per-type strategies below are what actually answer.
  */
 @ApplicationScoped
 public class GcPlanner {
@@ -39,6 +46,7 @@ public class GcPlanner {
   @Inject LiveBlobCensus census;
   @Inject BlobSweep sweep;
   @Inject Instance<GcStrategy> strategies;
+  @Inject GcTypeConfig config;
 
   /** A fresh census, every registered strategy, and the reconciliation over both. */
   public GcPlanReport plan() {
@@ -102,6 +110,9 @@ public class GcPlanner {
         census.takenAt(),
         true,
         iso(sweep.graceWindow()),
+        // The configuration echo, beside the outcomes rather than instead of them: what each type is
+        // configured to do today, in the sentence the engine that will do it writes for itself.
+        GcRules.echo(config),
         types,
         sweep.plan(census, plans),
         sweep.untouchable(census));
