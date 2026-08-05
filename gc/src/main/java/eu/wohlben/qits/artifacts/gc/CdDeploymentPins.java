@@ -3,45 +3,46 @@ package eu.wohlben.qits.artifacts.gc;
 import java.util.List;
 
 /**
- * What qits-cd is currently holding on to: the deployment rows, newest-first, exactly as cd reports
- * them.
+ * What qits-cd needs kept: per application, every image sha that is serving or that a rollback would
+ * pull again.
  *
- * <p><b>Transport only, no policy.</b> This port fetches rows and nothing else — which rows count as
- * rollback-relevant is {@link OciImageGcStrategy}'s rule and lives there, because a keep-set assembled
- * outside the class that acts on it is a place for the two to drift, and drift here deletes images.
+ * <p><b>cd owns this policy now, and that is the point of the port's shape.</b> It used to hand over
+ * raw deployment rows and this repository derived "ACTIVE plus the previous distinct sha" from them
+ * — a keep-set computed in the service that deletes rather than in the service that deploys, which
+ * is two definitions of one rule waiting to disagree. They did: the local derivation stopped at the
+ * first older row of any status, so a history of {@code ACTIVE(A) / FAILED(C) / DECOMMISSIONED(B)}
+ * pinned C, an attempt that never served, and dropped B, the sha a rollback actually restores.
+ * {@code GET /cd/api/pins} answers with cd's own rule ({@code RollbackPins}, which lives beside the
+ * code that performs the rollback), and this port carries transport and nothing else.
  *
- * <p><b>Absent is not a supported configuration, and that is the exception to this repository's
- * usual port rule.</b> Everywhere else a missing collaborator has a documented fallback; here there
- * is none, because the fallback would be "plan the docker keep-set without knowing what is running".
- * An implementation that cannot answer must throw, the strategy lets the throw out, and the planner
- * reports the type as failed with its whole census set kept. Reclaiming nothing is the correct
- * outcome of an unreachable qits-cd; reclaiming something is never.
+ * <p><b>The shas are a set, not a sequence.</b> The answer is a union over every environment, and a
+ * union has no "most recent" — an application running in two environments contributes both of its
+ * shas. A reader keeps all of them and must not try to order them.
+ *
+ * <p><b>Absent is not a supported configuration</b>, and that is this repository's one documented
+ * exception to the ports rule. An implementation that cannot answer throws, {@link GcPinSources}
+ * records the failure, and the run deletes nothing: a dry-run reports itself non-executable and a
+ * sweep aborts whole. Reclaiming nothing is the correct outcome of an unreachable qits-cd;
+ * reclaiming something is never.
  */
 @FunctionalInterface
 public interface CdDeploymentPins {
 
   /**
-   * One deployment row, reduced to the four fields a keep-set needs.
+   * One application's pinned shas.
    *
-   * @param applicationId cd's own key for the application, which is what rows are grouped by — an
-   *     application is scoped to an environment, so two environments running the same service are
-   *     two applications with one name
-   * @param application the application's name, which is also the image name: cd derives every pull
-   *     as {@code <repository>/<application>:<sha>}, so this is the join to an {@code oci_tag}
-   * @param commitSha the sha the container was created from — the tag a restart pulls again
-   * @param status cd's lifecycle state, spelled as cd spells it. Read rather than interpreted here;
-   *     which states matter is the strategy's decision
+   * @param applicationName the application's name, which is also the image name: cd pulls every
+   *     deployment as {@code <repository>/<application>:<sha>}, so this is the join to an {@code
+   *     oci_tag}
+   * @param shas every sha that must survive for it — what is serving, and what a rollback restores
    */
-  record Deployment(String applicationId, String application, String commitSha, String status) {}
+  record ApplicationPin(String applicationName, List<String> shas) {}
 
   /**
-   * Every deployment row cd knows, newest-first within each application.
+   * Every pin cd holds, across every environment.
    *
-   * <p>The order is load-bearing: "the previous distinct sha" is read off it, and a list in another
-   * order silently keeps the wrong rollback target.
-   *
-   * @throws RuntimeException cd could not be reached or could not be parsed — fail-closed, never an
-   *     empty list, because an empty list reads as "nothing is deployed" and condemns every tag
+   * @throws RuntimeException cd could not be reached or could not be parsed — never an empty list,
+   *     because an empty list reads as "nothing is deployed" and condemns every tag
    */
-  List<Deployment> deployments();
+  List<ApplicationPin> pins();
 }

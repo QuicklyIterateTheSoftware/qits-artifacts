@@ -15,7 +15,6 @@ import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -42,13 +41,13 @@ import java.util.regex.Pattern;
  *       version tag beside it — so "releases stay" means exactly "a tag shaped like a calver version
  *       is never eligible". It costs near nothing: a release manifest shares its layers with its sha
  *       twin.
- *   <li><b>Every sha an ACTIVE qits-cd deployment pins.</b> The container was created from {@code
- *       <repository>/<application>:<sha>} and a restart pulls that reference again.
- *   <li><b>The previous distinct sha per application.</b> Rollback on this platform is "redeploy the
- *       previous sha", so the rollback target has to survive to be a rollback target. It is the most
- *       recent row, older than the ACTIVE one, whose sha <em>differs</em> from it — a redeploy of the
- *       same sha is not a previous version, and reading it as one would keep a duplicate and drop
- *       the real rollback target.
+ *   <li><b>Every sha qits-cd pins.</b> One rule now, not two: cd answers "what is serving and what
+ *       would a rollback restore" as a single set of shas per application ({@code GET
+ *       /cd/api/pins}), and this class keeps them. The serving/rollback distinction used to be
+ *       derived <em>here</em>, off raw deployment rows, and the derivation was wrong — it stopped at
+ *       the first older row of any status, so an {@code ACTIVE(A) / FAILED(C) / DECOMMISSIONED(B)}
+ *       history pinned an attempt that never served and dropped the sha a rollback actually
+ *       restores. The rule belongs beside the code that performs the rollback, which is cd's.
  *   <li><b>The newest sha tag per image.</b> The next deploy's pull, and the whole safety net for an
  *       image with no deployment row at all — {@code qits-spa-home} has one tag and cd has never
  *       deployed it.
@@ -71,13 +70,19 @@ import java.util.regex.Pattern;
  * what collects the store's 73 untagged manifests: a tag re-push moves the tag row and leaves the old
  * manifest row behind, reachable from no coordinate anyone uses.
  *
- * <h2>Why this is not pure, and why that is the seam working rather than the seam breaking</h2>
+ * <h2>Where the pins come from, and what happens when they cannot be had</h2>
  *
- * <p>{@link #plan} performs an HTTP fetch: the pin list is read from qits-cd <em>at plan time</em>,
- * every time, because a cached one is a plan on stale facts and a plan on stale facts deletes a
- * running image. {@link CdDeploymentPins} is where that lives; when it throws, this method lets the
- * throw out, which is the interface's documented fail-closed answer — the planner reports the type as
- * failed and the sweep keeps every OCI blob the census found.
+ * <p>{@link #plan} performs no HTTP call of its own any more. The run reads every pin once at its
+ * start ({@link GcPinSources}) and hands the aggregate in — still fetched per run and never cached,
+ * because a cached pin list is a plan on stale facts and a plan on stale facts deletes a running
+ * image, and one fetch per run also removes the case where two halves of a run disagree about what
+ * is deployed.
+ *
+ * <p>An unreachable qits-cd now aborts the <b>run</b> rather than this type: the planner never asks
+ * a {@link #readsPins()} strategy to plan against an incomplete aggregate, and the sweep refuses
+ * whole with nothing deleted. The guard at the top of {@link #plan} is belt and braces on that — a
+ * caller handing this class incomplete pins is refused rather than served a keep-set assembled from
+ * "nothing is deployed", which is the answer that condemns every sha tag on the platform.
  *
  * <p>{@link #plan} still deletes nothing — a report reads it. Deletion is {@link #apply}, invoked
  * only by the executor behind {@code POST /artifacts/api/gc/sweep}, on a plan computed in the same
@@ -110,12 +115,16 @@ public class OciImageGcStrategy implements GcStrategy {
    */
   private static final Pattern BUILD_SHA = Pattern.compile("[0-9a-f]{7,40}");
 
-  private static final String ACTIVE = "ACTIVE";
-
   static final String KEPT_RELEASE = "calver release tag — releases are never eligible";
-  static final String KEPT_ACTIVE = "an ACTIVE qits-cd deployment pins this sha";
-  static final String KEPT_ROLLBACK =
-      "qits-cd's rollback target — the previous distinct sha for this application";
+
+  /**
+   * One pin rule where there used to be two. cd answers with a set of shas per application — what
+   * serves and what a rollback restores, unioned over every environment — and a set has no order to
+   * read a "previous" off. Splitting it back into two report lines would mean re-deriving here the
+   * distinction cd deliberately owns.
+   */
+  static final String KEPT_PINNED = GcPins.BY_CD;
+
   static final String KEPT_NEWEST = "this image's newest build — the next deployment's pull target";
   static final String KEPT_UNCLASSIFIED =
       "neither a calver release nor a build sha; an unmodelled coordinate is kept, not guessed at";
@@ -127,7 +136,6 @@ public class OciImageGcStrategy implements GcStrategy {
   @Inject OciTagRepository tags;
   @Inject OciManifestRepository manifests;
   @Inject OciManifestFootprints footprints;
-  @Inject CdDeploymentPins pins;
   @Inject OciRegistryCollection registry;
 
   @Override
@@ -135,12 +143,21 @@ public class OciImageGcStrategy implements GcStrategy {
     return RepositoryType.OCI_IMAGES;
   }
 
+  /** This type's keep-set is qits-cd's pins plus its own rules, so a run without them cannot plan it. */
   @Override
-  public Plan plan(LiveBlobCensus.Census census) {
-    // First, and unconditionally: an unreachable cd must abort a plan over an empty store exactly as
-    // it aborts one over a full store, or the fail-closed posture depends on what happens to be
-    // pushed.
-    Pinned pinned = Pinned.from(pins.deployments());
+  public boolean readsPins() {
+    return true;
+  }
+
+  @Override
+  public Plan plan(LiveBlobCensus.Census census, GcPins pins) {
+    // First, and unconditionally: pins that could not be read must abort a plan over an empty store
+    // exactly as they abort one over a full store, or the refusal depends on what happens to be
+    // pushed. The planner already refuses before reaching here; this is the belt on the braces.
+    if (!pins.complete()) {
+      throw new IllegalStateException(
+          "refusing to plan oci-images without live pins: " + pins.whyIncomplete());
+    }
 
     List<GcIdentity> dead = new ArrayList<>();
     List<GcIdentity> kept = new ArrayList<>();
@@ -152,7 +169,7 @@ public class OciImageGcStrategy implements GcStrategy {
         continue;
       }
       for (String image : manifests.listImageNames(repository.name)) {
-        collect(repository.name, image, pinned, dead, kept, released, retained);
+        collect(repository.name, image, pins, dead, kept, released, retained);
       }
     }
 
@@ -255,7 +272,7 @@ public class OciImageGcStrategy implements GcStrategy {
   private void collect(
       String repository,
       String image,
-      Pinned pinned,
+      GcPins pins,
       List<GcIdentity> dead,
       List<GcIdentity> kept,
       Set<String> released,
@@ -270,7 +287,7 @@ public class OciImageGcStrategy implements GcStrategy {
     List<OciTag> keptTags = new ArrayList<>();
     List<OciTag> deadTags = new ArrayList<>();
     for (OciTag tag : imageTags) {
-      String rule = keepRule(tag.tag, image, newestBuild, pinned);
+      String rule = keepRule(tag.tag, image, newestBuild, pins);
       if (rule == null) {
         deadTags.add(tag);
         dead.add(new GcIdentity(repository, image + ":" + tag.tag, DEAD_TAG));
@@ -309,18 +326,16 @@ public class OciImageGcStrategy implements GcStrategy {
   }
 
   /** The keeping rule's name, or null when the tag is a build coordinate nothing needs. */
-  private static String keepRule(String tag, String image, String newestBuild, Pinned pinned) {
+  private static String keepRule(String tag, String image, String newestBuild, GcPins pins) {
     if (CALVER.matcher(tag).matches()) {
       return KEPT_RELEASE;
     }
     if (!BUILD_SHA.matcher(tag).matches()) {
       return KEPT_UNCLASSIFIED;
     }
-    if (pinned.active(image).contains(tag)) {
-      return KEPT_ACTIVE;
-    }
-    if (pinned.previous(image).contains(tag)) {
-      return KEPT_ROLLBACK;
+    String pinned = pins.pinsImageTag(image, tag);
+    if (pinned != null) {
+      return pinned;
     }
     return tag.equals(newestBuild) ? KEPT_NEWEST : null;
   }
@@ -340,61 +355,4 @@ public class OciImageGcStrategy implements GcStrategy {
 
   private static final Comparator<GcIdentity> BY_IDENTITY =
       Comparator.comparing(GcIdentity::repository).thenComparing(GcIdentity::identity);
-
-  /**
-   * The two pin sets, per image name, read off cd's rows and off nothing else.
-   *
-   * <p>Grouped by cd's {@code applicationId} rather than by name: an application belongs to an
-   * environment, so one service running in two environments is two applications sharing one image
-   * name, and both of their ACTIVE shas pin that image.
-   */
-  private record Pinned(Map<String, Set<String>> active, Map<String, Set<String>> previous) {
-
-    static Pinned from(List<CdDeploymentPins.Deployment> deployments) {
-      Map<String, List<CdDeploymentPins.Deployment>> byApplication = new LinkedHashMap<>();
-      for (CdDeploymentPins.Deployment row : deployments) {
-        byApplication.computeIfAbsent(row.applicationId(), id -> new ArrayList<>()).add(row);
-      }
-      Map<String, Set<String>> active = new HashMap<>();
-      Map<String, Set<String>> previous = new HashMap<>();
-      byApplication.values().forEach(rows -> read(rows, active, previous));
-      return new Pinned(active, previous);
-    }
-
-    /** One application's rows, newest-first: its ACTIVE sha and the newest different sha under it. */
-    private static void read(
-        List<CdDeploymentPins.Deployment> rows,
-        Map<String, Set<String>> active,
-        Map<String, Set<String>> previous) {
-      int at = -1;
-      for (int i = 0; i < rows.size() && at < 0; i++) {
-        if (ACTIVE.equals(rows.get(i).status())) {
-          at = i;
-        }
-      }
-      if (at < 0) {
-        // Nothing is serving this application, so nothing is pinned and nothing is a rollback
-        // target. The newest-build rule is what keeps such an image reachable.
-        return;
-      }
-      CdDeploymentPins.Deployment serving = rows.get(at);
-      active.computeIfAbsent(serving.application(), image -> new HashSet<>()).add(serving.commitSha());
-      for (CdDeploymentPins.Deployment older : rows.subList(at + 1, rows.size())) {
-        if (!older.commitSha().equals(serving.commitSha())) {
-          previous
-              .computeIfAbsent(serving.application(), image -> new HashSet<>())
-              .add(older.commitSha());
-          return;
-        }
-      }
-    }
-
-    Set<String> active(String image) {
-      return active.getOrDefault(image, Set.of());
-    }
-
-    Set<String> previous(String image) {
-      return previous.getOrDefault(image, Set.of());
-    }
-  }
 }

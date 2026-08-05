@@ -47,10 +47,18 @@ public class GcPlanner {
   @Inject BlobSweep sweep;
   @Inject Instance<GcStrategy> strategies;
   @Inject GcTypeConfig config;
+  @Inject GcPinSources pinSources;
 
-  /** A fresh census, every registered strategy, and the reconciliation over both. */
+  /**
+   * A fresh census, every live pin, every registered strategy, and the reconciliation over all of
+   * them.
+   *
+   * <p>The pins are read <b>first</b> and once. A source that cannot answer does not make this
+   * method throw — a dry-run that 500s tells a reviewer nothing about the types that are fine — so
+   * the report comes back with the pin-dependent types failed and {@code executable} false.
+   */
   public GcPlanReport plan() {
-    return plan(census.take(), registered());
+    return plan(census.take(), registered(), pinSources.fetch());
   }
 
   /** What CDI found. Empty is the shipped state and a supported one. */
@@ -58,7 +66,8 @@ public class GcPlanner {
     return strategies.stream().toList();
   }
 
-  GcPlanReport plan(LiveBlobCensus.Census census, Collection<GcStrategy> strategies) {
+  GcPlanReport plan(
+      LiveBlobCensus.Census census, Collection<GcStrategy> strategies, GcPins pins) {
     Map<RepositoryType, List<GcStrategy>> claimants = new EnumMap<>(RepositoryType.class);
     for (GcStrategy strategy : strategies) {
       claimants.computeIfAbsent(strategy.type(), type -> new ArrayList<>()).add(strategy);
@@ -83,8 +92,14 @@ public class GcPlanner {
       }
       GcStrategy strategy = claiming.get(0);
       String name = nameOf(strategy);
+      if (strategy.readsPins() && !pins.complete()) {
+        // Not asked to plan at all: its keep-set is partly qits-cd's or qits-ci's answer, and
+        // planning it against "nothing is pinned" is the one mistake that condemns everything.
+        types.add(failed(type, name, "live pins unavailable — " + pins.whyIncomplete()));
+        continue;
+      }
       try {
-        GcStrategy.Plan plan = strategy.plan(census);
+        GcStrategy.Plan plan = strategy.plan(census, pins);
         plans.put(type, plan);
         GcSweepPlan attributed = sweep.planForOneType(census, type, plan);
         types.add(
@@ -110,6 +125,11 @@ public class GcPlanner {
         census.takenAt(),
         true,
         iso(sweep.graceWindow()),
+        // Executable only when every pin source answered: a plan whose keep-set is missing a live
+        // pin is a plan nobody may execute, and saying so on the report is how a reader knows the
+        // zeros beside a pin-dependent type are a refusal rather than a finding.
+        pins.complete(),
+        pins.failures(),
         // The configuration echo, beside the outcomes rather than instead of them: what each type is
         // configured to do today, in the sentence the engine that will do it writes for itself.
         GcRules.echo(config),

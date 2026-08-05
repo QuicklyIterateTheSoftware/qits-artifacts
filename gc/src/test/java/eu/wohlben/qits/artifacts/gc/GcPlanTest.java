@@ -147,7 +147,7 @@ class GcPlanTest extends GcFixture {
                 Set.of(store.manifestDoomed(), store.layerDoomed(), store.shared(), store.config()),
                 Set.of(store.manifestKept(), store.layerKept(), store.config())));
 
-    GcPlanReport report = planner.plan(taken, List.of(oci));
+    GcPlanReport report = planner.plan(taken, List.of(oci), GcPins.none());
 
     assertEquals(
         List.of(store.layerDoomed(), store.manifestDoomed()).stream().sorted().toList(),
@@ -176,7 +176,7 @@ class GcPlanTest extends GcFixture {
                 Set.of(store.config(), store.layerDoomed()),
                 Set.of(store.config())));
 
-    GcPlanReport report = planner.plan(census.take(), List.of(oci));
+    GcPlanReport report = planner.plan(census.take(), List.of(oci), GcPins.none());
 
     assertEquals(List.of(store.layerDoomed()), report.sweep().blobIds());
     assertEquals(LAYER_DOOMED, report.sweep().reclaimableBytes());
@@ -193,7 +193,7 @@ class GcPlanTest extends GcFixture {
             RepositoryType.CI_VIDEOS,
             new GcStrategy.Plan(List.of(), List.of(), Set.of(store.rowless()), Set.of()));
 
-    GcPlanReport report = planner.plan(census.take(), List.of(rogue));
+    GcPlanReport report = planner.plan(census.take(), List.of(rogue), GcPins.none());
 
     assertEquals(List.of(), report.sweep().blobIds());
     assertEquals(List.of(store.rowless()), report.untouchable().blobIds());
@@ -216,7 +216,7 @@ class GcPlanTest extends GcFixture {
 
     // Undo the fixture's backdating for that one blob: it is now as young as a fresh push.
     backdate(store.layerDoomed(), java.time.Duration.ZERO);
-    GcPlanReport report = planner.plan(census.take(), List.of(oci));
+    GcPlanReport report = planner.plan(census.take(), List.of(oci), GcPins.none());
 
     assertEquals(0, report.sweep().blobCount());
     assertEquals(1, report.sweep().withheldByGraceWindow());
@@ -241,7 +241,7 @@ class GcPlanTest extends GcFixture {
           }
 
           @Override
-          public Plan plan(LiveBlobCensus.Census census) {
+          public Plan plan(LiveBlobCensus.Census census, GcPins pins) {
             throw new IllegalStateException("qits-cd unreachable; refusing to plan on stale pins");
           }
         };
@@ -254,7 +254,7 @@ class GcPlanTest extends GcFixture {
                 Set.of(store.shared()),
                 Set.of(store.tarball())));
 
-    GcPlanReport report = planner.plan(census.take(), List.of(unreachable, npm));
+    GcPlanReport report = planner.plan(census.take(), List.of(unreachable, npm), GcPins.none());
 
     GcTypePlan aborted = typePlan(report, RepositoryType.OCI_IMAGES);
     assertNotNull(aborted.error());
@@ -280,7 +280,8 @@ class GcPlanTest extends GcFixture {
             census.take(),
             List.of(
                 strategy(RepositoryType.OCI_IMAGES, doomsEverything),
-                strategy(RepositoryType.OCI_IMAGES, doomsEverything)));
+                strategy(RepositoryType.OCI_IMAGES, doomsEverything)),
+            GcPins.none());
 
     GcTypePlan collided = typePlan(report, RepositoryType.OCI_IMAGES);
     assertTrue(collided.error().contains("two strategies claim this type"));
@@ -308,7 +309,7 @@ class GcPlanTest extends GcFixture {
       }
 
       @Override
-      public Plan plan(LiveBlobCensus.Census census) {
+      public Plan plan(LiveBlobCensus.Census census, GcPins pins) {
         return plan;
       }
     };

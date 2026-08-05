@@ -10,7 +10,6 @@ import eu.wohlben.qits.artifacts.control.OciMediaTypes;
 import eu.wohlben.qits.artifacts.entity.OciManifest;
 import eu.wohlben.qits.artifacts.entity.OciTag;
 import eu.wohlben.qits.artifacts.entity.RepositoryType;
-import eu.wohlben.qits.artifacts.gc.CdDeploymentPins.Deployment;
 import eu.wohlben.qits.artifacts.gc.dto.GcIdentity;
 import eu.wohlben.qits.artifacts.gc.dto.GcPlanReport;
 import io.quarkus.narayana.jta.QuarkusTransaction;
@@ -28,9 +27,10 @@ import org.junit.jupiter.api.Test;
 /**
  * Docker's keep-set, case by case, against real manifests and the real census.
  *
- * <p>The pin source is faked rather than driven over HTTP: what is under test is the rule, and the
- * rule's whole input is "which rows did cd return, in what order". The one case that exercises the
- * transport is the opposite one — cd refusing to answer, which must abort rather than plan.
+ * <p>The pins are handed in as a value rather than fetched: what is under test is the rule, and the
+ * rule's whole input is "which shas does cd pin for this image". Which rows those shas came from —
+ * what is serving, what a rollback restores — is cd's rule now and is tested in cd's own repository;
+ * this suite would only be re-asserting a derivation this class no longer performs.
  *
  * <p>Tags here are written as full 40-hex shas because that is what post-receive pushes and what a
  * deployment row carries; a case that used {@code v1} would prove nothing about the classification
@@ -60,7 +60,7 @@ class OciImageGcStrategyTest extends GcFixture {
     tag("qits-stt", SHA_B, superseded, minutesAgo(20));
     tag("qits-stt", SHA_C, newest, minutesAgo(10));
 
-    GcStrategy.Plan plan = strategyWith(pinning()).plan(census.take());
+    GcStrategy.Plan plan = strategy().plan(census.take(), GcPins.none());
 
     assertEquals(OciImageGcStrategy.KEPT_RELEASE, ruleFor(plan.kept(), "qits-stt:2026.801.85448"));
     assertEquals(OciImageGcStrategy.KEPT_NEWEST, ruleFor(plan.kept(), "qits-stt:" + SHA_C));
@@ -85,18 +85,20 @@ class OciImageGcStrategyTest extends GcFixture {
     tag("qits-artifacts", SHA_C, newest, minutesAgo(10));
 
     GcStrategy.Plan plan =
-        strategyWith(pinning(row("app-1", "qits-artifacts", SHA_A, "ACTIVE"))).plan(census.take());
+        strategy().plan(census.take(), pinning("qits-artifacts", SHA_A));
 
-    assertEquals(OciImageGcStrategy.KEPT_ACTIVE, ruleFor(plan.kept(), "qits-artifacts:" + SHA_A));
+    assertEquals(OciImageGcStrategy.KEPT_PINNED, ruleFor(plan.kept(), "qits-artifacts:" + SHA_A));
     assertEquals(OciImageGcStrategy.KEPT_NEWEST, ruleFor(plan.kept(), "qits-artifacts:" + SHA_C));
     assertEquals(OciImageGcStrategy.DEAD_TAG, ruleFor(plan.dead(), "qits-artifacts:" + SHA_B));
   }
 
   @Test
-  void theRollbackTargetIsTheNewestDifferentShaAndARedeployOfTheSameShaIsNotOne() throws Exception {
-    // The ordering subtlety, which is the whole reason "previous DISTINCT" is spelled that way: a
-    // redeploy writes a second row at the SAME sha. Reading that as the previous version keeps a
-    // duplicate of what is already running and drops the only thing a rollback could pull.
+  void everyShaCdPinsIsKeptUnderOneRuleAndAnythingElseIsNot() throws Exception {
+    // cd answers with a SET of shas per application — what serves and what a rollback restores,
+    // unioned over every environment — so this class keeps all of them under one rule and derives
+    // nothing. The third sha here is one cd did not name, and it dies: "one rollback step, not every
+    // sha a row ever named" is cd's rule to apply, and applying it again here would be the drift the
+    // port exists to remove.
     repository();
     String config = config();
     String serving = image("qits-cd", config, Map.of(layer(301), 301L));
@@ -109,20 +111,11 @@ class OciImageGcStrategyTest extends GcFixture {
     tag("qits-cd", SHA_D, newest, minutesAgo(10));
 
     GcStrategy.Plan plan =
-        strategyWith(
-                pinning(
-                    row("app-1", "qits-cd", SHA_A, "ACTIVE"),
-                    row("app-1", "qits-cd", SHA_A, "DECOMMISSIONED"),
-                    row("app-1", "qits-cd", SHA_B, "DECOMMISSIONED"),
-                    row("app-1", "qits-cd", SHA_C, "DECOMMISSIONED")))
-            .plan(census.take());
+        strategy().plan(census.take(), pinning("qits-cd", SHA_A, SHA_B));
 
-    assertEquals(OciImageGcStrategy.KEPT_ACTIVE, ruleFor(plan.kept(), "qits-cd:" + SHA_A));
-    assertEquals(OciImageGcStrategy.KEPT_ROLLBACK, ruleFor(plan.kept(), "qits-cd:" + SHA_B));
-    assertEquals(
-        OciImageGcStrategy.DEAD_TAG,
-        ruleFor(plan.dead(), "qits-cd:" + SHA_C),
-        "one rollback step, not every sha a row ever named — keeping them all reclaims nothing");
+    assertEquals(OciImageGcStrategy.KEPT_PINNED, ruleFor(plan.kept(), "qits-cd:" + SHA_A));
+    assertEquals(OciImageGcStrategy.KEPT_PINNED, ruleFor(plan.kept(), "qits-cd:" + SHA_B));
+    assertEquals(OciImageGcStrategy.DEAD_TAG, ruleFor(plan.dead(), "qits-cd:" + SHA_C));
     assertEquals(OciImageGcStrategy.KEPT_NEWEST, ruleFor(plan.kept(), "qits-cd:" + SHA_D));
   }
 
@@ -140,7 +133,7 @@ class OciImageGcStrategyTest extends GcFixture {
     tag("qits-spa-home", SHA_B, second, minutesAgo(20));
     tag("qits-spa-home", SHA_C, newest, minutesAgo(10));
 
-    GcStrategy.Plan plan = strategyWith(pinning()).plan(census.take());
+    GcStrategy.Plan plan = strategy().plan(census.take(), GcPins.none());
 
     assertEquals(OciImageGcStrategy.KEPT_NEWEST, ruleFor(plan.kept(), "qits-spa-home:" + SHA_C));
     assertEquals(1, plan.kept().size());
@@ -167,7 +160,7 @@ class OciImageGcStrategyTest extends GcFixture {
     String current = image("qits-events", config, Map.of(layer(502), 502L));
     tag("qits-events", SHA_A, current, minutesAgo(10));
 
-    GcStrategy.Plan plan = strategyWith(pinning()).plan(census.take());
+    GcStrategy.Plan plan = strategy().plan(census.take(), GcPins.none());
 
     assertEquals(
         List.of("qits-events@sha256:" + abandoned),
@@ -194,13 +187,13 @@ class OciImageGcStrategyTest extends GcFixture {
       backdate(blobId, Duration.ofDays(30));
     }
 
-    OciImageGcStrategy strategy = strategyWith(pinning());
+    OciImageGcStrategy strategy = strategy();
     LiveBlobCensus.Census taken = census.take();
-    GcStrategy.Plan plan = strategy.plan(taken);
+    GcStrategy.Plan plan = strategy.plan(taken, GcPins.none());
 
     assertTrue(plan.blobsReleased().contains(base), "the dying tag did name it");
     assertTrue(plan.blobsRetained().contains(base), "and the surviving one still does");
-    GcPlanReport report = planner.plan(taken, List.of(strategy));
+    GcPlanReport report = planner.plan(taken, List.of(strategy), GcPins.none());
     assertEquals(
         Stream.of(doomed, doomedOnly).sorted().toList(),
         report.sweep().blobIds(),
@@ -208,23 +201,28 @@ class OciImageGcStrategyTest extends GcFixture {
   }
 
   @Test
-  void qitsCdUnreachableAbortsThePlanRatherThanCondemningEveryTag() throws Exception {
-    // Fail-closed, and the reason plan() is allowed to throw at all. An empty pin list would read as
-    // "nothing is deployed" and condemn every sha tag on the platform.
+  void anIncompletePinAggregateIsRefusedRatherThanReadAsNothingIsDeployed() throws Exception {
+    // Belt and braces on the run-level abort: the planner never asks a readsPins() strategy to plan
+    // against a broken aggregate, and if something ever did, an empty pin map would read as "nothing
+    // is deployed" and condemn every sha tag on the platform. Refusing is the only safe answer.
     repository();
     String only = image("qits-projects", config(), Map.of(layer(701), 701L));
     tag("qits-projects", SHA_A, only, minutesAgo(10));
 
-    OciImageGcStrategy strategy =
-        strategyWith(
-            () -> {
-              throw new IllegalStateException("qits-cd unreachable at http://qits-cd:8080/cd/api");
-            });
+    OciImageGcStrategy strategy = strategy();
     LiveBlobCensus.Census taken = census.take();
+    GcPins broken =
+        new GcPins(
+            Map.of(),
+            "",
+            Set.of(),
+            Set.of(),
+            List.of("qits-cd deployment pins: unreachable at http://qits-cd:8080/cd/api"));
 
     IllegalStateException aborted =
-        assertThrows(IllegalStateException.class, () -> strategy.plan(taken));
-    assertTrue(aborted.getMessage().contains("qits-cd unreachable"));
+        assertThrows(IllegalStateException.class, () -> strategy.plan(taken, broken));
+    assertTrue(aborted.getMessage().contains("qits-cd"));
+    assertTrue(strategy.readsPins(), "and it says so, which is what makes the planner skip it");
   }
 
   @Test
@@ -234,7 +232,7 @@ class OciImageGcStrategyTest extends GcFixture {
     repository();
 
     LiveBlobCensus.Census taken = census.take();
-    GcStrategy.Plan plan = strategyWith(pinning()).plan(taken);
+    GcStrategy.Plan plan = strategy().plan(taken, GcPins.none());
 
     assertEquals(List.of(), plan.dead());
     assertEquals(List.of(), plan.kept());
@@ -251,8 +249,8 @@ class OciImageGcStrategyTest extends GcFixture {
     seed();
     LiveBlobCensus.Census taken = census.take();
 
-    OciImageGcStrategy strategy = strategyWith(pinning());
-    GcStrategy.Plan plan = strategy.plan(taken);
+    OciImageGcStrategy strategy = strategy();
+    GcStrategy.Plan plan = strategy.plan(taken, GcPins.none());
 
     assertEquals(List.of(), plan.dead());
     assertEquals(List.of("alpha:v1", "alpha:v2"), identities(plan.kept()));
@@ -260,30 +258,25 @@ class OciImageGcStrategyTest extends GcFixture {
         plan.kept().stream()
             .allMatch(kept -> OciImageGcStrategy.KEPT_UNCLASSIFIED.equals(kept.rule())));
     assertEquals(taken.live(RepositoryType.OCI_IMAGES).keySet(), plan.blobsRetained());
-    assertEquals(List.of(), planner.plan(taken, List.of(strategy)).sweep().blobIds());
+    assertEquals(List.of(), planner.plan(taken, List.of(strategy), GcPins.none()).sweep().blobIds());
   }
 
   // --- fixture ---------------------------------------------------------------------------------
 
-  /** The strategy as CDI would build it, with the one collaborator a test has to stand in for. */
-  private OciImageGcStrategy strategyWith(CdDeploymentPins pins) {
+  /** The strategy as CDI would build it — no collaborator to stand in for any more. */
+  private OciImageGcStrategy strategy() {
     OciImageGcStrategy strategy = new OciImageGcStrategy();
     strategy.repositories = repositories;
     strategy.tags = ociTags;
     strategy.manifests = ociManifests;
     strategy.footprints = footprints;
-    strategy.pins = pins;
     return strategy;
   }
 
-  private static CdDeploymentPins pinning(Deployment... rows) {
-    List<Deployment> deployments = List.of(rows);
-    return () -> deployments;
-  }
-
-  private static Deployment row(
-      String applicationId, String application, String sha, String status) {
-    return new Deployment(applicationId, application, sha, status);
+  /** The aggregate a run would have read, with one image's shas pinned. */
+  private static GcPins pinning(String image, String... shas) {
+    return new GcPins(
+        Map.of(image, Set.of(shas)), "", Set.of(), Set.of(), List.of());
   }
 
   private void repository() {

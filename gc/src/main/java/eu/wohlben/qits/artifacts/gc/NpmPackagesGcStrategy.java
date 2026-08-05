@@ -173,7 +173,7 @@ public class NpmPackagesGcStrategy implements GcStrategy {
   }
 
   @Override
-  public Plan plan(LiveBlobCensus.Census census) {
+  public Plan plan(LiveBlobCensus.Census census, GcPins pins) {
     List<GcIdentity> dead = new ArrayList<>();
     List<GcIdentity> kept = new ArrayList<>();
     Set<String> released = new HashSet<>();

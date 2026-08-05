@@ -49,7 +49,7 @@ Everything that had to be declared, and the symptom each one produces if it is d
 | `dto/UploadResult` | `@RegisterForReflection` | every upload 500s: the type is behind a `Response` return, so nothing registers it |
 | `CiPostReceiveNotifier` | the `HttpClient` is an instance field, not static | build fails: an `HttpClientFacade` in the image heap |
 | `npm/NpmUpstream` | the `HttpClient` is an instance field, not static | same as above — an `HttpClientFacade` frozen into the image heap |
-| `gc/CdHttpDeploymentPins` | the `HttpClient` is an instance field, not static | same as above; this is the third outbound client and the rule has not changed. It moved with the class when GC became its own module — the rule travels with the client, not with the package |
+| `gc/CdHttpDeploymentPins`, `gc/CiHttpDaemonPins` | the `HttpClient` is an instance field, not static | same as above; the third and fifth outbound clients, and the rule has not changed. It moved with the class when GC became its own module — the rule travels with the client, not with the package |
 | `registry/MirrorUpstream` | the `HttpClient` is an instance field, not static — and so is `MirrorBearerTokens`' `ObjectMapper`, which is reachable from one | same as above; the fourth outbound client, and the rule still has not changed |
 | artifacts' `microprofile-config.properties` | H2 url with no `AUTO_SERVER` | the binary dies at boot on `ClassNotFoundException: org.h2.server.TcpServer` |
 | `registry/MirrorUpstream`'s config | `endpoint-override` injected as `Optional<String>`, not `String` | the binary dies at boot on `Failed to load config value of type java.lang.String` — SmallRye reads a **configured-empty** value as absent, and that key ships blank. `defaultValue = ""` does not help. Invisible to `mvn verify`, where every test sets a real value |
@@ -229,17 +229,24 @@ supported configuration with a documented behaviour — see the table in the REA
 `RepositoryNameResolver` is the only one, and it is optional because the id-addressed git scheme
 predates the name-addressed one and remains the daemon's fallback.
 
-**`CdDeploymentPins` is the one exception, and it breaks the rule in both halves on purpose.** It is
-a port this repo also implements (`CdHttpDeploymentPins`, a plain GET on qits-net), and absent is
-*not* a supported configuration: it throws, which fails the `oci-images` GC plan closed. Both halves
-were decided rather than drifted into (`artifacts-gc-plan.md` ⚖4), and both live in the `gc` module,
-which narrows the exception rather than removing it: the `artifacts` library dials nothing at all and
-is domain-blind again, and the one outbound call belongs to the process that needs it.
-The keep-set is "which image shas
-would a restart pull", qits-cd is the only thing that knows, and the alternative — a driver
-assembling that list and handing it in — puts a safety-critical input outside the service that acts
-on it, where the two drift and the drift deletes a running image. It is fetched at plan time every
-time and never cached: a cached pin list is a plan on stale facts.
+**The two GC pin ports are the exception, and they break the rule in both halves on purpose.**
+`CdDeploymentPins` (`GET /cd/api/pins`) and `CiDaemonPins` (`GET /ci/api/daemon`) are ports this repo
+also implements, as plain GETs on qits-net, and absent is *not* a supported configuration: they
+throw, and a run that cannot read a pin deletes nothing at all. Both halves were decided rather than
+drifted into (`artifacts-gc-plan.md` ⚖4 and the settlement), and both live in the `gc` module, which
+narrows the exception rather than removing it: the `artifacts` library dials nothing and is
+domain-blind again, and the two outbound calls belong to the process that needs them. The keep-sets
+are "which image shas would a restart or a rollback pull" and "which daemon would a run launch";
+qits-cd and qits-ci are the only things that know, and the alternative — a driver assembling those
+lists and handing them in — puts a safety-critical input outside the service that acts on it, where
+the two drift and the drift deletes something live. They are fetched **once per run** and never
+cached: a cached pin list is a plan on stale facts, and two fetches inside one run can disagree.
+
+**Neither policy is re-derived here.** cd answers with a set of shas per application, and this repo
+keeps all of them under one rule. It used to derive "ACTIVE plus the previous distinct sha" from raw
+deployment rows, and the derivation was wrong — it stopped at the first older row of any status, so
+an `ACTIVE(A) / FAILED(C) / DECOMMISSIONED(B)` history pinned an attempt that never served and
+dropped the sha a rollback restores. A keep-set defined twice is a keep-set waiting to disagree.
 
 Never add a JPA relation to another context's entity, and never a foreign key. Blobs address the
 world by **string metadata**; the git host addresses it by **repo id string**. Both are in a
@@ -333,6 +340,22 @@ collection" section is the contract; these are the rules that get "helpfully" re
   `POST /artifacts/api/gc/sweep`) applies only plans it computed in the same request, and on a
   store younger than the window a sweep provably deletes nothing.
 
+- **Live pins are read once per run, and a source that cannot answer aborts the whole run.**
+  `GcPinSources` reads qits-cd (`GET /cd/api/pins`) and qits-ci (`GET /ci/api/daemon`) at the start
+  of every plan and every sweep, never cached, and folds them into one `GcPins`. `GcSweepExecutor`
+  returns a receipt with `aborted` and deletes nothing — before the census — when any source failed;
+  this replaces the old per-type fail-closed for the sweep. The rule is all-or-nothing because blobs
+  dedupe globally: a tarball one type releases may be the last reference to bytes a pinned image also
+  names. `GET /gc/plan` must **never** 500 on it — it answers `executable: false` with
+  `pinFailures` and the pin-dependent types refused.
+- **Two pin semantics that look like bugs if you "fix" them.** A blank `daemonVersion` is an
+  *answer* meaning "no daemon is pinned" (the shipped default) and must not abort a run; a 64-hex
+  daemon version pins the **blob** at that digest as well as any row, because the pin has been a
+  sha256 digest since the daemon shipped and may name bytes no row exists for.
+- **The pin config keys are `qits.artifacts.gc.pins.cd-*` and `.ci-*`**, renamed from
+  `qits.artifacts.gc.oci.cd-*`, and they live in the `gc` jar's own
+  `META-INF/microprofile-config.properties`. A deployment carrying the old spelling silently loses
+  the value.
 - **Two engines are written and dark, and "dark" is the invariant to preserve.** The settlement
   (`artifacts-gc-plan.md`, 2026-08-05) replaces the six bespoke strategies with
   `CacheEvictionStrategy` + `OwnArtifactsStrategy`, mapped onto types by
@@ -379,11 +402,12 @@ closed. A few things the strategies share cost time otherwise.
   `npm_version`/`npm_dist_tag` for the other. The two blob sets they return are in the census's
   vocabulary, which is what the substrate reconciles over, and each suite asserts `blobsRetained`
   equals the census's own live set for the type when nothing dies.
-- **`OciImageGcStrategy.plan()` performs an HTTP call**, which the seam's javadoc anticipates. See
-  "Adding a dependency on another context" above; the suites point `qits.artifacts.gc.oci.cd-base-url`
-  at a closed port, so both `GcPlanTest` and `GcPlanControllerTest` assert the fail-closed path rather
-  than avoiding it. `NpmPackagesGcStrategy` has no such dependency and therefore never fails closed —
-  a plan of its type carrying an `error` means something else is wrong.
+- **`OciImageGcStrategy` performs no HTTP call any more** — it declares `readsPins()` and is handed
+  the run's `GcPins`. See "Adding a dependency on another context" above; the suites point
+  `qits.artifacts.gc.pins.cd-base-url` and `.ci-base-url` at a closed port, so `GcPinsTest` and
+  `GcPlanControllerTest` assert the refusal path rather than avoiding it.
+  `NpmPackagesGcStrategy` reads no pins and therefore never fails on its own — a plan of its type
+  carrying an `error` means something else is wrong.
 
 Two things are npm's alone, and the plan is explicit that docker needs neither:
 
@@ -438,7 +462,7 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 
 ## Tests
 
-- `mvn verify` runs 511 tests (156 in `artifacts/`, 18 in `git-storage/`, 56 in `gc/`, 281 in
+- `mvn verify` runs 526 tests (156 in `artifacts/`, 18 in `git-storage/`, 70 in `gc/`, 282 in
   `service/`) in about two minutes. Nothing here
   needs docker — and that is the constraint that shapes the registry suite: `docker`, `podman` and
   `skopeo` may not be assumed present, so `registry/OciClient` + `registry/TinyImage` synthesise a

@@ -5,7 +5,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.net.URI;
-import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -16,30 +15,31 @@ import java.util.List;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /**
- * The one place this service dials qits-cd: two GETs on qits-net, at plan time, every time.
+ * One GET on qits-net, at plan time, every time: {@code GET /cd/api/pins}.
  *
- * <p><b>This is a deliberate new dependency direction</b> and the only one this repository has. The
- * artifacts service is domain-blind by design, and it learns where cd lives for exactly one reason:
- * the docker keep-set is "which shas would a restart pull", and cd is the only thing that knows.
- * Living in the {@code gc} module is what keeps that honest — the {@code artifacts} library dials
- * nothing at all, so the exception belongs to the process that needs it rather than to the store. The
- * alternative — a driver assembling the pin list and posting it in — was considered and rejected in
- * the GC plan (⚖4): a safety-critical input computed outside the service that acts on it is a place
- * for the two to drift, and drift here deletes an image a container is about to restart from.
+ * <p><b>One call, not two, and cd's rule rather than ours.</b> This used to list environments and
+ * then each environment's deployments, and derive the keep-set here. cd answers the question
+ * directly now — {@code {"pins":[{"applicationName":…,"shas":[…]}]}}, a union over every
+ * environment — so the derivation is gone along with the bug it carried, and the request count is
+ * halved.
  *
- * <p><b>Never cached.</b> A pin list is only true at the moment it was read; a cached one deletes the
- * image that was deployed while the cache was warm. The cost is two HTTP calls per plan, which is a
- * report a person requests.
+ * <p><b>This is a deliberate dependency direction</b> and one of the two this repository has (the
+ * other is {@link CiHttpDaemonPins}). The artifacts service is domain-blind by design and learns
+ * where cd lives for exactly one reason: the keep-set is "which shas would a restart or a rollback
+ * pull", and cd is the only thing that knows. Living in the {@code gc} module keeps that honest —
+ * the {@code artifacts} library dials nothing at all, so the exception belongs to the process that
+ * needs it rather than to the store. The alternative — a driver assembling the pin list and posting
+ * it in — was considered and rejected in the GC plan (⚖4): a safety-critical input computed outside
+ * the service that acts on it is a place for the two to drift, and drift here deletes an image a
+ * container is about to restart from.
  *
- * <p>Environment discovery is a listing rather than a configured id, and the keep-set is the
- * <b>union over every environment</b>. Naming one environment in config would mean a second
- * environment's ACTIVE deployments pin nothing, which is the failure that ends in {@code
- * IMAGE_MISSING} on its next restart. Over-keeping is the safe direction here and under-keeping is
- * not, so nothing here tries to pick "the live one".
+ * <p><b>Never cached.</b> A pin list is only true at the moment it was read; a cached one deletes
+ * the image that was deployed while the cache was warm. The cost is one HTTP call per run.
  *
- * <p>Every failure — connect, status, shape — is an {@link IllegalStateException}. Fail-closed: the
- * planner reports the type as failed, the sweep keeps the whole OCI census set, and the run reclaims
- * nothing. There is deliberately no empty-list fallback, because an empty answer condemns every tag.
+ * <p>Every failure — connect, status, shape — is an {@link IllegalStateException}. What fails closed
+ * is the <b>run</b> now rather than one type: {@link GcPinSources} catches it, a plan marks itself
+ * non-executable, and a sweep aborts before deleting anything. There is deliberately no empty-list
+ * fallback, because an empty answer condemns every tag.
  */
 @ApplicationScoped
 public class CdHttpDeploymentPins implements CdDeploymentPins {
@@ -53,53 +53,43 @@ public class CdHttpDeploymentPins implements CdDeploymentPins {
   private final HttpClient client =
       HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();
 
-  @ConfigProperty(name = "qits.artifacts.gc.oci.cd-base-url")
+  @ConfigProperty(name = "qits.artifacts.gc.pins.cd-base-url")
   String baseUrl;
 
-  @ConfigProperty(name = "qits.artifacts.gc.oci.cd-timeout")
+  @ConfigProperty(name = "qits.artifacts.gc.pins.cd-timeout")
   Duration timeout;
 
   @Inject ObjectMapper objectMapper;
 
   @Override
-  public List<Deployment> deployments() {
-    List<Deployment> rows = new ArrayList<>();
-    for (String environmentId : environmentIds()) {
-      JsonNode listing =
-          get(
-              "/deployments?environmentId="
-                  + URLEncoder.encode(environmentId, StandardCharsets.UTF_8));
-      for (JsonNode row : array(listing, "deployments")) {
-        String application = text(row, "applicationName");
-        String commitSha = text(row, "commitSha");
-        if (application == null || commitSha == null) {
-          // A row cd cannot name an image for pins nothing, and guessing is how a pinned tag gets
-          // deleted. Refusing the whole plan is the honest answer to a shape this does not know.
-          throw new IllegalStateException(
-              "qits-cd returned a deployment with no applicationName or commitSha");
-        }
-        rows.add(
-            new Deployment(
-                text(row, "applicationId"), application, commitSha, text(row, "status")));
+  public List<ApplicationPin> pins() {
+    String url = baseUrl + "/pins";
+    JsonNode body = get(url);
+    JsonNode pins = body.get("pins");
+    if (pins == null || !pins.isArray()) {
+      throw new IllegalStateException("qits-cd answered without a 'pins' array for " + url);
+    }
+    List<ApplicationPin> rows = new ArrayList<>();
+    for (JsonNode pin : pins) {
+      String application = text(pin, "applicationName");
+      JsonNode shas = pin.get("shas");
+      if (application == null || shas == null || !shas.isArray()) {
+        // A pin cd cannot name an image for pins nothing, and guessing is how a pinned tag gets
+        // deleted. Refusing the whole answer is the honest response to a shape this does not know.
+        throw new IllegalStateException(
+            "qits-cd returned a pin with no applicationName or no shas array");
       }
+      List<String> commits = new ArrayList<>();
+      for (JsonNode sha : shas) {
+        commits.add(sha.asText());
+      }
+      rows.add(new ApplicationPin(application, List.copyOf(commits)));
     }
     return List.copyOf(rows);
   }
 
-  private List<String> environmentIds() {
-    List<String> ids = new ArrayList<>();
-    for (JsonNode environment : array(get("/environments"), "environments")) {
-      String id = text(environment, "id");
-      if (id != null) {
-        ids.add(id);
-      }
-    }
-    return ids;
-  }
-
   /** Reads the JSON body of one GET, or throws with the url in the message. */
-  private JsonNode get(String path) {
-    String url = baseUrl + path;
+  private JsonNode get(String url) {
     try {
       HttpResponse<String> response =
           client.send(
@@ -123,14 +113,6 @@ public class CdHttpDeploymentPins implements CdDeploymentPins {
       throw new IllegalStateException(
           "qits-cd unreachable at " + url + ": " + unreachable, unreachable);
     }
-  }
-
-  private static Iterable<JsonNode> array(JsonNode body, String field) {
-    JsonNode array = body.get(field);
-    if (array == null || !array.isArray()) {
-      throw new IllegalStateException("qits-cd answered without a '" + field + "' array");
-    }
-    return array;
   }
 
   private static String text(JsonNode row, String field) {

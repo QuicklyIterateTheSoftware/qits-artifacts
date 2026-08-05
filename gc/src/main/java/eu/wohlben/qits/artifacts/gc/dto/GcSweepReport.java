@@ -16,6 +16,10 @@ import java.util.List;
  *     so a client can never mistake a plan for a receipt or a receipt for a plan
  * @param graceWindow how long a blob's file must have sat untouched before it may be unlinked,
  *     ISO-8601 — the window also gates identity deletion, see {@code GcTypeSweepResult}
+ * @param aborted why this run deleted nothing at all, or null when it ran. A pin source that could
+ *     not answer — qits-cd's deployments, qits-ci's daemon ladder — ends the <b>whole</b> run before
+ *     the census, because a keep-set assembled without a live pin is a keep-set assembled from
+ *     "nothing is pinned"
  * @param types one entry per repository type, always all of them, same honesty rule as the plan
  * @param sweep the blob unlinks: what was freed, and what was withheld
  * @param untouchable the row-less pool as it stood before this run — restated on every receipt
@@ -25,6 +29,7 @@ public record GcSweepReport(
     Instant executedAt,
     boolean dryRun,
     String graceWindow,
+    String aborted,
     List<GcTypeSweepResult> types,
     GcSweepOutcome sweep,
     GcUntouchablePool untouchable) {}

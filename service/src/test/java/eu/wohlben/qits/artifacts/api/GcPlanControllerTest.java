@@ -32,10 +32,11 @@ import org.junit.jupiter.api.Test;
  * its own — a plan that answered with an empty keep-set would condemn every sha tag on the platform.
  *
  * <p>The execute route exists now — {@code POST /gc/sweep}, landed after the user reviewed the
- * dry-run — and this suite asserts what makes invoking it here safe: every blob a test creates is
- * seconds old, so identity rows and files alike sit inside the grace window and a sweep deletes
- * nothing, provably. The plan path still refuses a {@code POST}: reading and executing stay two
- * different URLs.
+ * dry-run — and here it never gets as far as the store: the pin sources are closed ports, so the
+ * run aborts whole with nothing deleted and a reason on the receipt. Two independent things would
+ * have to break for a byte to go: the pins would have to answer, and the grace window would have to
+ * pass on content this suite created seconds ago. The plan path still refuses a {@code POST}:
+ * reading and executing stay two different URLs.
  */
 @QuarkusTest
 class GcPlanControllerTest {
@@ -85,6 +86,34 @@ class GcPlanControllerTest {
             is("no strategy registered for daemon-binaries"))
         .body("types.find { it.type == 'daemon-binaries' }.strategy", nullValue())
         .body("types.reclaimableBytes", everyItem(is(0)));
+  }
+
+  @Test
+  void thePlanEchoesTheConfiguredPolicyAndSaysWhetherASweepCouldExecuteIt() {
+    // Two halves a reader needs before the outcomes mean anything: what this deployment told the
+    // collector to do (the settlement's mapping, echoed with its window and its rule as a sentence),
+    // and whether a sweep run now could execute the plan at all. It could not here — the pin sources
+    // are closed ports — so the zeros beside oci-images are a refusal, not a finding.
+    given()
+        .when()
+        .get("/artifacts/api/gc/plan")
+        .then()
+        .statusCode(200)
+        .body("configuration", hasSize(8))
+        .body("configuration.find { it.type == 'oci-mirror' }.strategy", is("cache"))
+        .body("configuration.find { it.type == 'oci-mirror' }.window", is("P30D"))
+        .body("configuration.find { it.type == 'maven-packages' }.strategy", is("own"))
+        .body("configuration.find { it.type == 'maven-packages' }.window", is("P90D"))
+        .body(
+            "configuration.find { it.type == 'maven-packages' }.rule",
+            org.hamcrest.Matchers.containsString("last 2 released versions"))
+        .body("configuration.find { it.type == 'ci-videos' }.strategy", is("excluded"))
+        .body("configuration.find { it.type == 'ci-videos' }.window", nullValue())
+        .body("executable", is(false))
+        .body("pinFailures", hasSize(2))
+        .body(
+            "types.find { it.type == 'oci-images' }.error",
+            org.hamcrest.Matchers.containsString("live pins unavailable"));
   }
 
   @Test
@@ -192,40 +221,26 @@ class GcPlanControllerTest {
   }
 
   @Test
-  void theSweepExecutesOnPostAndAnswersWithTheReceiptShapedLikeThePlan() {
-    // The executed twin. Invoking it here is safe by the same physics the deployment relies on:
-    // every blob this suite ever writes is seconds old, so identities are withheld with their
-    // files and the sweep deletes nothing — which is exactly what the receipt must say. dryRun is
-    // false because this IS the execute surface; the zeros are the grace window working, not a
-    // report of intent.
-    io.restassured.path.json.JsonPath receipt =
-        given()
-            .when()
-            .post("/artifacts/api/gc/sweep")
-            .then()
-            .statusCode(200)
-            .body("dryRun", is(false))
-            .body("executedAt", notNullValue())
-            .body("graceWindow", is("P7D"))
-            .body("types", hasSize(8))
-            .body(
-                "types.find { it.type == 'oci-images' }.error",
-                org.hamcrest.Matchers.containsString("qits-cd"))
-            .body("types.find { it.type == 'oci-images' }.deleted", hasSize(0))
-            .body("types.find { it.type == 'npm-packages' }.deleted", hasSize(0))
-            .body(
-                "types.find { it.type == 'npm-proxy' }.note",
-                is("no strategy registered for npm-proxy"))
-            .body("sweep.blobsUnlinked", is(0))
-            .body("sweep.bytesReclaimed", is(0))
-            .body("sweep.unlinkedBlobIds", hasSize(0))
-            .body(
-                "untouchable.reason", org.hamcrest.Matchers.containsString("LOSES its last row"))
-            .extract()
-            .jsonPath();
-    // The stubs' captions ride the receipt too, in whichever honest state the suite order left them.
-    assertStubState(receipt, "ci-screenshots", "branch-scoped", "branch", "deleted");
-    assertStubState(receipt, "ci-videos", "byte-budgeted", "byte", "deleted");
+  void theSweepRefusesTheWholeRunWhileThePinSourcesCannotAnswer() {
+    // The settlement's abort rule on the wire. This suite has neither qits-cd nor qits-ci, so the
+    // run stops before the census: nothing is deleted, every type carries the same reason, and the
+    // row-less pool is reported as UNCOMPUTED rather than empty — an empty list there would be a
+    // claim about a store this run never read.
+    given()
+        .when()
+        .post("/artifacts/api/gc/sweep")
+        .then()
+        .statusCode(200)
+        .body("dryRun", is(false))
+        .body("executedAt", notNullValue())
+        .body("aborted", org.hamcrest.Matchers.containsString("qits-cd"))
+        .body("aborted", org.hamcrest.Matchers.containsString("qits-ci"))
+        .body("types", hasSize(8))
+        .body("types.deleted.flatten()", hasSize(0))
+        .body("sweep.blobsUnlinked", is(0))
+        .body("sweep.bytesReclaimed", is(0))
+        .body("sweep.unlinkedBlobIds", hasSize(0))
+        .body("untouchable.reason", org.hamcrest.Matchers.containsString("not computed"));
   }
 
   @Test

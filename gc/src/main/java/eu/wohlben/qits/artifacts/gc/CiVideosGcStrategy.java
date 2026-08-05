@@ -57,7 +57,7 @@ public class CiVideosGcStrategy implements GcStrategy {
   }
 
   @Override
-  public Plan plan(LiveBlobCensus.Census census) {
+  public Plan plan(LiveBlobCensus.Census census, GcPins pins) {
     long rows = rowCount();
     if (rows > 0) {
       throw new IllegalStateException(

@@ -31,7 +31,7 @@ class MavenPackagesGcStrategyTest extends GcFixture {
   void itClaimsTheMavenTypeAndCondemnsNothingInIt() throws Exception {
     seedMaven();
 
-    GcStrategy.Plan plan = strategy.plan(census.take());
+    GcStrategy.Plan plan = strategy.plan(census.take(), GcPins.none());
 
     assertEquals(RepositoryType.MAVEN_PACKAGES, strategy.type());
     assertEquals(List.of(), plan.dead());
@@ -45,7 +45,7 @@ class MavenPackagesGcStrategyTest extends GcFixture {
     // a reviewer can disagree with, unlike an empty list.
     seedMaven();
 
-    GcStrategy.Plan plan = strategy.plan(census.take());
+    GcStrategy.Plan plan = strategy.plan(census.take(), GcPins.none());
 
     assertEquals(
         List.of(MAVEN_JAR_PATH, MAVEN_POM_PATH),
@@ -65,7 +65,7 @@ class MavenPackagesGcStrategyTest extends GcFixture {
     seedMaven();
     LiveBlobCensus.Census taken = census.take();
 
-    GcStrategy.Plan plan = strategy.plan(taken);
+    GcStrategy.Plan plan = strategy.plan(taken, GcPins.none());
 
     assertEquals(taken.live(RepositoryType.MAVEN_PACKAGES).keySet(), plan.blobsRetained());
     assertEquals(2, plan.blobsRetained().size(), "the jar and the pom");
@@ -78,7 +78,7 @@ class MavenPackagesGcStrategyTest extends GcFixture {
     // error on this type's line mean something is genuinely wrong.
     seed();
 
-    GcStrategy.Plan plan = strategy.plan(census.take());
+    GcStrategy.Plan plan = strategy.plan(census.take(), GcPins.none());
 
     assertEquals(List.of(), plan.kept());
     assertEquals(Set.of(), plan.blobsRetained());

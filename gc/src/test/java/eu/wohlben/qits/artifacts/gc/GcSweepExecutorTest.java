@@ -40,8 +40,10 @@ import org.junit.jupiter.api.Test;
  * the whole chain: the row, the tombstone where the type has one, the file, and the receipt.
  *
  * <p>Strategies are wired by hand, as their own suites wire them, so a case controls exactly what
- * is registered — the OCI strategy gets a fake pin source, the npm strategy the real registry
+ * is registered, and the pins are passed in as a value — {@link GcPins#none()} for the cases below,
+ * which is "nothing is pinned and nothing is broken". The npm strategy gets the real registry
  * service, because {@code collect}'s tombstone-and-refusal mechanics are half of what is on trial.
+ * The whole-run abort, which is what an incomplete aggregate causes, is {@code GcPinsTest}'s.
  */
 @QuarkusTest
 class GcSweepExecutorTest extends GcFixture {
@@ -69,7 +71,7 @@ class GcSweepExecutorTest extends GcFixture {
     versionRow(PKG, SUPERSEDED, supersededBlob);
     versionRow(PKG, NEWEST, newestBlob);
 
-    GcSweepReport report = executor.execute(census.take(), List.of(npmStrategy()));
+    GcSweepReport report = executor.execute(census.take(), List.of(npmStrategy()), GcPins.none());
 
     assertFalse(report.dryRun());
     assertNotNull(report.executedAt());
@@ -107,7 +109,7 @@ class GcSweepExecutorTest extends GcFixture {
     versionRow(PKG, SUPERSEDED, supersededBlob);
     versionRow(PKG, NEWEST, newestBlob);
 
-    GcSweepReport report = executor.execute(census.take(), List.of(npmStrategy()));
+    GcSweepReport report = executor.execute(census.take(), List.of(npmStrategy()), GcPins.none());
 
     GcTypeSweepResult npm = typeResult(report, RepositoryType.NPM_PACKAGES);
     assertEquals(List.of(), npm.deleted());
@@ -189,7 +191,7 @@ class GcSweepExecutorTest extends GcFixture {
     versionRow(PKG, RELEASE, layerDoomed);
 
     GcSweepReport report =
-        executor.execute(census.take(), List.of(ociStrategy(List.of()), npmStrategy()));
+        executor.execute(census.take(), List.of(ociStrategy(), npmStrategy()), GcPins.none());
 
     GcTypeSweepResult oci = typeResult(report, RepositoryType.OCI_IMAGES);
     assertNull(oci.error());
@@ -241,7 +243,7 @@ class GcSweepExecutorTest extends GcFixture {
     repositoryService.ensure("clips", RepositoryType.CI_VIDEOS);
 
     GcSweepReport quiet =
-        executor.execute(census.take(), List.of(screenshotsStub(), videosStub()));
+        executor.execute(census.take(), List.of(screenshotsStub(), videosStub()), GcPins.none());
     GcTypeSweepResult shots = typeResult(quiet, RepositoryType.CI_SCREENSHOTS);
     GcTypeSweepResult clips = typeResult(quiet, RepositoryType.CI_VIDEOS);
     assertEquals(CiScreenshotsGcStrategy.NOTE, shots.note());
@@ -255,7 +257,7 @@ class GcSweepExecutorTest extends GcFixture {
     String screenshot = agedBlob(77);
     recordRow("shots", screenshot);
     GcSweepReport refused =
-        executor.execute(census.take(), List.of(screenshotsStub(), videosStub()));
+        executor.execute(census.take(), List.of(screenshotsStub(), videosStub()), GcPins.none());
     GcTypeSweepResult refusedShots = typeResult(refused, RepositoryType.CI_SCREENSHOTS);
     assertNotNull(refusedShots.error());
     assertTrue(refusedShots.error().contains("stub"), refusedShots.error());
@@ -275,13 +277,12 @@ class GcSweepExecutorTest extends GcFixture {
     return strategy;
   }
 
-  private OciImageGcStrategy ociStrategy(List<CdDeploymentPins.Deployment> rows) {
+  private OciImageGcStrategy ociStrategy() {
     OciImageGcStrategy strategy = new OciImageGcStrategy();
     strategy.repositories = repositories;
     strategy.tags = ociTags;
     strategy.manifests = ociManifests;
     strategy.footprints = footprints;
-    strategy.pins = () -> rows;
     strategy.registry = ociRegistry;
     return strategy;
   }

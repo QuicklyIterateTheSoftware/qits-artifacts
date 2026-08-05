@@ -91,10 +91,12 @@ class PackagedProcessIT {
       // No CI intake in this repo; the notifier is fire-and-forget, so a closed port is the honest
       // posture here exactly as it is in the unit suite.
       overrides.put("qits.ci.intake-url", "http://localhost:1/post-receive");
-      // No qits-cd here either, and the shipped default names it by its qits-net alias — which on a
-      // build machine resolves to whatever the resolver feels like, or hangs. A closed port makes
-      // the fail-closed path deterministic while still driving a real HttpClient inside the binary.
-      overrides.put("qits.artifacts.gc.oci.cd-base-url", "http://localhost:1/cd/api");
+      // No qits-cd or qits-ci here either, and the shipped defaults name them by their qits-net
+      // aliases — which on a build machine resolve to whatever the resolver feels like, or hang.
+      // Closed ports make the refusal deterministic while still driving a real HttpClient inside
+      // the binary.
+      overrides.put("qits.artifacts.gc.pins.cd-base-url", "http://localhost:1/cd/api");
+      overrides.put("qits.artifacts.gc.pins.ci-base-url", "http://localhost:1/ci/api");
       // And the same for the mirror's three upstreams, where the shipped defaults name real public
       // registries: this key redirects every one of them, so a closed port is what keeps an IT from
       // dialling quay.io or Docker Hub. It still drives the binary's outbound HttpClient for real,

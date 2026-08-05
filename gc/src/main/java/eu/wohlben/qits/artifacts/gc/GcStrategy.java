@@ -23,16 +23,35 @@ import java.util.Set;
  * base class, and a retention-rule framework growing between them would be the mistake this seam is
  * shaped to prevent. Registering one is a CDI bean of this type and nothing else.
  *
- * <p><b>Failing is a supported answer, and it is fail-closed.</b> A strategy whose keep-set depends
- * on something outside this service — the OCI rule reads qits-cd's live deployment pins at plan time
- * — must throw rather than plan without it. The planner catches it, reports the type as failed, and
- * treats every blob the census attributes to that type as live, so an unreachable dependency
+ * <p><b>Failing is a supported answer, and it is fail-closed.</b> A strategy that cannot establish
+ * its keep-set must throw rather than plan without it. The planner catches it, reports the type as
+ * failed, and treats every blob the census attributes to that type as live, so a broken dependency
  * reclaims nothing instead of reclaiming something it cannot vouch for.
+ *
+ * <p><b>Live pins arrive as an argument, fetched once per run.</b> A strategy does not dial another
+ * service itself: {@code GcPinSources} reads qits-cd and qits-ci at the start of every plan and
+ * every sweep, and {@link #plan} is handed the result. Two fetches inside one run can disagree, and
+ * a strategy holding its own source is how that happens. A strategy whose keep-set depends on those
+ * pins says so with {@link #readsPins()}, and is not planned at all on a run whose pins are
+ * incomplete.
  */
 public interface GcStrategy {
 
   /** The type this strategy collects. Exactly one strategy may claim a type. */
   RepositoryType type();
+
+  /**
+   * Whether this strategy's keep-set reads {@link GcPins}.
+   *
+   * <p>Declared rather than inferred, because the consequence is a refusal: on a run where a pin
+   * source could not answer, a strategy that reads pins is reported as failed and never asked to
+   * plan, while the rest of the report is still computed. A strategy that quietly ignored an
+   * incomplete aggregate would plan its type against "nothing is pinned", which is the answer that
+   * condemns everything.
+   */
+  default boolean readsPins() {
+    return false;
+  }
 
   /**
    * A standing sentence the reports carry beside this strategy's line, or null.
@@ -52,10 +71,12 @@ public interface GcStrategy {
    * store would be the one thing nobody could review.
    *
    * @param census the store as it stands, including this type's live blob set
+   * @param pins every live pin the run read at its start — a keep-class checked before any rule of
+   *     this strategy's own, and always {@link GcPins#complete()} when {@link #readsPins()} is true
    * @throws RuntimeException the keep-set cannot be established safely — the type is reported as
    *     failed and nothing of it is planned
    */
-  Plan plan(LiveBlobCensus.Census census);
+  Plan plan(LiveBlobCensus.Census census, GcPins pins);
 
   /**
    * Deletes the identity rows of a plan this strategy produced <b>moments ago</b> — the execute

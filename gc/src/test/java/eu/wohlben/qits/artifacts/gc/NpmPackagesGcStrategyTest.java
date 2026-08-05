@@ -45,7 +45,7 @@ class NpmPackagesGcStrategyTest extends GcFixture {
     version(UI, "2026.801.63140", 13);
     version(UI, "2026.801.85149", 14);
 
-    GcStrategy.Plan plan = strategy().plan(census.take());
+    GcStrategy.Plan plan = strategy().plan(census.take(), GcPins.none());
 
     assertEquals(List.of(), plan.dead(), "a package with only releases collects nothing");
     assertEquals(Set.of(), plan.blobsReleased());
@@ -72,7 +72,7 @@ class NpmPackagesGcStrategyTest extends GcFixture {
 
     NpmPackagesGcStrategy strategy = strategy();
     LiveBlobCensus.Census taken = census.take();
-    GcStrategy.Plan plan = strategy.plan(taken);
+    GcStrategy.Plan plan = strategy.plan(taken, GcPins.none());
 
     assertEquals(
         Stream.of(
@@ -97,7 +97,7 @@ class NpmPackagesGcStrategyTest extends GcFixture {
     // loses its last reference and the whole reclaim is real.
     assertEquals(
         Stream.of(olderBase, olderBaseTwin, superseded).sorted().toList(),
-        planner.plan(taken, List.of(strategy)).sweep().blobIds());
+        planner.plan(taken, List.of(strategy), GcPins.none()).sweep().blobIds());
   }
 
   @Test
@@ -113,7 +113,7 @@ class NpmPackagesGcStrategyTest extends GcFixture {
     distTag(UI, "latest", "2026.801.85149");
     distTag(UI, "main", "2026.801.85149-main.g11111aa");
 
-    GcStrategy.Plan plan = strategy().plan(census.take());
+    GcStrategy.Plan plan = strategy().plan(census.take(), GcPins.none());
 
     assertEquals(
         NpmPackagesGcStrategy.keptByDistTag("main"),
@@ -138,7 +138,7 @@ class NpmPackagesGcStrategyTest extends GcFixture {
     String uiOld = version(UI, "9.9.9-main.gaaaaaa1", 43);
     version(UI, "9.9.9-main.gccccc33", 44);
 
-    GcStrategy.Plan plan = strategy().plan(census.take());
+    GcStrategy.Plan plan = strategy().plan(census.take(), GcPins.none());
 
     assertEquals(
         List.of("@qits/angular@0.0.1-main.gaaaaaa1", UI + "@9.9.9-main.gaaaaaa1"),
@@ -162,7 +162,7 @@ class NpmPackagesGcStrategyTest extends GcFixture {
     String superseded = version(UI, "1.0.0-main.g1234abc", 54);
     version(UI, "1.0.0-main.g9999fff", 55);
 
-    GcStrategy.Plan plan = strategy().plan(census.take());
+    GcStrategy.Plan plan = strategy().plan(census.take(), GcPins.none());
 
     assertEquals(List.of(UI + "@1.0.0-main.g1234abc"), identities(plan.dead()));
     assertEquals(Set.of(superseded), plan.blobsReleased());
@@ -183,7 +183,7 @@ class NpmPackagesGcStrategyTest extends GcFixture {
     versionRow("npmjs", "left-pad", "1.0.0-main.gbbbbbb2", store(filled(62, (byte) 62)));
 
     NpmPackagesGcStrategy strategy = strategy();
-    GcStrategy.Plan plan = strategy.plan(census.take());
+    GcStrategy.Plan plan = strategy.plan(census.take(), GcPins.none());
 
     assertEquals(RepositoryType.NPM_PACKAGES, strategy.type());
     assertEquals(List.of(), plan.dead());
@@ -196,7 +196,7 @@ class NpmPackagesGcStrategyTest extends GcFixture {
     hosted();
 
     LiveBlobCensus.Census taken = census.take();
-    GcStrategy.Plan plan = strategy().plan(taken);
+    GcStrategy.Plan plan = strategy().plan(taken, GcPins.none());
 
     assertEquals(List.of(), plan.dead());
     assertEquals(List.of(), plan.kept());
@@ -214,12 +214,12 @@ class NpmPackagesGcStrategyTest extends GcFixture {
     LiveBlobCensus.Census taken = census.take();
 
     NpmPackagesGcStrategy strategy = strategy();
-    GcStrategy.Plan plan = strategy.plan(taken);
+    GcStrategy.Plan plan = strategy.plan(taken, GcPins.none());
 
     assertEquals(List.of(), plan.dead());
     assertEquals(List.of("@qits/thing@1.0.0", "@qits/thing@1.1.0"), identities(plan.kept()));
     assertEquals(taken.live(RepositoryType.NPM_PACKAGES).keySet(), plan.blobsRetained());
-    assertEquals(List.of(), planner.plan(taken, List.of(strategy)).sweep().blobIds());
+    assertEquals(List.of(), planner.plan(taken, List.of(strategy), GcPins.none()).sweep().blobIds());
   }
 
   // --- fixture ---------------------------------------------------------------------------------

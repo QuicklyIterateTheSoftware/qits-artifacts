@@ -6,6 +6,7 @@ import eu.wohlben.qits.artifacts.entity.RepositoryType;
 import eu.wohlben.qits.artifacts.gc.dto.GcSweepOutcome;
 import eu.wohlben.qits.artifacts.gc.dto.GcSweepReport;
 import eu.wohlben.qits.artifacts.gc.dto.GcTypeSweepResult;
+import eu.wohlben.qits.artifacts.gc.dto.GcUntouchablePool;
 import io.quarkus.logging.Log;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
@@ -48,13 +49,57 @@ public class GcSweepExecutor {
   @Inject BlobSweep sweep;
   @Inject BlobReclaim blobs;
   @Inject Instance<GcStrategy> strategies;
+  @Inject GcPinSources pinSources;
 
-  /** One full run: fresh census, every registered strategy, the unlink loop, the receipt. */
+  /**
+   * One full run: every live pin, a fresh census, every registered strategy, the unlink loop, the
+   * receipt.
+   *
+   * <p><b>The pins are read first, and a source that cannot answer ends the run here</b> — before
+   * the census, before a single row is touched. That is the settlement's abort rule and it replaces
+   * the per-type fail-closed this method used to rely on: a keep-set assembled while qits-cd or
+   * qits-ci is unreachable is a keep-set assembled from "nothing is pinned", and the types that do
+   * not read pins are not safe to run beside it either, because a blob one of them releases may be
+   * the last reference to content a pinned identity of another type still needs.
+   */
   public GcSweepReport sweep() {
-    return execute(census.take(), strategies.stream().toList());
+    GcPins pins = pinSources.fetch();
+    if (!pins.complete()) {
+      return aborted(pins);
+    }
+    return execute(census.take(), strategies.stream().toList(), pins);
   }
 
-  GcSweepReport execute(LiveBlobCensus.Census taken, Collection<GcStrategy> registered) {
+  /**
+   * The receipt of a run that never started: what was wrong, per type, and zeros everywhere else.
+   *
+   * <p>No census is taken — the run is over before anything could have moved — so the untouchable
+   * pool is reported as uncomputed rather than as empty. An empty list there would read as "this
+   * store has no row-less blobs", which is a claim, and this run made none.
+   */
+  private GcSweepReport aborted(GcPins pins) {
+    String why = "the run was aborted before anything was deleted: " + pins.whyIncomplete();
+    Log.warnf("gc sweep aborted: %s", pins.whyIncomplete());
+    List<GcTypeSweepResult> types = new ArrayList<>();
+    for (RepositoryType type : RepositoryType.values()) {
+      types.add(new GcTypeSweepResult(type, null, null, why, List.of(), List.of()));
+    }
+    return new GcSweepReport(
+        Instant.now(),
+        false,
+        GcPlanner.iso(sweep.graceWindow()),
+        why,
+        types,
+        new GcSweepOutcome(0, 0L, 0, 0L, 0, 0, List.of()),
+        new GcUntouchablePool(
+            "not computed: this run aborted before taking a census, and deleted nothing",
+            0,
+            0L,
+            List.of()));
+  }
+
+  GcSweepReport execute(
+      LiveBlobCensus.Census taken, Collection<GcStrategy> registered, GcPins pins) {
     Instant executedAt = Instant.now();
     Duration window = sweep.graceWindow();
     Instant graceStartsAt = executedAt.minus(window);
@@ -99,7 +144,7 @@ public class GcSweepExecutor {
       GcStrategy strategy = claiming.get(0);
       String name = GcPlanner.nameOf(strategy);
       try {
-        GcStrategy.Plan plan = strategy.plan(taken);
+        GcStrategy.Plan plan = strategy.plan(taken, pins);
         // In the map before apply: even a partially applied type must contribute its released set
         // to the blob loop, or rows already deleted would leave their blobs unswept and stranded.
         plans.put(type, plan);
@@ -142,6 +187,7 @@ public class GcSweepExecutor {
         executedAt,
         false,
         GcPlanner.iso(window),
+        null,
         types,
         outcome,
         // The pool as it stood before this run: a version row deleted moments ago leaves its

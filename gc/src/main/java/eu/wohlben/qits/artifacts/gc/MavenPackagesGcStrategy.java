@@ -70,7 +70,7 @@ public class MavenPackagesGcStrategy implements GcStrategy {
   }
 
   @Override
-  public Plan plan(LiveBlobCensus.Census census) {
+  public Plan plan(LiveBlobCensus.Census census, GcPins pins) {
     List<GcIdentity> kept = new ArrayList<>();
     for (ArtifactRepository repository : repositories.listAll()) {
       if (repository.type != RepositoryType.MAVEN_PACKAGES) {

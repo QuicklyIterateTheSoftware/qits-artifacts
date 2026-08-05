@@ -31,7 +31,7 @@ class OciMirrorGcStrategyTest extends GcFixture {
   void itClaimsTheMirrorTypeAndCondemnsNothingInIt() throws Exception {
     seedMirror();
 
-    GcStrategy.Plan plan = strategy.plan(census.take());
+    GcStrategy.Plan plan = strategy.plan(census.take(), GcPins.none());
 
     assertEquals(RepositoryType.OCI_MIRROR, strategy.type());
     assertEquals(List.of(), plan.dead());
@@ -45,7 +45,7 @@ class OciMirrorGcStrategyTest extends GcFixture {
     // reviewer can disagree with, unlike an empty list.
     MirrorStore mirror = seedMirror();
 
-    GcStrategy.Plan plan = strategy.plan(census.take());
+    GcStrategy.Plan plan = strategy.plan(census.take(), GcPins.none());
 
     assertEquals(
         List.of(
@@ -67,7 +67,7 @@ class OciMirrorGcStrategyTest extends GcFixture {
     seedMirror();
     LiveBlobCensus.Census taken = census.take();
 
-    GcStrategy.Plan plan = strategy.plan(taken);
+    GcStrategy.Plan plan = strategy.plan(taken, GcPins.none());
 
     assertEquals(taken.live(RepositoryType.OCI_MIRROR).keySet(), plan.blobsRetained());
     assertTrue(plan.blobsRetained().size() >= 4, "index, child, config, layer at the very least");
@@ -80,7 +80,7 @@ class OciMirrorGcStrategyTest extends GcFixture {
     // error on this type's line mean something is genuinely wrong.
     seed();
 
-    GcStrategy.Plan plan = strategy.plan(census.take());
+    GcStrategy.Plan plan = strategy.plan(census.take(), GcPins.none());
 
     assertEquals(List.of(), plan.kept());
     assertEquals(Set.of(), plan.blobsRetained());

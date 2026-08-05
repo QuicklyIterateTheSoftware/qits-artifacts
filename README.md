@@ -21,7 +21,7 @@ with `domain.repository` — see `migration-plan.md` §3.4 in the home repo.
 |---|---|
 | `artifacts/` | `eu.wohlben.qits.artifacts.*` — entity, persistence, dto, mapper, control, error. The blob store proper. No web, no JAX-RS. |
 | `git-storage/` | `eu.wohlben.qits.githost.storage` — a JGit `DfsRepository` whose packs, pack indexes and refs are blobs, plus the two ports it declares and does not implement (`PackBlobStore`, `PackCatalog`). One compile dependency: JGit. |
-| `gc/` | `eu.wohlben.qits.artifacts.gc` (+ `.dto`) — garbage collection: the six per-type strategies, the two configured engines that will replace them, the planner, the reconciliation and the sweep, plus the `CdDeploymentPins` port and its HTTP adapter. A *process* modelled from within qits-artifacts, not artifacts domain. Depends on `artifacts` and on nothing else here. No web, no JAX-RS — `GcPlanController` is in `service/`. |
+| `gc/` | `eu.wohlben.qits.artifacts.gc` (+ `.dto`) — garbage collection: the six per-type strategies, the two configured engines that will replace them, the planner, the reconciliation and the sweep, plus the two pin ports (`CdDeploymentPins`, `CiDaemonPins`) and their HTTP adapters. A *process* modelled from within qits-artifacts, not artifacts domain. Depends on `artifacts` and on nothing else here. No web, no JAX-RS — `GcPlanController` is in `service/`. |
 | `service/` | `eu.wohlben.qits.artifacts.api` (the JAX-RS boundary), `eu.wohlben.qits.githost` (the Vert.x + JGit smart-HTTP host), `eu.wohlben.qits.githost.persistence` (the two adapters and the git host's entities), `eu.wohlben.qits.registry` (the Vert.x OCI Distribution API), `eu.wohlben.qits.npm` (the Vert.x npm registry and its upstream proxy) and `eu.wohlben.qits.maven` (the Vert.x maven repository). |
 | `service/src/main/webui/` | The `qits-spa-artifacts` submodule — an Angular SPA, built into the app by Quinoa and served at `/artifacts`. Not Java, and not a Maven module. |
 
@@ -1007,14 +1007,14 @@ if a change would let one strategy reuse another's policy, it is the wrong chang
 
 | type | identity that dies | keeps, always | keeps, conditionally | liveness expression | gate |
 |---|---|---|---|---|---|
-| `oci-images` | sha tags; manifests unreachable from kept tags | calver version tags | shas an ACTIVE qits-cd deployment pins, plus the previous distinct sha per service; newest sha per image | manifest closure over kept manifests | dry-run reviewed |
+| `oci-images` | sha tags; manifests unreachable from kept tags | calver version tags | every sha qits-cd pins (`GET /cd/api/pins`: what serves, what a rollback restores); newest sha per image | manifest closure over kept manifests | dry-run reviewed |
 | `npm-packages` | suffixed `-main.g<sha7>` versions except the newest per package | every unsuffixed version; anything a dist-tag names | newest prerelease per package | tarball blob ids of kept versions | dry-run reviewed |
 | `ci-screenshots` | records of deleted branches; superseded per (branch, userflow) | — | newest per (branch, userflow) | `artifact_record.blob_id` | **stub claims the type** (`CiScreenshotsGcStrategy`): plans nothing at zero rows under a note naming the rule, fails closed once rows exist |
 | `ci-videos` | superseded per userflow beyond a byte budget | — | newest N per userflow, N in bytes | `artifact_record.blob_id` | **stub claims the type** (`CiVideosGcStrategy`): same posture, deliberately its own class — byte-budgeted is not branch-scoped |
 | `npm-proxy` | **parked** — cache eviction is access-based, which is `artifact-access-tracking`'s territory, not a structural rule | — | — | — | not this design |
 | `oci-mirror` | **nothing yet** — access is tracked, but no retention window/eviction policy is settled | every cached tag and manifest | — | manifest closure over the namespace | claimed, so the report says so |
 | `maven-packages` | **nothing** — releases are never eligible; timestamped snapshot builds accumulate at a recorded price, with the cleanup rule named (keep the newest N per snapshot version) | every deployed file | — | `maven_artifact.blob_id`, sized from the row | claimed, so the report says so |
-| `daemon-binaries` | **nothing yet** — the rule is keep the pinned version plus the most recent previous distinct version per daemon, and the pin comes from qits-ci at plan time (`GET /ci/api/daemon`), which does not exist yet | the pin and its predecessor | — | `daemon_binary.blob_id`, sized from the row | **unclaimed**, so the report says "no strategy registered": a plan over this type with no pin source would be a guess about the one blob class a running service executes |
+| `daemon-binaries` | **nothing yet** — the pin source exists now (`GET /ci/api/daemon`, read by every run), so what is missing is the adapter, not the facts | the pinned version and its predecessor | — | `daemon_binary.blob_id`, sized from the row | **unclaimed**, so the report says "no strategy registered": a strategy shipped before its adapter would be a guess about the one blob class a running service executes |
 | git host (not an `artifact_repository` type) | superseded pack descriptions after a repack | every ref | current packs | `PackCatalog.list` per repo | the DFS migration |
 
 The OCI keep-set is **fetched at plan time and fail-closed**: qits-cd unreachable aborts that type's
@@ -1076,6 +1076,40 @@ a type nobody configured is a decision nobody took.
 and the effective rule as a sentence. It is the half of a plan the outcomes cannot show — "nothing
 died" reads identically whether the rule is right or the window is a year.
 
+### Live pins, and the whole-run abort
+
+Two services hold references into this store that nothing here can derive, and both are read
+**once at the start of every plan and every sweep**, never cached:
+
+| source | what it pins | shape |
+|---|---|---|
+| `GET /cd/api/pins` (qits-cd) | image shas: what is serving, and what a rollback would restore, unioned over every environment | `{"pins":[{"applicationName":…,"shas":[…]}]}` |
+| `GET /ci/api/daemon` (qits-ci) | the daemon ladder's top two rungs, which protect `daemon_binary` rows keyed `(name, version)` | `{daemonName, daemonVersion, previousDaemonVersion, source}` |
+
+Both are folded into one `GcPins` for the run. Two details are load-bearing and neither is visible
+on the wire:
+
+- **A blank `daemonVersion` is an answer**, not an absence: it means this deployment has adopted or
+  pinned no daemon, which is the shipped default. Treating it as a failure would abort every run on
+  a platform that has published none.
+- **A 64-hex daemon version pins a blob as well as a row.** The pin has been a sha256 digest since
+  the daemon shipped (`QITS_CI_DAEMON_VERSION`, fetched from the blob route), so it may name bytes
+  no version-addressed row exists for.
+
+**A source that cannot answer aborts the whole run.** Not the type — the run. `POST /gc/sweep`
+returns a receipt with `aborted` naming the source, every type carrying that reason, and nothing
+deleted, before the census is even taken. The reason it is all-or-nothing: blobs dedupe globally, so
+a tarball one type releases may be the last reference to bytes a pinned image also names, and with
+the pins missing nothing can tell.
+
+`GET /gc/plan` does **not** fail — a report that 500s tells a reviewer nothing about the types that
+are fine. It answers with `executable: false`, the failures in `pinFailures`, and every pin-dependent
+type carrying a refusal instead of zeros nobody can interpret.
+
+The keep is reported under the pin's own name — `pinned by qits-cd deployment`, `pinned by qits-ci
+daemon ladder` — and both engines check it **before** the access rule, because a pin is the one fact
+no timestamp implies.
+
 ### One census, never two
 
 `LiveBlobCensus` is the reference set, and both the store summary and every GC plan read it. It was
@@ -1136,7 +1170,8 @@ with two claimants is reported as a policy collision rather than merged.
 ```java
 public interface GcStrategy {
   RepositoryType type();
-  Plan plan(LiveBlobCensus.Census census);       // pure; throws ⇒ that type is fail-closed
+  default boolean readsPins();                   // true ⇒ never planned on a run with broken pins
+  Plan plan(LiveBlobCensus.Census census, GcPins pins);  // pure; throws ⇒ that type is fail-closed
   default String note();                         // a standing caption for the reports, or null
   default Applied apply(Plan plan, GraceWindow grace);  // the execute half; the default refuses
                                                         // any plan that condemns
@@ -1176,21 +1211,15 @@ report beside the identity it saved:
 | Kept because | Spelled |
 |---|---|
 | it is a release | a tag shaped like a calver version (`2026.801.85448`). There is no `-main.g<sha>` suffix in docker — the sha tag *is* the prerelease coordinate and a release adds a version tag beside it |
-| a container is running it | the sha of an **ACTIVE** qits-cd deployment; a restart pulls that reference again |
-| a rollback would pull it | the **previous distinct** sha per application — the newest row under the ACTIVE one whose sha differs. A redeploy of the same sha is not a previous version |
+| qits-cd pins it | any sha `GET /cd/api/pins` names for that image — what is serving, and what a rollback would restore. **One rule, cd's**: this used to be two rules derived here from raw deployment rows, and the derivation was wrong (it read a `FAILED` attempt as the rollback target and dropped the sha that actually served) |
 | the next deploy will pull it | the newest sha tag per image, by `oci_tag.updated_at`. This is the whole safety net for an image cd has never deployed |
 | nobody modelled it | belt and braces: a tag that is neither a calver version nor a build sha is kept and reported as unclassified. Only build coordinates are ever condemned |
 
 Then every manifest row **no kept tag reaches** dies, index children included — which is what
 collects the store's 73 untagged manifests, left behind when a tag re-push moved the tag row.
 
-**It reads qits-cd, at plan time, every time.** That is the only outbound dependency this service
-has on another one, it is deliberate (`artifacts-gc-plan.md` ⚖4), and it is why `plan()` is allowed
-to throw: a cached pin list is a plan on stale facts, and a plan on stale facts deletes an image a
-container is about to restart from. `CdDeploymentPins` is the port; it fetches transport and no
-policy, listing environments and then each environment's deployments, and the keep-set is the union
-over **all** environments rather than one configured id — over-keeping is safe here and under-keeping
-ends in `IMAGE_MISSING`. Any failure aborts that type with nothing planned.
+**Its pins come from the run**, fetched once at the start from qits-cd, never cached and never
+derived here — see "Live pins, and the whole-run abort" above.
 
 ### `npm-packages`, the second — and the tombstone only it needs
 
@@ -1340,13 +1369,13 @@ projects/repositories context, and this repo holds no foreign key into another c
 The inline `QuarkusTransaction.requiringNew()` around the lookup moved into the port's contract —
 the resolver is called on a Vert.x worker thread with no request context bound.
 
-`CdDeploymentPins` is a second port and the exception that proves the shape, so it is named here
-rather than left to be discovered: it is declared **and** implemented inside this repo, over HTTP,
-and it is the one place this service dials another (`qits-cd`, for the `oci-images` keep-set — see
-"Garbage collection"). Absent is not a supported configuration there, which is the other difference:
-an unanswerable pin list aborts that type's plan instead of falling back. It lives in `gc/` with the
-strategy that needs it — the `artifacts` library dials nothing at all, which is the domain-blindness
-the module split gave back.
+`CdDeploymentPins` and `CiDaemonPins` are the exceptions that prove the shape, so they are named
+here rather than left to be discovered: both are declared **and** implemented inside this repo, over
+HTTP, and they are the only places this service dials another (`qits-cd` and `qits-ci`, for GC's
+live pins — see "Garbage collection"). Absent is not a supported configuration there, which is the
+other difference: a pin source that cannot answer aborts the whole GC run instead of falling back.
+Both live in `gc/` with the process that needs them — the `artifacts` library dials nothing at all,
+which is the domain-blindness the module split gave back.
 
 ## Config
 
@@ -1357,8 +1386,10 @@ app's `application.properties` overrides them.
 |---|---|---|
 | `qits.artifacts.blobs-dir` | `~/.qits/data/artifacts/blobs` | content-addressed blob bytes |
 | `qits.artifacts.gc.blob-grace-period` | `P7D` | how long a blob file must sit untouched before the sweep may unlink it — see "Garbage collection" |
-| `qits.artifacts.gc.oci.cd-base-url` | `http://qits-cd:8080/cd/api` | where the `oci-images` strategy reads its keep-set — the **only** service this one dials. Unreachable is fail-closed: that type reclaims nothing |
-| `qits.artifacts.gc.oci.cd-timeout` | `PT10S` | per-request timeout on that fetch |
+| `qits.artifacts.gc.pins.cd-base-url` | `http://qits-cd:8080/cd/api` | where a run reads the image shas deployments pin (`GET /cd/api/pins`). **Renamed** from `qits.artifacts.gc.oci.cd-base-url` |
+| `qits.artifacts.gc.pins.cd-timeout` | `PT10S` | per-request timeout on that fetch. **Renamed** from `qits.artifacts.gc.oci.cd-timeout` |
+| `qits.artifacts.gc.pins.ci-base-url` | `http://qits-ci:8080/ci/api` | where a run reads the daemon pin ladder (`GET /ci/api/daemon`) |
+| `qits.artifacts.gc.pins.ci-timeout` | `PT10S` | per-request timeout on that fetch |
 | `qits.artifacts.gc.type.<wire-name>.strategy` | per type, see "The settlement" | which engine collects a repository type: `cache`, `own` or `excluded`. Every type must have one — a missing entry is refused, not defaulted |
 | `qits.artifacts.gc.type.<wire-name>.window` | `P30D` / `P90D` per type | how long an identity may sit unaccessed before it is eligible, ISO-8601. Absent for an `excluded` type |
 | `qits.auth.machine.required` | `false` | the machine-token rollout gate. Off, the JSON admin write surface is open — network trust. On, its writes need a bearer with `aud=qits-artifacts` |
