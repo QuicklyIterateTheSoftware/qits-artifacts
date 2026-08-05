@@ -4,6 +4,7 @@ import eu.wohlben.qits.artifacts.gc.dto.GcIdentity;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -96,6 +97,7 @@ public final class OwnArtifactsStrategy {
     List<GcIdentity> kept = new ArrayList<>();
     Set<String> released = new HashSet<>();
     Set<String> retained = new HashSet<>();
+    Map<String, Set<String>> releasedByRepository = new HashMap<>();
 
     for (GcCandidate candidate : candidates) {
       String pin = pins.pinnedBy(candidate);
@@ -106,6 +108,11 @@ public final class OwnArtifactsStrategy {
       } else if (candidate.unaccessedSince(cut)) {
         dead.add(new GcIdentity(candidate.repository(), candidate.identity(), deadUnaccessed(window)));
         released.addAll(candidate.blobs());
+        // Which repository let go of which bytes, recorded while the candidate is in hand — the
+        // groups are already repository-qualified, so this is a record of a split the rule made.
+        releasedByRepository
+            .computeIfAbsent(candidate.repository(), repository -> new HashSet<>())
+            .addAll(candidate.blobs());
       } else {
         keep(candidate, keptAccessed(window), kept, retained);
       }
@@ -115,7 +122,7 @@ public final class OwnArtifactsStrategy {
     kept.sort(CacheEvictionStrategy.BY_IDENTITY);
     return dead.isEmpty()
         ? GcStrategy.Plan.nothingDies(kept, retained)
-        : new GcStrategy.Plan(dead, kept, released, retained);
+        : new GcStrategy.Plan(dead, kept, released, retained, releasedByRepository);
   }
 
   /**

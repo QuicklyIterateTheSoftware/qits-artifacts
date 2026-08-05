@@ -31,6 +31,11 @@ import java.util.List;
  * @param types one entry per repository type, always all of them — a type with no strategy says so
  *     rather than being absent, because "nothing to collect" and "nobody is collecting" are
  *     different answers and only one of them is fine
+ * @param repositories the same plan attributed one level down, one entry per {@code
+ *     artifact_repository} row. Read off this report rather than computed again, and carried here
+ *     rather than only on the per-repository route so that a reviewer of the whole store sees the
+ *     figures the repository listing shows. They are deliberately not additive — see {@link
+ *     GcRepositoryPlanSummary}.
  * @param sweep the cross-type reconciliation: what would actually be unlinked
  * @param untouchable the row-less pool, which no plan may ever include
  */
@@ -44,5 +49,6 @@ public record GcPlanReport(
     List<GcPinSource> pins,
     List<GcTypeConfiguration> configuration,
     List<GcTypePlan> types,
+    List<GcRepositoryPlanSummary> repositories,
     GcSweepPlan sweep,
     GcUntouchablePool untouchable) {}

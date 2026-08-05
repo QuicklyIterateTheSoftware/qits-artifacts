@@ -37,8 +37,25 @@ final class FakeGcTypeAdapter implements GcTypeAdapter {
    */
   FakeGcTypeAdapter add(
       String identity, String group, boolean released, Instant lastAccessAt, String... blobs) {
+    return addIn(REPO, identity, group, released, lastAccessAt, blobs);
+  }
+
+  /**
+   * The same, in a named repository — one type can hold several.
+   *
+   * <p>Exists for the scoping cases: what a per-repository plan is a filter <em>over</em> is a
+   * type's plan across every repository of that type, and an adapter that could only speak for one
+   * could not produce the store shape those cases are about.
+   */
+  FakeGcTypeAdapter addIn(
+      String repository,
+      String identity,
+      String group,
+      boolean released,
+      Instant lastAccessAt,
+      String... blobs) {
     candidates.add(
-        new GcCandidate(REPO, identity, group, released, lastAccessAt, Set.of(blobs)));
+        new GcCandidate(repository, identity, group, released, lastAccessAt, Set.of(blobs)));
     order.add(identity);
     return this;
   }

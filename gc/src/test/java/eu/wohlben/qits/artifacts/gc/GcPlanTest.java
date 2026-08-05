@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.artifacts.control.LiveBlobCensus;
@@ -11,10 +12,13 @@ import eu.wohlben.qits.artifacts.entity.RepositoryType;
 import eu.wohlben.qits.artifacts.gc.dto.GcIdentity;
 import eu.wohlben.qits.artifacts.gc.dto.GcPlanReport;
 import eu.wohlben.qits.artifacts.gc.dto.GcPlanSummary;
+import eu.wohlben.qits.artifacts.gc.dto.GcRepositoryPlanReport;
+import eu.wohlben.qits.artifacts.gc.dto.GcRepositoryPlanSummary;
 import eu.wohlben.qits.artifacts.gc.dto.GcTypePlan;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
 
@@ -386,6 +390,156 @@ class GcPlanTest extends GcFixture {
     assertTrue(collided.error().contains("two strategies claim this type"));
     assertEquals(0, report.sweep().blobCount());
     assertFalse(report.sweep().blobIds().contains(store.layerKept()));
+  }
+
+  @Test
+  void everyRepositoryGetsALineIncludingTheEmptyOnesAndTheOnesNobodyCollects() throws Exception {
+    // The honesty-about-absence rule, one level down. A listing drawn from the planned identities
+    // would silently lose the repositories with nothing to collect — which is most of them, most
+    // of the time — and an absent row reads as "nothing to clean here" rather than as a fact about
+    // whether anybody cleans it at all. So the rows come from artifact_repository.
+    Store store = seed();
+    repositoryService.ensure("empty", RepositoryType.OCI_IMAGES);
+    GcStrategy oci =
+        strategy(
+            RepositoryType.OCI_IMAGES,
+            new GcStrategy.Plan(
+                List.of(new GcIdentity("qits", "alpha:v2", "superseded")),
+                List.of(new GcIdentity("qits", "alpha:v1", "newest build")),
+                Set.of(store.layerDoomed()),
+                Set.of()));
+
+    GcPlanReport report = planner.plan(census.take(), List.of(oci), GcPins.none());
+
+    assertEquals(
+        List.of("empty", "npm", "qits"),
+        report.repositories().stream().map(GcRepositoryPlanSummary::repository).toList());
+
+    GcRepositoryPlanSummary qits = repositorySummary(report, "qits");
+    assertEquals(RepositoryType.OCI_IMAGES, qits.type());
+    assertEquals(1, qits.identitiesCondemned());
+    assertEquals(1, qits.identitiesKept());
+    assertEquals(1, qits.blobsSweepable());
+    assertEquals(LAYER_DOOMED, qits.reclaimableBytes());
+    assertNull(qits.error());
+
+    GcRepositoryPlanSummary empty = repositorySummary(report, "empty");
+    assertEquals(0, empty.identitiesCondemned());
+    assertEquals(0, empty.blobsSweepable());
+    assertNull(empty.error(), "its type planned fine; this repository simply holds nothing");
+
+    GcRepositoryPlanSummary npm = repositorySummary(report, "npm");
+    assertNull(npm.strategy());
+    assertEquals("no strategy registered for npm-packages", npm.note());
+    assertEquals(0, npm.blobsSweepable(), "and its zeros come with the reason beside them");
+  }
+
+  @Test
+  void aBlobTwoRepositoriesBothCondemnDiesInAWholeStoreSweepAndInNeitherScopedOne()
+      throws Exception {
+    // What "bytes only this repository's cleanup frees" costs, stated rather than smoothed over.
+    // Both repositories let go of the same layer, so a whole-store run unlinks it — but each scoped
+    // view still sees the other's row standing, and neither may free it alone. The column
+    // therefore sums to LESS than the global figure, which is the honest answer and not a bug: the
+    // alternative, splitting a shared blob's bytes between them, is a number no run corresponds to.
+    Store store = seed();
+    repositoryService.ensure("qits2", RepositoryType.OCI_IMAGES);
+    GcStrategy oci =
+        strategy(
+            RepositoryType.OCI_IMAGES,
+            new GcStrategy.Plan(
+                List.of(
+                    new GcIdentity("qits", "alpha:v2", "superseded"),
+                    new GcIdentity("qits2", "beta:v1", "superseded")),
+                List.of(),
+                Set.of(store.layerDoomed(), store.manifestDoomed()),
+                Set.of(),
+                Map.of(
+                    "qits", Set.of(store.layerDoomed(), store.manifestDoomed()),
+                    "qits2", Set.of(store.layerDoomed()))));
+
+    LiveBlobCensus.Census taken = census.take();
+    GcPlanReport report = planner.plan(taken, List.of(oci), GcPins.none());
+
+    assertEquals(
+        List.of(store.layerDoomed(), store.manifestDoomed()).stream().sorted().toList(),
+        report.sweep().blobIds(),
+        "a whole-store sweep frees both: nothing that survives names either of them");
+
+    GcRepositoryPlanSummary qits = repositorySummary(report, "qits");
+    assertEquals(1, qits.blobsSweepable(), "only the manifest, which qits2 never named");
+    assertEquals(manifestSize(taken, store.manifestDoomed()), qits.reclaimableBytes());
+
+    GcRepositoryPlanSummary qits2 = repositorySummary(report, "qits2");
+    assertEquals(
+        0,
+        qits2.blobsSweepable(),
+        "the shared layer is retained here, because qits' identity is standing in this view");
+    assertEquals(0L, qits2.reclaimableBytes());
+  }
+
+  @Test
+  void aRepositoryOfARefusedOrExcludedTypeCarriesThatTypesReasonRatherThanASilentZero()
+      throws Exception {
+    // The two reasons a real deployment's rows read zero, on the rows themselves. oci-images
+    // refuses because this suite has no qits-cd; ci-videos is excluded by configuration and its
+    // stub says so. A column of zeros with nothing beside them would make those two look identical
+    // to "clean already", which they are not.
+    seed();
+    repositoryService.ensure("clips", RepositoryType.CI_VIDEOS);
+
+    GcPlanReport report = planner.plan();
+
+    GcRepositoryPlanSummary qits = repositorySummary(report, "qits");
+    assertEquals("OciImageGcStrategy", qits.strategy());
+    assertNotNull(qits.error());
+    assertTrue(qits.error().contains("live pins unavailable"), qits.error());
+    assertEquals(0, qits.blobsSweepable());
+
+    GcRepositoryPlanSummary clips = repositorySummary(report, "clips");
+    assertEquals("CiVideosGcStrategy", clips.strategy());
+    assertNull(clips.error(), "zero rows: the stub plans nothing rather than refusing");
+    assertTrue(clips.note().startsWith(GcRules.EXCLUDED_NOTE), clips.note());
+  }
+
+  @Test
+  void oneRepositorysPlanCarriesEverySectionAReviewNeedsAndRefusesAnUnknownName() throws Exception {
+    // The review artifact for a scoped sweep. It is the whole-store report's shape at one
+    // repository — configuration echo, pins provenance, both blob figures, the row-less pool — and
+    // it has to be, because the operator invoking a scoped sweep reads this and nothing else. Here
+    // it is a refusal, which is the deployed behaviour under a broken pin source: zeros with the
+    // reason attached rather than an empty plan.
+    seed();
+
+    GcRepositoryPlanReport report = planner.planForRepository("qits");
+
+    assertEquals("qits", report.repository());
+    assertEquals(RepositoryType.OCI_IMAGES, report.type());
+    assertTrue(report.dryRun());
+    assertFalse(report.executable(), "no qits-cd and no qits-ci here");
+    assertEquals(2, report.pinFailures().size());
+    assertEquals(2, report.pins().size(), "the provenance of a keep-set is half of what is reviewed");
+    assertEquals(RepositoryType.OCI_IMAGES, report.configuration().type());
+    assertEquals("own", report.configuration().strategy());
+    assertEquals("OciImageGcStrategy", report.strategy());
+    assertTrue(report.error().contains("live pins unavailable"), report.error());
+    assertEquals(List.of(), report.dead());
+    assertEquals(0, report.sweep().blobCount());
+    assertEquals(0, report.structural().blobCount());
+    assertEquals("P7D", report.graceWindow());
+    assertNotNull(report.untouchable().reason());
+
+    assertThrows(
+        eu.wohlben.qits.artifacts.error.NotFoundException.class,
+        () -> planner.planForRepository("no-such-repository"),
+        "a name that is not a repository is a 404, never a wider scope");
+  }
+
+  private static GcRepositoryPlanSummary repositorySummary(GcPlanReport report, String name) {
+    return report.repositories().stream()
+        .filter(summary -> name.equals(summary.repository()))
+        .findFirst()
+        .orElseThrow(() -> new AssertionError("no summary for " + name + " in " + report.repositories()));
   }
 
   private static long manifestSize(LiveBlobCensus.Census census, String digest) {

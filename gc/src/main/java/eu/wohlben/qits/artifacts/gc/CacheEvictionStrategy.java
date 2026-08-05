@@ -5,8 +5,10 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -66,6 +68,7 @@ public final class CacheEvictionStrategy {
     List<GcIdentity> kept = new ArrayList<>();
     Set<String> released = new HashSet<>();
     Set<String> retained = new HashSet<>();
+    Map<String, Set<String>> releasedByRepository = new HashMap<>();
 
     for (GcCandidate candidate : adapter.enumerate()) {
       String pin = pins.pinnedBy(candidate);
@@ -74,6 +77,12 @@ public final class CacheEvictionStrategy {
       } else if (candidate.unaccessedSince(cut)) {
         dead.add(new GcIdentity(candidate.repository(), candidate.identity(), deadUnaccessed(window)));
         released.addAll(candidate.blobs());
+        // Which repository let go of which bytes, recorded while the candidate is in hand: it is
+        // the only moment the answer is known, and a per-repository view derived later could only
+        // guess at it.
+        releasedByRepository
+            .computeIfAbsent(candidate.repository(), repository -> new HashSet<>())
+            .addAll(candidate.blobs());
       } else {
         keep(candidate, keptAccessed(window), kept, retained);
       }
@@ -83,7 +92,7 @@ public final class CacheEvictionStrategy {
     kept.sort(BY_IDENTITY);
     return dead.isEmpty()
         ? GcStrategy.Plan.nothingDies(kept, retained)
-        : new GcStrategy.Plan(dead, kept, released, retained);
+        : new GcStrategy.Plan(dead, kept, released, retained, releasedByRepository);
   }
 
   private static void keep(

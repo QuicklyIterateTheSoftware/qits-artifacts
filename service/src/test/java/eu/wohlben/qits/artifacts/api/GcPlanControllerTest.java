@@ -35,6 +35,23 @@ import org.junit.jupiter.api.Test;
 @QuarkusTest
 class GcPlanControllerTest {
 
+  /**
+   * A repository of this suite's own, because the per-repository routes need a row to be about.
+   *
+   * <p>The service module's suite has no table reset and never self-seeds, so which repositories
+   * exist depends on which other suites ran first. Naming one here — {@code ensure} is idempotent
+   * and additive — is what makes these two cases assertions rather than a reading of suite order.
+   */
+  private static final String REPO = "gc-scope-case";
+
+  @jakarta.inject.Inject
+  eu.wohlben.qits.artifacts.control.ArtifactRepositoryService repositories;
+
+  @org.junit.jupiter.api.BeforeEach
+  void seedRepository() {
+    repositories.ensure(REPO, eu.wohlben.qits.artifacts.entity.RepositoryType.OCI_IMAGES);
+  }
+
   @Test
   void thePlanNamesEveryTypeIncludingTheOnesNobodyCollects() {
     given()
@@ -274,6 +291,64 @@ class GcPlanControllerTest {
         .body("sweep.bytesReclaimed", is(0))
         .body("sweep.unlinkedBlobIds", hasSize(0))
         .body("untouchable.reason", org.hamcrest.Matchers.containsString("not computed"));
+  }
+
+  @Test
+  void theRepositoryListingAnswersEveryRepositoryFromOneRunWithItsReasonBesideItsZeros() {
+    // What the explorer's Cleanup column reads, and the property that makes it drawable at all:
+    // one call, every row. Every figure here is a refusal in this suite — the pin sources are
+    // closed ports — so the envelope has to say so once, run-wide, rather than leaving eight
+    // repositories looking clean.
+    given()
+        .when()
+        .get("/artifacts/api/gc/repositories")
+        .then()
+        .statusCode(200)
+        .body("generatedAt", notNullValue())
+        .body("graceWindow", is("P7D"))
+        .body("executable", is(false))
+        .body("pinFailures", hasSize(2))
+        .body("repositories.size()", greaterThanOrEqualTo(1))
+        .body("repositories.blobsSweepable", everyItem(is(0)))
+        .body("repositories.reclaimableBytes", everyItem(is(0)))
+        .body("repositories.find { it.repository == '" + REPO + "' }.type", is("oci-images"))
+        .body(
+            "repositories.find { it.repository == '" + REPO + "' }.strategy",
+            is("OciImageGcStrategy"))
+        .body(
+            "repositories.find { it.repository == '" + REPO + "' }.error",
+            org.hamcrest.Matchers.containsString("live pins unavailable"));
+  }
+
+  @Test
+  void oneRepositorysPlanIsItsOwnUrlAndAnUnknownNameIsA404() {
+    // Scope is a path segment, and this is the half of that decision a test can show: a name that
+    // is not a repository answers 404. A query parameter that went missing would have answered the
+    // whole store instead, which on the sweep route is the difference between collecting one
+    // repository and collecting the platform.
+    given()
+        .when()
+        .get("/artifacts/api/gc/repositories/no-such-repository/plan")
+        .then()
+        .statusCode(404)
+        .body("message", org.hamcrest.Matchers.containsString("no-such-repository"));
+
+    given()
+        .when()
+        .get("/artifacts/api/gc/repositories/" + REPO + "/plan")
+        .then()
+        .statusCode(200)
+        .body("repository", is(REPO))
+        .body("type", is("oci-images"))
+        .body("dryRun", is(true))
+        .body("executable", is(false))
+        .body("graceWindow", is("P7D"))
+        .body("pins", hasSize(2))
+        .body("configuration.type", notNullValue())
+        .body("dead", hasSize(0))
+        .body("sweep.blobCount", is(0))
+        .body("structural.blobCount", is(0))
+        .body("untouchable.reason", notNullValue());
   }
 
   @Test

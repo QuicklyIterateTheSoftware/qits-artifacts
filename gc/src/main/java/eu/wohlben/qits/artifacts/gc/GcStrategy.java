@@ -3,7 +3,10 @@ package eu.wohlben.qits.artifacts.gc;
 import eu.wohlben.qits.artifacts.control.LiveBlobCensus;
 import eu.wohlben.qits.artifacts.entity.RepositoryType;
 import eu.wohlben.qits.artifacts.gc.dto.GcIdentity;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -160,23 +163,106 @@ public interface GcStrategy {
    * @param blobsReleased every blob the dead identities reference
    * @param blobsRetained every blob this type still references once the dead ones are gone —
    *     the type's live set <em>after</em> the plan, not the delta
+   * @param releasedByRepository the same released blobs, split by the {@code artifact_repository}
+   *     row the dead identity that named them lives in. The union of its values is {@link
+   *     #blobsReleased}; it exists so one repository's share of a type's plan can be read off
+   *     ({@link #scopedTo}) without a second planning pass.
    */
   record Plan(
       List<GcIdentity> dead,
       List<GcIdentity> kept,
       Set<String> blobsReleased,
-      Set<String> blobsRetained) {
+      Set<String> blobsRetained,
+      Map<String, Set<String>> releasedByRepository) {
 
     public Plan {
       dead = List.copyOf(dead);
       kept = List.copyOf(kept);
       blobsReleased = Set.copyOf(blobsReleased);
       blobsRetained = Set.copyOf(blobsRetained);
+      releasedByRepository = copyOfSets(releasedByRepository);
+    }
+
+    /**
+     * A plan stated without per-repository attribution — what a hand-built plan can honestly say.
+     *
+     * <p>An engine knows which candidate released which blob and populates the map exactly. A plan
+     * written out by hand knows only the union, so the attribution is derived rather than invented:
+     * every repository named among {@link #dead} is credited with the <b>whole</b> released set.
+     * For the single-repository case that is exact. For a plan whose dead identities span two
+     * repositories it is deliberately conservative — each scope then retains what the other
+     * released, so a scoped view of such a plan reports nothing sweepable rather than guessing
+     * whose bytes they were.
+     */
+    public Plan(
+        List<GcIdentity> dead,
+        List<GcIdentity> kept,
+        Set<String> blobsReleased,
+        Set<String> blobsRetained) {
+      this(dead, kept, blobsReleased, blobsRetained, attributedWhole(dead, blobsReleased));
     }
 
     /** A strategy with nothing to do — the honest answer for a type whose rules exist but match no row. */
     public static Plan nothingDies(List<GcIdentity> kept, Set<String> live) {
-      return new Plan(List.of(), kept, Set.of(), live);
+      return new Plan(List.of(), kept, Set.of(), live, Map.of());
+    }
+
+    /**
+     * This type's plan as it applies to <b>one</b> repository, and nothing else of the type moves.
+     *
+     * <p><b>Per-repository collection is this filter, never a second planner.</b> Both own-engine
+     * adapters qualify their identity groups with the repository name, so no rule of either engine
+     * can reach across two repositories — which is what makes "plan the whole type, then read one
+     * repository's share off it" produce exactly the plan a repository-only run would have produced.
+     * A second planner would be a second policy, and two policies over one type is the mistake this
+     * whole design refuses.
+     *
+     * <p>The retained set is the part that has to be right: it is this type's own retained set
+     * <b>plus every blob released in some other repository</b>, because those identities are
+     * standing in this view. Subtracting instead — "released, minus the ones this repository
+     * released" — gets the one case wrong that matters: a blob condemned in repository A <em>and</em>
+     * in repository B is still named by B's surviving row when only A is swept, and a scoped plan
+     * that let it through would unlink bytes B still serves.
+     *
+     * <p>The result satisfies the same invariant a whole-type plan does — it states the type's whole
+     * live set after the plan — so {@code BlobSweep.plan}/{@code execute} consume it unchanged.
+     */
+    public Plan scopedTo(String repository) {
+      Set<String> released = releasedByRepository.getOrDefault(repository, Set.of());
+      Set<String> retained = new HashSet<>(blobsRetained);
+      for (Map.Entry<String, Set<String>> entry : releasedByRepository.entrySet()) {
+        if (!entry.getKey().equals(repository)) {
+          retained.addAll(entry.getValue());
+        }
+      }
+      return new Plan(
+          in(dead, repository),
+          in(kept, repository),
+          released,
+          retained,
+          released.isEmpty() ? Map.of() : Map.of(repository, released));
+    }
+
+    private static List<GcIdentity> in(List<GcIdentity> identities, String repository) {
+      return identities.stream().filter(identity -> repository.equals(identity.repository())).toList();
+    }
+
+    private static Map<String, Set<String>> attributedWhole(
+        List<GcIdentity> dead, Set<String> blobsReleased) {
+      if (dead.isEmpty() || blobsReleased.isEmpty()) {
+        return Map.of();
+      }
+      Map<String, Set<String>> attributed = new HashMap<>();
+      for (GcIdentity identity : dead) {
+        attributed.put(identity.repository(), blobsReleased);
+      }
+      return attributed;
+    }
+
+    private static Map<String, Set<String>> copyOfSets(Map<String, Set<String>> byRepository) {
+      Map<String, Set<String>> copy = new HashMap<>();
+      byRepository.forEach((repository, blobs) -> copy.put(repository, Set.copyOf(blobs)));
+      return Map.copyOf(copy);
     }
   }
 }

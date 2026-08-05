@@ -327,6 +327,25 @@ collection" section is the contract; these are the rules that get "helpfully" re
   second computation of "what is live" is a set the UI reports and a set a sweep protects, drifting
   until a sweep deletes something the page called referenced. `ArtifactExplorerService.storeSummary`
   delegates to it; the explorer's own tests are the byte-exactness proof.
+- **Per repository is a FILTER over the one plan, never a second planner.** `GET /gc/repositories`
+  and `GET /gc/repositories/{repo}/plan` exist, and neither applies a rule of its own: a
+  repository's figures are `GcStrategy.Plan.scopedTo(name)` — its share of its type's plan —
+  reconciled against the same census. That is sound because **no rule of either engine reaches
+  across two repositories**: both own-engine adapters qualify their identity group with the
+  repository name (`OciImagesGcAdapter.group()` is `repository + "/" + image`), and the cache engine
+  is per candidate. A second planner would be a second policy over one type, which is the mistake
+  the whole design refuses. The one subtraction that must never happen is spelled in `scopedTo`'s
+  javadoc and pinned by `GcScopedPlanTest`: a blob condemned in repositories A **and** B stays
+  **retained** in each scoped plan, because the other one's row is standing in that view. So
+  `blobsRetained` is widened, never `blobsReleased` narrowed — and the scoped plan still states the
+  type's whole post-plan live set, which is what lets `BlobSweep` consume it unchanged.
+- **The per-repository figures do not add up, and that is the honest answer.** Σ(per-repo) ≤ the
+  global sweep figure: a blob two repositories both condemn dies in a whole-store run and in
+  neither scoped one. Proportional attribution was rejected — a fraction of a blob frees nothing,
+  and it would be the first number in this feature matching no operation anyone can run. Both
+  figures ship per repository: `structural` (no grace — what the rule condemns) and grace-applied
+  (what a run now would unlink, plus what the window withholds). The listing column shows the
+  structural one, matching `GcTypePlan`'s per-type semantics.
 - **Row-less blobs are untouchable, structurally.** A blob becomes a candidate only by *losing* its
   last identity row to a strategy's own deletion, so one that never had a row cannot be reached. This
   is not an allowlist and must not become one: 124 MiB of this store has no row, and one of those

@@ -1,8 +1,13 @@
 package eu.wohlben.qits.artifacts.gc;
 
+import eu.wohlben.qits.artifacts.control.ArtifactRepositoryService;
 import eu.wohlben.qits.artifacts.control.LiveBlobCensus;
+import eu.wohlben.qits.artifacts.entity.ArtifactRepository;
 import eu.wohlben.qits.artifacts.entity.RepositoryType;
 import eu.wohlben.qits.artifacts.gc.dto.GcPlanReport;
+import eu.wohlben.qits.artifacts.gc.dto.GcRepositoriesPlanResponse;
+import eu.wohlben.qits.artifacts.gc.dto.GcRepositoryPlanReport;
+import eu.wohlben.qits.artifacts.gc.dto.GcRepositoryPlanSummary;
 import eu.wohlben.qits.artifacts.gc.dto.GcSweepPlan;
 import eu.wohlben.qits.artifacts.gc.dto.GcTypeConfiguration;
 import eu.wohlben.qits.artifacts.gc.dto.GcTypePlan;
@@ -13,6 +18,7 @@ import jakarta.inject.Inject;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
@@ -40,6 +46,14 @@ import java.util.Map;
  * "nothing died" reads identically whether the rule is right or the window is a year. For the two
  * cache types the echo now reads as the rule that actually ran: {@link CacheEvictionStrategy}
  * writes the sentence and the same class produced the plan beside it.
+ *
+ * <p><b>Per repository is a reading of the same run, never a second planner.</b> The type loop is
+ * the only place a rule is ever applied; a repository's figures are its share of its type's plan
+ * ({@link GcStrategy.Plan#scopedTo}) reconciled against the same census. So the listing, the
+ * whole-store report and a single repository's detail report cannot disagree — there is one plan
+ * underneath all three. The rows come from {@code artifact_repository} rather than from the planned
+ * identities, because a repository with nothing to collect must still appear: derived from
+ * identities, an empty repository would silently vanish from the list.
  */
 @ApplicationScoped
 public class GcPlanner {
@@ -49,6 +63,7 @@ public class GcPlanner {
   @Inject Instance<GcStrategy> strategies;
   @Inject GcTypeConfig config;
   @Inject GcPinSources pinSources;
+  @Inject ArtifactRepositoryService repositories;
 
   /**
    * A fresh census, every live pin, every registered strategy, and the reconciliation over all of
@@ -62,6 +77,66 @@ public class GcPlanner {
     return plan(census.take(), registered(), pinSources.fetch());
   }
 
+  /**
+   * The per-repository figures alone, from one run of the same plan.
+   *
+   * <p>What a listing reads. It costs exactly what {@link #plan()} costs — one census, one pin
+   * fetch — and answers every repository, which is the whole point: a plan per row would be N
+   * censuses and 2N cross-service calls to draw one column.
+   */
+  public GcRepositoriesPlanResponse planForRepositories() {
+    GcPlanReport report = plan();
+    return new GcRepositoriesPlanResponse(
+        report.generatedAt(),
+        report.executable(),
+        report.pinFailures(),
+        report.graceWindow(),
+        report.repositories());
+  }
+
+  /**
+   * One repository's plan in full — the review artifact a scoped sweep is authorised from.
+   *
+   * <p>Only the strategy claiming that repository's type is asked to plan, and its answer is then
+   * scoped. Every other type contributes its whole census live set to the reconciliation exactly as
+   * it does in a full report, which is what makes the figures here identical to this repository's
+   * row in {@link #planForRepositories()} rather than merely similar.
+   *
+   * @throws eu.wohlben.qits.artifacts.error.NotFoundException no repository of that name
+   */
+  public GcRepositoryPlanReport planForRepository(String name) {
+    ArtifactRepository row = repositories.require(name);
+    GcPins pins = pinSources.fetch();
+    LiveBlobCensus.Census taken = census.take();
+    RepositoryType type = row.type;
+    Outcome outcome = outcomeOf(type, claiming(registered(), type), taken, pins);
+
+    GcStrategy.Plan scoped = outcome.plan() == null ? null : outcome.plan().scopedTo(name);
+    GcSweepPlan structural =
+        scoped == null ? nothing() : sweep.planForOneType(taken, type, scoped, false);
+    GcSweepPlan matured =
+        scoped == null ? nothing() : sweep.planForOneType(taken, type, scoped, true);
+
+    return new GcRepositoryPlanReport(
+        name,
+        type,
+        taken.takenAt(),
+        true,
+        iso(sweep.graceWindow()),
+        pins.complete(),
+        pins.failures(),
+        pins.sources(),
+        GcRules.line(config, type),
+        outcome.strategy(),
+        outcome.note(),
+        outcome.error(),
+        scoped == null ? List.of() : scoped.dead(),
+        scoped == null ? List.of() : scoped.kept(),
+        matured,
+        structural,
+        sweep.untouchable(taken));
+  }
+
   /** What CDI found. Empty is the shipped state and a supported one. */
   List<GcStrategy> registered() {
     return strategies.stream().toList();
@@ -69,57 +144,33 @@ public class GcPlanner {
 
   GcPlanReport plan(
       LiveBlobCensus.Census census, Collection<GcStrategy> strategies, GcPins pins) {
-    Map<RepositoryType, List<GcStrategy>> claimants = new EnumMap<>(RepositoryType.class);
-    for (GcStrategy strategy : strategies) {
-      claimants.computeIfAbsent(strategy.type(), type -> new ArrayList<>()).add(strategy);
-    }
-
     Map<RepositoryType, GcStrategy.Plan> plans = new EnumMap<>(RepositoryType.class);
+    Map<RepositoryType, Outcome> outcomes = new EnumMap<>(RepositoryType.class);
     List<GcTypePlan> types = new ArrayList<>();
     for (RepositoryType type : RepositoryType.values()) {
-      List<GcStrategy> claiming = claimants.getOrDefault(type, List.of());
-      if (claiming.isEmpty()) {
-        types.add(unclaimed(type));
-        continue;
-      }
-      if (claiming.size() > 1) {
-        types.add(
-            failed(
-                type,
-                names(claiming),
-                "two strategies claim this type; a type has exactly one policy, and merging them"
-                    + " is never the answer"));
-        continue;
-      }
-      GcStrategy strategy = claiming.get(0);
-      String name = nameOf(strategy);
-      if (strategy.readsPins() && !pins.complete()) {
-        // Not asked to plan at all: its keep-set is partly qits-cd's or qits-ci's answer, and
-        // planning it against "nothing is pinned" is the one mistake that condemns everything.
-        types.add(failed(type, name, "live pins unavailable — " + pins.whyIncomplete()));
-        continue;
-      }
-      try {
-        GcStrategy.Plan plan = strategy.plan(census, pins);
-        plans.put(type, plan);
-        GcSweepPlan attributed = sweep.planForOneType(census, type, plan);
+      Outcome outcome = outcomeOf(type, claiming(strategies, type), census, pins);
+      outcomes.put(type, outcome);
+      GcStrategy.Plan plan = outcome.plan();
+      if (plan == null) {
         types.add(
             new GcTypePlan(
-                type,
-                name,
-                GcRules.note(config, type, strategy.note()),
-                null,
-                plan.dead(),
-                plan.kept(),
-                plan.blobsReleased().size(),
-                attributed.blobCount(),
-                attributed.reclaimableBytes()));
-      } catch (RuntimeException aborted) {
-        // Fail-closed: no entry in `plans`, so the sweep keeps this type's whole census set. A
-        // strategy whose keep-set comes from elsewhere (the OCI rule reads qits-cd's live pins)
-        // must land here rather than plan on facts it could not fetch.
-        types.add(failed(type, name, message(aborted)));
+                type, outcome.strategy(), outcome.note(), outcome.error(),
+                List.of(), List.of(), 0, 0, 0L));
+        continue;
       }
+      plans.put(type, plan);
+      GcSweepPlan attributed = sweep.planForOneType(census, type, plan);
+      types.add(
+          new GcTypePlan(
+              type,
+              outcome.strategy(),
+              outcome.note(),
+              null,
+              plan.dead(),
+              plan.kept(),
+              plan.blobsReleased().size(),
+              attributed.blobCount(),
+              attributed.reclaimableBytes()));
     }
 
     // The configuration echo, beside the outcomes rather than instead of them: what each type is
@@ -143,25 +194,115 @@ public class GcPlanner {
         pins.sources(),
         configuration,
         types,
+        perRepository(census, outcomes),
         sweepPlan,
         sweep.untouchable(census));
   }
 
-  private static GcTypePlan unclaimed(RepositoryType type) {
-    return new GcTypePlan(
-        type,
-        null,
-        "no strategy registered for " + type.wireName(),
-        null,
-        List.of(),
-        List.of(),
-        0,
-        0,
-        0L);
+  /**
+   * The same run, attributed per {@code artifact_repository} row.
+   *
+   * <p>In-memory over sets the type loop already computed: no second census, no second pin fetch,
+   * and no rule applied twice. The two reconciliations per planned repository are the honest pair —
+   * what the rule frees, and what a run now would actually unlink.
+   */
+  private List<GcRepositoryPlanSummary> perRepository(
+      LiveBlobCensus.Census census, Map<RepositoryType, Outcome> outcomes) {
+    List<ArtifactRepository> rows = new ArrayList<>(repositories.list());
+    rows.sort(Comparator.comparing(row -> row.name));
+    List<GcRepositoryPlanSummary> summaries = new ArrayList<>();
+    for (ArtifactRepository row : rows) {
+      Outcome outcome = outcomes.get(row.type);
+      GcStrategy.Plan plan = outcome == null ? null : outcome.plan();
+      if (plan == null) {
+        summaries.add(
+            new GcRepositoryPlanSummary(
+                row.name,
+                row.type,
+                outcome == null ? null : outcome.strategy(),
+                outcome == null ? null : outcome.note(),
+                outcome == null ? null : outcome.error(),
+                0,
+                0,
+                0,
+                0L,
+                0,
+                0L));
+        continue;
+      }
+      GcStrategy.Plan scoped = plan.scopedTo(row.name);
+      GcSweepPlan structural = sweep.planForOneType(census, row.type, scoped, false);
+      GcSweepPlan matured = sweep.planForOneType(census, row.type, scoped, true);
+      summaries.add(
+          new GcRepositoryPlanSummary(
+              row.name,
+              row.type,
+              outcome.strategy(),
+              outcome.note(),
+              null,
+              scoped.dead().size(),
+              scoped.kept().size(),
+              structural.blobCount(),
+              structural.reclaimableBytes(),
+              matured.withheldByGraceWindow(),
+              matured.withheldBytes()));
+    }
+    return List.copyOf(summaries);
   }
 
-  private static GcTypePlan failed(RepositoryType type, String strategy, String error) {
-    return new GcTypePlan(type, strategy, null, error, List.of(), List.of(), 0, 0, 0L);
+  /**
+   * One type's answer: the plan, or the honest reason there is none.
+   *
+   * <p>Factored out rather than duplicated, because the whole-store report and a single
+   * repository's report have to agree about what happened to a type — an unclaimed type, a
+   * collision, a pin refusal and a strategy that threw are four different sentences, and two copies
+   * of them would eventually be two different sentences.
+   */
+  private Outcome outcomeOf(
+      RepositoryType type,
+      List<GcStrategy> claiming,
+      LiveBlobCensus.Census census,
+      GcPins pins) {
+    if (claiming.isEmpty()) {
+      return new Outcome(null, "no strategy registered for " + type.wireName(), null, null);
+    }
+    if (claiming.size() > 1) {
+      return new Outcome(
+          names(claiming),
+          null,
+          "two strategies claim this type; a type has exactly one policy, and merging them is never"
+              + " the answer",
+          null);
+    }
+    GcStrategy strategy = claiming.get(0);
+    String name = nameOf(strategy);
+    if (strategy.readsPins() && !pins.complete()) {
+      // Not asked to plan at all: its keep-set is partly qits-cd's or qits-ci's answer, and
+      // planning it against "nothing is pinned" is the one mistake that condemns everything.
+      return new Outcome(name, null, "live pins unavailable — " + pins.whyIncomplete(), null);
+    }
+    try {
+      GcStrategy.Plan plan = strategy.plan(census, pins);
+      return new Outcome(name, GcRules.note(config, type, strategy.note()), null, plan);
+    } catch (RuntimeException aborted) {
+      // Fail-closed: no plan, so the sweep keeps this type's whole census set. A strategy whose
+      // keep-set comes from elsewhere (the OCI rule reads qits-cd's live pins) must land here
+      // rather than plan on facts it could not fetch.
+      return new Outcome(name, null, message(aborted), null);
+    }
+  }
+
+  /** A type's outcome: how it is reported, and its plan when it has one. */
+  private record Outcome(String strategy, String note, String error, GcStrategy.Plan plan) {}
+
+  private static List<GcStrategy> claiming(
+      Collection<GcStrategy> strategies, RepositoryType type) {
+    return strategies.stream().filter(strategy -> strategy.type() == type).toList();
+  }
+
+  /** The empty attribution for a repository whose type produced no plan at all. */
+  private static GcSweepPlan nothing() {
+    return new GcSweepPlan(0, 0L, 0, 0L, List.of());
   }
 
   private static String names(List<GcStrategy> claiming) {

@@ -70,7 +70,8 @@ final class GcRules {
     return List.copyOf(lines);
   }
 
-  private static GcTypeConfiguration line(GcTypeConfig config, RepositoryType type) {
+  /** One type's line of that echo — what a report about a single repository carries. */
+  static GcTypeConfiguration line(GcTypeConfig config, RepositoryType type) {
     GcPolicy policy;
     try {
       policy = config.of(type).strategy();

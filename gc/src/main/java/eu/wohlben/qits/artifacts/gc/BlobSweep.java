@@ -63,9 +63,30 @@ public class BlobSweep {
    */
   public GcSweepPlan planForOneType(
       LiveBlobCensus.Census census, RepositoryType type, GcStrategy.Plan plan) {
+    return planForOneType(census, type, plan, false);
+  }
+
+  /**
+   * The same attribution, with the window as a choice rather than a constant.
+   *
+   * <p>Both answers are wanted where a plan is shown per repository, and they answer different
+   * questions: {@code false} is what the rule structurally frees — the figure a repository pushed
+   * this morning must not read as zero for — and {@code true} is what a run <em>now</em> would
+   * unlink, with the rest counted as withheld rather than dropped. Reporting only the first would
+   * promise disk the next run cannot deliver; only the second would hide a rule that works.
+   *
+   * <p>The plan handed in may be a whole type's or one repository's share of it ({@link
+   * GcStrategy.Plan#scopedTo}) — the reconciliation cannot tell, because a scoped plan states the
+   * type's whole post-plan live set exactly as an unscoped one does.
+   */
+  public GcSweepPlan planForOneType(
+      LiveBlobCensus.Census census,
+      RepositoryType type,
+      GcStrategy.Plan plan,
+      boolean applyGraceWindow) {
     Map<RepositoryType, GcStrategy.Plan> only = new EnumMap<>(RepositoryType.class);
     only.put(type, plan);
-    return reconcile(census, only, false);
+    return reconcile(census, only, applyGraceWindow);
   }
 
   private GcSweepPlan reconcile(
