@@ -4,13 +4,17 @@ import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import eu.wohlben.qits.artifacts.persistence.MavenArtifactRepository;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
 import java.net.URI;
 import java.net.URL;
 import java.net.http.HttpResponse;
+import java.time.Instant;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -32,6 +36,8 @@ import org.junit.jupiter.api.Test;
 class MavenRegistryTest {
 
   private static final AtomicInteger UNIQUE = new AtomicInteger();
+
+  @Inject MavenArtifactRepository artifacts;
 
   @TestHTTPResource("/")
   URL root;
@@ -311,6 +317,48 @@ class MavenRegistryTest {
       assertEquals(404, traversed.statusCode(), traversed.body());
       assertTrue(
           traversed.body().contains("not a route this maven repository serves"), traversed.body());
+    }
+  }
+
+  @Test
+  void aFileReadTouchesItsRowWhileTheDerivedDocumentsTouchNothing() {
+    // The maven half of the GC's access basis. The second half of the name is the load-bearing one:
+    // maven-metadata.xml and every checksum are computed per request from rows, so treating them as
+    // accesses would keep a jar alive on the strength of a resolver listing versions.
+    String artifact = "access-" + UNIQUE.incrementAndGet();
+    String base = "eu/wohlben/qits/" + artifact + "/1.0.0/" + artifact + "-1.0.0";
+    byte[] jar = TinyArtifact.jar("access " + artifact);
+
+    try (MavenClient maven = client()) {
+      assertEquals(201, maven.put("maven", base + ".jar", jar).statusCode());
+      artifacts.getEntityManager().clear();
+      assertNull(
+          artifacts.findOne("maven", base + ".jar").orElseThrow().accessedAt,
+          "a deploy is not an access");
+
+      // The derived paths first, so a stray touch on either shows up before the real read can hide
+      // it: the version listing, then the jar's derived sha1.
+      assertEquals(
+          200, maven.getText("maven", "eu/wohlben/qits/" + artifact + "/maven-metadata.xml")
+              .statusCode());
+      assertEquals(200, maven.getText("maven", base + ".jar.sha1").statusCode());
+      artifacts.getEntityManager().clear();
+      assertNull(
+          artifacts.findOne("maven", base + ".jar").orElseThrow().accessedAt,
+          "derived documents and derived checksums are not this row's bytes");
+
+      assertEquals(200, maven.get("maven", base + ".jar").statusCode());
+      artifacts.getEntityManager().clear();
+      Instant first = artifacts.findOne("maven", base + ".jar").orElseThrow().accessedAt;
+      assertTrue(first != null, "a file GET must record the access");
+
+      assertEquals(200, maven.get("maven", base + ".jar").statusCode());
+      assertEquals(200, maven.head("maven", base + ".jar").statusCode());
+      artifacts.getEntityManager().clear();
+      assertEquals(
+          first,
+          artifacts.findOne("maven", base + ".jar").orElseThrow().accessedAt,
+          "writes are coalesced to one per row per hour");
     }
   }
 

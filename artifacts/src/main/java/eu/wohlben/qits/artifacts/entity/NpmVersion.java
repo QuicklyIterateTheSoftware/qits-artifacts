@@ -56,4 +56,14 @@ public class NpmVersion extends PanacheEntityBase {
 
   @Column(name = "created_at", nullable = false)
   public Instant createdAt;
+
+  /**
+   * When a tarball GET last served this version, coalesced to once an hour; null means never read
+   * since tracking began (V11). One column for both npm types — a proxied version is an ordinary row
+   * here, so the pull that created it and every pull after it move the same timestamp. The proxy's
+   * {@code npm_proxy_packument.fetched_at} is a different fact and stays what it is: that is when
+   * the <em>document</em> was last revalidated upstream, not when these bytes were wanted.
+   */
+  @Column(name = "accessed_at")
+  public Instant accessedAt;
 }

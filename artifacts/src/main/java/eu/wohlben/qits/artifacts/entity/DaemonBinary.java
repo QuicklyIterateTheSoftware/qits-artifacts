@@ -58,4 +58,17 @@ public class DaemonBinary extends PanacheEntityBase {
   /** Server-stamped. A publisher does not get to say when its release happened. */
   @Column(name = "published_at", nullable = false)
   public Instant publishedAt;
+
+  /**
+   * When the version-addressed GET last served this binary, coalesced to once an hour; null means
+   * never read since tracking began (V11).
+   *
+   * <p>Only the version-addressed spelling moves it. The digest-addressed {@code /v2} blob route is
+   * the other download and it stays unattributed for the reason layers are: it resolves an OCI
+   * repository and a globally deduplicated digest, so the request carries no daemon identity, and a
+   * blob-id lookup across repositories would be exactly the cross-repository attribution the whole
+   * scheme refuses.
+   */
+  @Column(name = "accessed_at")
+  public Instant accessedAt;
 }

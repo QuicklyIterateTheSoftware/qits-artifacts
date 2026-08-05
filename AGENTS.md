@@ -244,7 +244,10 @@ keyed `(repository, name, version)` with its `size_bytes` beside the blob id too
 protocol tables the census sizes without a disk read. `daemon_binary` deliberately holds **no
 prefill**: adopting the ELF blobs already on a deployment's volume is an ops action, because the
 lineage must not embed live-platform digests and a migration cannot verify one against the running
-store. **A plan reserves no migration number**: three workstreams were
+store. Access tracking owns two: V9 put a nullable `accessed_at` on `artifact_record`,
+`oci_manifest` and `oci_tag`, and V11 put the same column on `npm_version`, `maven_artifact` and
+`daemon_binary` — **neither backfills**, because null has to keep meaning "never read" for a sweep
+to tell it apart from "read long ago". **A plan reserves no migration number**: three workstreams were
 widening this lineage at once, and the rule they share is "take the next free V at land time, and re-enumerate
 `ck_artifact_repository_type` from the `RepositoryType` enum as it stands in the tree"
 (proxy-pulling-normal-images.md §4). `OciMirrorMigrationTest` pins that by looping over
@@ -387,8 +390,8 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 
 ## Tests
 
-- `mvn verify` runs 452 tests (190 in `artifacts/`, 18 in `git-storage/`, 244 in `service/`) in about
-  a minute. Nothing here
+- `mvn verify` runs 493 tests (194 in `artifacts/`, 18 in `git-storage/`, 281 in `service/`) in about
+  two minutes. Nothing here
   needs docker — and that is the constraint that shapes the registry suite: `docker`, `podman` and
   `skopeo` may not be assumed present, so `registry/OciClient` + `registry/TinyImage` synthesise a
   real image in memory and drive a full push/pull over the JDK `HttpClient`. It uses that rather than

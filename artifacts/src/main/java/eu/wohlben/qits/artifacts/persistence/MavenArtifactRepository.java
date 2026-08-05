@@ -4,6 +4,7 @@ import eu.wohlben.qits.artifacts.entity.MavenArtifact;
 import eu.wohlben.qits.artifacts.entity.MavenArtifactId;
 import io.quarkus.hibernate.orm.panache.PanacheRepositoryBase;
 import jakarta.enterprise.context.ApplicationScoped;
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 
@@ -23,6 +24,17 @@ public class MavenArtifactRepository implements PanacheRepositoryBase<MavenArtif
             String.class)
         .setParameter("repository", repository)
         .getResultList();
+  }
+
+  /**
+   * Moves {@code accessed_at} onto one deployed path, but only if the stored value is older than
+   * {@code cutoff} — the coalescing, expressed as a predicate rather than as a read-then-write.
+   */
+  public long touch(String repository, String path, Instant cutoff, Instant now) {
+    return update(
+        "accessedAt = ?1 where repository = ?2 and path = ?3"
+            + " and (accessedAt is null or accessedAt <= ?4)",
+        now, repository, path, cutoff);
   }
 
   /** The deployed files of one repository — the maven meaning of the explorer's one count. */

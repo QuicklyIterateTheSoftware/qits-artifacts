@@ -3,15 +3,19 @@ package eu.wohlben.qits.npm;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import eu.wohlben.qits.artifacts.persistence.NpmVersionRepository;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
+import jakarta.inject.Inject;
 import java.net.URI;
 import java.net.URL;
 import java.net.http.HttpResponse;
+import java.time.Instant;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.BeforeEach;
@@ -33,6 +37,8 @@ import org.junit.jupiter.api.Test;
 class NpmRegistryTest {
 
   private static final AtomicInteger UNIQUE = new AtomicInteger();
+
+  @Inject NpmVersionRepository versions;
 
   @TestHTTPResource("/")
   URL root;
@@ -438,6 +444,39 @@ class NpmRegistryTest {
           npm.packumentJson("npm", encoded(subject.name())).path("versions").path("1.0.0");
       assertEquals("MIT", manifest.path("license").asText(), "an abbreviated packument omits this");
       assertEquals("a synthetic package for " + subject.name(), manifest.path("description").asText());
+    }
+  }
+
+  // --- access tracking --------------------------------------------------------------------------
+
+  @Test
+  void aTarballReadTouchesItsVersionRowAndTheNextReadInsideTheHourWritesNothing() {
+    // The npm half of the GC's access basis, asserted on the row rather than on a response: nothing
+    // a client can see says whether the write happened, so a route that quietly stopped touching
+    // would pass every other case in this file.
+    TinyPackage subject = TinyPackage.of(scopedName(), "1.0.0");
+
+    try (NpmClient npm = client()) {
+      npm.publish("npm", encoded(subject.name()), subject.publishDocument("latest"));
+      String url = NpmClient.tarballUrl(npm.packumentJson("npm", encoded(subject.name())), "1.0.0");
+
+      versions.getEntityManager().clear();
+      assertNull(
+          versions.findOne("npm", subject.name(), "1.0.0").orElseThrow().accessedAt,
+          "a publish is not an access, and neither is reading the packument");
+
+      assertEquals(200, npm.tarball(url).statusCode());
+      versions.getEntityManager().clear();
+      Instant first = versions.findOne("npm", subject.name(), "1.0.0").orElseThrow().accessedAt;
+      assertTrue(first != null, "a tarball GET must record the access");
+
+      assertEquals(200, npm.tarball(url).statusCode());
+      assertEquals(200, npm.head(url).statusCode());
+      versions.getEntityManager().clear();
+      assertEquals(
+          first,
+          versions.findOne("npm", subject.name(), "1.0.0").orElseThrow().accessedAt,
+          "writes are coalesced to one per row per hour");
     }
   }
 

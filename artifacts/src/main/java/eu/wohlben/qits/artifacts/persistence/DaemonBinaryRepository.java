@@ -4,6 +4,7 @@ import eu.wohlben.qits.artifacts.entity.DaemonBinary;
 import eu.wohlben.qits.artifacts.entity.DaemonBinaryId;
 import io.quarkus.hibernate.orm.panache.PanacheRepositoryBase;
 import jakarta.enterprise.context.ApplicationScoped;
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 
@@ -19,6 +20,18 @@ public class DaemonBinaryRepository
   /** Every version of one daemon, newest first — the listing a release surface reads. */
   public List<DaemonBinary> listVersions(String repository, String name) {
     return list("repository = ?1 and name = ?2 order by publishedAt desc", repository, name);
+  }
+
+  /**
+   * Moves {@code accessed_at} onto one published version, but only if the stored value is older than
+   * {@code cutoff} — the coalescing, expressed as a predicate rather than as a read-then-write.
+   */
+  public long touch(
+      String repository, String name, String version, Instant cutoff, Instant now) {
+    return update(
+        "accessedAt = ?1 where repository = ?2 and name = ?3 and version = ?4"
+            + " and (accessedAt is null or accessedAt <= ?5)",
+        now, repository, name, version, cutoff);
   }
 
   /** The published binaries of one repository — the daemon meaning of the explorer's one count. */

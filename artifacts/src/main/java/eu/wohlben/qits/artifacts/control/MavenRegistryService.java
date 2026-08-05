@@ -11,6 +11,7 @@ import jakarta.enterprise.context.control.ActivateRequestContext;
 import jakarta.inject.Inject;
 import jakarta.transaction.Transactional;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Optional;
 
@@ -32,6 +33,7 @@ public class MavenRegistryService {
 
   @Inject ArtifactRepositoryRepository repositories;
   @Inject MavenArtifactRepository artifacts;
+  @Inject ArtifactAccessTracker accessTracker;
 
   /** A stored file, flattened for the serve path. */
   public record StoredArtifact(String path, String blobId, long sizeBytes) {}
@@ -69,6 +71,23 @@ public class MavenRegistryService {
     return artifacts
         .findOne(repository, path)
         .map(row -> new StoredArtifact(row.path, row.blobId, row.sizeBytes));
+  }
+
+  /**
+   * Records that a GET served this deployed file — the maven half of the access basis both settled
+   * GC strategies read (artifacts-gc-plan.md, "Settlement").
+   *
+   * <p>Called from the stored-file serve only. The derived {@code maven-metadata.xml} and the
+   * derived checksums are computed per request and are not this row's bytes, and a resolver never
+   * fetches a checksum without the file it belongs to — so touching on those would record an access
+   * the client did not make.
+   *
+   * <p>Coalesced to one write per row per hour inside {@link ArtifactAccessTracker}.
+   */
+  @ActivateRequestContext
+  public void touchArtifact(String repository, String path) {
+    accessTracker.touchMavenArtifact(
+        repository, path, Instant.now().truncatedTo(ChronoUnit.MICROS));
   }
 
   /**

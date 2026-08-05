@@ -12,8 +12,15 @@ import java.util.List;
  *     outlive its bytes and the honest answer is "unknown", not zero.
  * @param publishedAt when this row was written. For a proxied version that is when the tarball was
  *     first pulled through, not when upstream published it.
+ * @param accessedAt when a tarball GET last served this version, coarsened to once an hour. Null is
+ *     an explicit state — never read since tracking began (V11) — and not "unknown", the same
+ *     meaning the field carries on {@code ImageTagSummary} and {@code ArtifactRecordDto}.
  * @param distTags every dist-tag naming this version, lexically. Empty for a proxied version, which
  *     has none.
  */
 public record PackageVersionSummary(
-    String version, Long tarballSizeBytes, Instant publishedAt, List<String> distTags) {}
+    String version,
+    Long tarballSizeBytes,
+    Instant publishedAt,
+    Instant accessedAt,
+    List<String> distTags) {}

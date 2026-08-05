@@ -11,6 +11,7 @@ import jakarta.enterprise.context.control.ActivateRequestContext;
 import jakarta.inject.Inject;
 import jakarta.transaction.Transactional;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Optional;
 
@@ -36,6 +37,7 @@ public class DaemonRegistryService {
 
   @Inject ArtifactRepositoryRepository repositories;
   @Inject DaemonBinaryRepository binaries;
+  @Inject ArtifactAccessTracker accessTracker;
 
   /** A published binary, flattened for the serve path. */
   public record StoredBinary(
@@ -67,6 +69,25 @@ public class DaemonRegistryService {
   @ActivateRequestContext
   public Optional<StoredBinary> find(String repository, String name, String version) {
     return binaries.findOne(repository, name, version).map(DaemonRegistryService::flatten);
+  }
+
+  /**
+   * Records that the version-addressed GET served this binary — the daemon half of the access basis
+   * both settled GC strategies read (artifacts-gc-plan.md, "Settlement").
+   *
+   * <p>The digest-addressed {@code /v2} blob route has no twin of this and must not grow one: it
+   * resolves an OCI repository and a globally deduplicated digest, so the request carries no daemon
+   * identity, and looking a {@code daemon_binary} row up by blob id from there would attribute a
+   * read in one repository to a row in another — the exact cross-repository attribution the access
+   * scheme refuses for layers. The pin ladder is what keeps a digest-fetched daemon alive
+   * (artifacts-gc-plan.md, "Settlement": live pins are never deleted regardless of access age).
+   *
+   * <p>Coalesced to one write per row per hour inside {@link ArtifactAccessTracker}.
+   */
+  @ActivateRequestContext
+  public void touchBinary(String repository, String name, String version) {
+    accessTracker.touchDaemonBinary(
+        repository, name, version, Instant.now().truncatedTo(ChronoUnit.MICROS));
   }
 
   @ActivateRequestContext

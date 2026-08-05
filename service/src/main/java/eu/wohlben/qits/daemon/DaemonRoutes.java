@@ -157,6 +157,11 @@ public class DaemonRoutes {
           404, "the bytes of " + name + " " + version + " are not stored");
     }
 
+    // Locate first, then touch — a row whose bytes are gone is a 404, not an access. HEAD counts,
+    // the stance the OCI manifest route already takes. Only this spelling records anything: the
+    // digest-addressed /v2 blob route carries no daemon identity, so it stays unattributed.
+    registry.touchBinary(ArtifactsRepositorySeeder.DAEMONS, name, version);
+
     HttpServerResponse response =
         rc.response()
             .putHeader(HttpHeaders.CONTENT_TYPE, "application/octet-stream")

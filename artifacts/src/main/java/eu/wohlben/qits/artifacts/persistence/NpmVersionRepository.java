@@ -5,6 +5,7 @@ import eu.wohlben.qits.artifacts.entity.NpmVersionId;
 import io.quarkus.hibernate.orm.panache.PanacheRepositoryBase;
 import io.quarkus.panache.common.Sort;
 import jakarta.enterprise.context.ApplicationScoped;
+import java.time.Instant;
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
@@ -66,22 +67,38 @@ public class NpmVersionRepository implements PanacheRepositoryBase<NpmVersion, N
   }
 
   /**
-   * {@code (version, tarballBlobId, createdAt)} for one package.
+   * {@code (version, tarballBlobId, createdAt, accessedAt)} for one package.
    *
    * <p>A projection rather than the entities, and that is the point: {@code manifest_json} is a
-   * {@code @Lob}, so listing rows to read three short columns would drag every version's whole
+   * {@code @Lob}, so listing rows to read four short columns would drag every version's whole
    * manifest through the JVM.
    */
   public List<Object[]> listVersionRows(String repository, String packageName) {
     return getEntityManager()
         .createQuery(
-            "select v.version, v.tarballBlobId, v.createdAt from NpmVersion v"
+            "select v.version, v.tarballBlobId, v.createdAt, v.accessedAt from NpmVersion v"
                 + " where v.repository = :repository and v.packageName = :packageName"
                 + " order by v.version",
             Object[].class)
         .setParameter("repository", repository)
         .setParameter("packageName", packageName)
         .getResultList();
+  }
+
+  /**
+   * Moves {@code accessed_at} onto one version, but only if the stored value is older than {@code
+   * cutoff} — the coalescing, expressed as a predicate rather than as a read-then-write.
+   *
+   * <p>A bulk update for {@link NpmVersionRepository}'s own reason as much as for the write budget:
+   * {@code manifest_json} is a {@code @Lob}, so loading the row to move eight bytes would drag a
+   * whole version manifest through the JVM on the hottest read path npm has.
+   */
+  public long touch(
+      String repository, String packageName, String version, Instant cutoff, Instant now) {
+    return update(
+        "accessedAt = ?1 where repository = ?2 and packageName = ?3 and version = ?4"
+            + " and (accessedAt is null or accessedAt <= ?5)",
+        now, repository, packageName, version, cutoff);
   }
 
   /** The distinct tarball blobs a set of repositories references — the npm half of a size union. */

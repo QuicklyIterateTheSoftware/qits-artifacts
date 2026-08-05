@@ -808,7 +808,7 @@ GET /artifacts/api/mirror-upstreams                                the registrie
 | `tags` | `{"tags":[{"tag","digest","sizeBytes","createdAt","accessedAt"}]}` |
 | `manifests` | `{"manifests":[{"digest","mediaType","sizeBytes","createdAt","accessedAt","tags"}]}` |
 | `packages` | `{"packages":[{"name","versionCount","latest"}]}` |
-| `versions` | `{"versions":[{"version","tarballSizeBytes","publishedAt","distTags"}]}` |
+| `versions` | `{"versions":[{"version","tarballSizeBytes","publishedAt","accessedAt","distTags"}]}` |
 | `store/summary` | `{"ociPerImageSumBytes","ociUnionBytes","ociMirrorBytes","orphanBytes","npmPublishedBytes","npmProxyTarballBytes","npmProxyPackumentBytes","mavenPublishedBytes","mavenProxyBytes","daemonBinaryBytes","diskTotalBytes"}` |
 | `mirror-upstreams` | `{"upstreams":[{"domain","slug","createdAt","cachedImages"}]}` |
 
@@ -824,6 +824,16 @@ Details a client trips over if it does not know them:
   manifest pull touches its tag and resolved manifest; a digest pull touches the manifest only.
   Layer blobs remain untracked because a globally deduplicated blob cannot be attributed to one
   manifest or tag from its request.
+- The three protocol tables track the same way (V11), on the same hour, so the settled GC can reason
+  about every type it is configured for. An npm tarball `GET`/`HEAD` touches its `npm_version` row —
+  one rule for both npm types, since a proxied version is an ordinary row there, and the proxy
+  packument's `fetchedAt` stays a different fact (document revalidation, not byte demand). A maven
+  `GET`/`HEAD` of a stored file touches its `maven_artifact` row; derived `maven-metadata.xml` and
+  derived checksums touch nothing, because they are not that row's bytes. A daemon `GET`/`HEAD`
+  touches its `daemon_binary` row. **The digest-addressed daemon download on `/v2` is deliberately
+  unattributed**, exactly as layers are: it resolves an OCI repository and a globally deduplicated
+  digest, so the request names no daemon — what keeps a digest-fetched daemon alive is the live pin,
+  never an access timestamp.
 
 - **`itemCount` means something different per type**, on purpose: images for `oci-images`, packages
   for either npm type, deployed files for `maven-packages`, published versions for

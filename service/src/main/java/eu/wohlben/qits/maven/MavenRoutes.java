@@ -295,6 +295,11 @@ public class MavenRoutes {
       throw new MavenException(404, "the bytes of " + path + " are not stored");
     }
 
+    // Locate first, then touch — a row whose bytes are gone is a 404, not an access. HEAD counts,
+    // the stance the OCI manifest route already takes. The derived documents and checksums do not:
+    // they are not this row's bytes, and a resolver never fetches a checksum without its file.
+    registry.touchArtifact(repository, path);
+
     HttpServerResponse response =
         rc.response()
             .putHeader(HttpHeaders.CONTENT_TYPE, "application/octet-stream")

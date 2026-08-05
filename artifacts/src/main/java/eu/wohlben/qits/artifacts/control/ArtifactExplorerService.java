@@ -202,6 +202,7 @@ public class ArtifactExplorerService {
               version,
               onDisk.get((String) row[1]),
               (Instant) row[2],
+              (Instant) row[3],
               tagsByVersion.getOrDefault(version, List.of())));
     }
     return summaries;

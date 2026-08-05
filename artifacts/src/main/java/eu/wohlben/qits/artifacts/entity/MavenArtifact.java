@@ -48,4 +48,13 @@ public class MavenArtifact extends PanacheEntityBase {
 
   @Column(name = "created_at", nullable = false)
   public Instant createdAt;
+
+  /**
+   * When a GET last served this file, coalesced to once an hour; null means never read since
+   * tracking began (V11). The derived documents move nothing: {@code maven-metadata.xml} and every
+   * checksum are computed per request and are not this row's bytes, so an access is a read of the
+   * stored file itself.
+   */
+  @Column(name = "accessed_at")
+  public Instant accessedAt;
 }

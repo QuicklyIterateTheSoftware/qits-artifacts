@@ -17,6 +17,7 @@ import jakarta.enterprise.context.control.ActivateRequestContext;
 import jakarta.inject.Inject;
 import jakarta.transaction.Transactional;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -53,6 +54,7 @@ public class NpmRegistryService {
   @Inject NpmDistTagRepository distTags;
   @Inject NpmProxyPackumentRepository packuments;
   @Inject NpmVersionTombstoneRepository tombstones;
+  @Inject ArtifactAccessTracker accessTracker;
 
   /** A stored version, flattened for packument assembly and for serving its tarball. */
   public record StoredVersion(
@@ -92,6 +94,20 @@ public class NpmRegistryService {
   @ActivateRequestContext
   public Optional<StoredVersion> findVersion(String repository, String packageName, String version) {
     return versions.findOne(repository, packageName, version).map(NpmRegistryService::flatten);
+  }
+
+  /**
+   * Records that a tarball GET served this version — the npm half of the access basis both settled
+   * GC strategies read (artifacts-gc-plan.md, "Settlement").
+   *
+   * <p>Called for both repository types, because {@code npm_version} is one table for both and the
+   * tarball route is one code path. Coalesced to one write per row per hour inside {@link
+   * ArtifactAccessTracker}, so the hottest read npm has costs an indexed no-op update.
+   */
+  @ActivateRequestContext
+  public void touchVersion(String repository, String packageName, String version) {
+    accessTracker.touchNpmVersion(
+        repository, packageName, version, Instant.now().truncatedTo(ChronoUnit.MICROS));
   }
 
   /** Every version of one package — the whole read side of packument assembly. */

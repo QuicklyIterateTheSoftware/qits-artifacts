@@ -6,14 +6,18 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import eu.wohlben.qits.artifacts.persistence.NpmProxyPackumentRepository;
+import eu.wohlben.qits.artifacts.persistence.NpmVersionRepository;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.http.ContentType;
+import jakarta.inject.Inject;
 import java.net.URI;
 import java.net.URL;
 import java.net.http.HttpResponse;
+import java.time.Instant;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.BeforeEach;
@@ -47,6 +51,9 @@ class NpmProxyTest {
       return Map.of("qits.artifacts.npm.proxy.upstream", StubNpmRegistry.INSTANCE.baseUrl());
     }
   }
+
+  @Inject NpmVersionRepository versions;
+  @Inject NpmProxyPackumentRepository packuments;
 
   @TestHTTPResource("/")
   URL root;
@@ -195,6 +202,36 @@ class NpmProxyTest {
       JsonNode packument = npm.packumentJson("npmjs", subject.name());
       assertArrayEquals(
           subject.tarball(), npm.tarball(NpmClient.tarballUrl(packument, "0.4.2")).body());
+    }
+  }
+
+  @Test
+  void aProxiedTarballPullTouchesTheVersionRowItWritesAndLeavesThePackumentsFetchedAtAlone() {
+    // The proxy's version rows ARE npm_version rows, so this is the same column the hosted registry
+    // moves — and the packument's fetched_at is a different fact: it says when the DOCUMENT was last
+    // revalidated upstream, which a cache strategy must not read as "these bytes are wanted".
+    TinyPackage subject = upstreamPackage("1.3.0");
+
+    try (NpmClient npm = client()) {
+      String url = NpmClient.tarballUrl(npm.packumentJson("npmjs", subject.name()), "1.3.0");
+      Instant packumentFetchedAt =
+          packuments.findOne("npmjs", subject.name()).orElseThrow().fetchedAt;
+
+      assertEquals(200, npm.tarball(url).statusCode());
+      versions.getEntityManager().clear();
+      Instant first = versions.findOne("npmjs", subject.name(), "1.3.0").orElseThrow().accessedAt;
+      assertTrue(first != null, "the pull that writes the row is also its first access");
+
+      assertEquals(200, npm.tarball(url).statusCode());
+      versions.getEntityManager().clear();
+      assertEquals(
+          first,
+          versions.findOne("npmjs", subject.name(), "1.3.0").orElseThrow().accessedAt,
+          "writes are coalesced to one per row per hour, cached pull included");
+      assertEquals(
+          packumentFetchedAt,
+          packuments.findOne("npmjs", subject.name()).orElseThrow().fetchedAt,
+          "a tarball read revalidates no document");
     }
   }
 

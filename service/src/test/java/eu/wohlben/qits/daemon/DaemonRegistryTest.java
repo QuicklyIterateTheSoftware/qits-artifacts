@@ -3,14 +3,18 @@ package eu.wohlben.qits.daemon;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import eu.wohlben.qits.artifacts.persistence.DaemonBinaryRepository;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.vertx.core.json.JsonObject;
+import jakarta.inject.Inject;
 import java.net.URI;
 import java.net.URL;
 import java.net.http.HttpResponse;
+import java.time.Instant;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -31,6 +35,8 @@ import org.junit.jupiter.api.Test;
 class DaemonRegistryTest {
 
   private static final AtomicInteger UNIQUE = new AtomicInteger();
+
+  @Inject DaemonBinaryRepository binaries;
 
   @TestHTTPResource("/")
   URL root;
@@ -186,6 +192,58 @@ class DaemonRegistryTest {
         .get("/v2/qits/ci-daemon/blobs/sha256:" + digest)
         .then()
         .statusCode(200);
+  }
+
+  @Test
+  void theVersionAddressedReadTouchesTheRowAndTheDigestAddressedOneDeliberatelyDoesNot() {
+    // The daemon half of the GC's access basis, and the one asymmetry in it. The /v2 blob route
+    // resolves an OCI repository and a globally deduplicated digest, so the request names no daemon
+    // — attributing it to a daemon_binary row would be the cross-repository attribution that layer
+    // reads are refused for. A digest-fetched daemon is kept alive by its live pin, not by this
+    // column.
+    String version = version();
+    byte[] binary = TinyDaemon.binary(version, 1024);
+    String digest = TinyDaemon.sha256(binary);
+
+    given()
+        .contentType("application/json")
+        .body("{\"type\":\"oci-images\"}")
+        .when()
+        .put("/artifacts/api/repositories/qits")
+        .then()
+        .statusCode(200);
+
+    try (DaemonClient daemons = client()) {
+      assertEquals(201, daemons.put("qits-ci-daemon", version, binary).statusCode());
+      binaries.getEntityManager().clear();
+      assertNull(
+          binaries.findOne("daemons", "qits-ci-daemon", version).orElseThrow().accessedAt,
+          "a publish is not an access");
+
+      given()
+          .urlEncodingEnabled(false)
+          .when()
+          .get("/v2/qits/ci-daemon/blobs/sha256:" + digest)
+          .then()
+          .statusCode(200);
+      binaries.getEntityManager().clear();
+      assertNull(
+          binaries.findOne("daemons", "qits-ci-daemon", version).orElseThrow().accessedAt,
+          "the digest-addressed download carries no daemon identity and must record nothing");
+
+      assertEquals(200, daemons.get("qits-ci-daemon", version).statusCode());
+      binaries.getEntityManager().clear();
+      Instant first = binaries.findOne("daemons", "qits-ci-daemon", version).orElseThrow().accessedAt;
+      assertTrue(first != null, "the version-addressed GET must record the access");
+
+      assertEquals(200, daemons.get("qits-ci-daemon", version).statusCode());
+      assertEquals(200, daemons.head("qits-ci-daemon", version).statusCode());
+      binaries.getEntityManager().clear();
+      assertEquals(
+          first,
+          binaries.findOne("daemons", "qits-ci-daemon", version).orElseThrow().accessedAt,
+          "writes are coalesced to one per row per hour");
+    }
   }
 
   private static String version() {

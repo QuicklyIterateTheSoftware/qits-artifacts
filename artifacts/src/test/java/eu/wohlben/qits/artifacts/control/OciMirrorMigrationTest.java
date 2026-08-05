@@ -225,6 +225,34 @@ class OciMirrorMigrationTest {
   }
 
   @Test
+  void theThreeProtocolTablesCarryANullableAccessedAtWithNoBackfill() throws SQLException {
+    // V11's whole shape, from empty. The insert names no accessed_at, so a NOT NULL column or a
+    // default would fail here — and null is the state the sweep has to be able to read as "never
+    // accessed", which a backfill of created_at/published_at would have destroyed silently.
+    insertRepository("npm", "NPM_PACKAGES");
+    insertRepository("maven", "MAVEN_PACKAGES");
+    insertRepository("daemons", "DAEMON_BINARIES");
+    try (Connection connection = dataSource.getConnection();
+        Statement statement = connection.createStatement()) {
+      statement.executeUpdate(
+          "insert into npm_version (repository, package_name, version, tarball_blob_id,"
+              + " manifest_json, created_at) values ('npm', '@qits/ui', '1.0.0', '"
+              + "a".repeat(64) + "', '{}', current_timestamp)");
+      statement.executeUpdate(
+          "insert into maven_artifact (repository, path, blob_id, size_bytes, created_at) values"
+              + " ('maven', 'eu/wohlben/qits/lib/1.0.0/lib-1.0.0.jar', '" + "b".repeat(64)
+              + "', 1, current_timestamp)");
+      statement.executeUpdate(
+          "insert into daemon_binary (repository, name, version, blob_id, size_bytes, published_at)"
+              + " values ('daemons', 'qits-ci-daemon', '2026.801.120000', '" + "c".repeat(64)
+              + "', 1, current_timestamp)");
+    }
+    assertEquals(1, count("select count(*) from npm_version where accessed_at is null"));
+    assertEquals(1, count("select count(*) from maven_artifact where accessed_at is null"));
+    assertEquals(1, count("select count(*) from daemon_binary where accessed_at is null"));
+  }
+
+  @Test
   void theLineageEmbedsNoLivePlatformDigest() throws SQLException {
     // §5 step 2's rule, as an assertion: adopting the three ELF blobs already on the volume is an
     // OPS action, never a migration. A migration cannot verify a digest against the running store,

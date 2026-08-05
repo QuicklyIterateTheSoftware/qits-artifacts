@@ -227,6 +227,12 @@ public class NpmRoutes {
       throw new NpmException(404, "the tarball of " + pkg.full() + "@" + version + " is not stored");
     }
 
+    // Locate first, then touch — a row whose bytes are gone is a 404, not an access. One call for
+    // both types, because a proxied version is an ordinary npm_version row: the pull that created it
+    // counts as its first access, and the packument's fetched_at is left alone. HEAD counts too,
+    // which is the stance the OCI manifest route already takes.
+    registry.touchVersion(repository, pkg.full(), version);
+
     HttpServerResponse response =
         rc.response()
             .putHeader(HttpHeaders.CONTENT_TYPE, "application/octet-stream")
