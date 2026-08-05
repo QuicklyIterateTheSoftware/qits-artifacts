@@ -352,10 +352,48 @@ class GcPlanControllerTest {
   }
 
   @Test
+  void aScopedSweepRefusesTheWholeRunTooWhileThePinSourcesCannotAnswer() {
+    // The abort rule does not shrink with the scope. One repository is not a smaller blast radius
+    // at the blob layer — bytes it releases can be the last local reference to content a pin names
+    // by digest — so a run with an unreadable qits-cd stops before the census here exactly as it
+    // does on the whole-store route, and says which source failed.
+    given()
+        .when()
+        .post("/artifacts/api/gc/repositories/" + REPO + "/sweep")
+        .then()
+        .statusCode(200)
+        .body("repository", is(REPO))
+        .body("type", is("oci-images"))
+        .body("dryRun", is(false))
+        .body("executedAt", notNullValue())
+        .body("aborted", org.hamcrest.Matchers.containsString("qits-cd"))
+        .body("aborted", org.hamcrest.Matchers.containsString("qits-ci"))
+        .body("pins", hasSize(2))
+        .body("deleted", hasSize(0))
+        .body("withheldByGraceWindow", hasSize(0))
+        .body("sweep.blobsUnlinked", is(0))
+        .body("sweep.unlinkedBlobIds", hasSize(0))
+        .body("untouchable.reason", org.hamcrest.Matchers.containsString("not computed"));
+  }
+
+  @Test
   void readingAndExecutingStayTwoDifferentUrls() {
     // A POST to the plan path must not quietly find some other resource, and a GET must never
-    // sweep: the reviewed-report-then-invoke order is carried by the verbs.
+    // sweep: the reviewed-report-then-invoke order is carried by the verbs. The scoped pair carries
+    // it the same way, and adds the one a path segment buys: a name that is not a repository can
+    // never widen into the whole store.
     given().when().post("/artifacts/api/gc/plan").then().statusCode(405);
     given().when().get("/artifacts/api/gc/sweep").then().statusCode(405);
+    given()
+        .when()
+        .post("/artifacts/api/gc/repositories/" + REPO + "/plan")
+        .then()
+        .statusCode(405);
+    given().when().get("/artifacts/api/gc/repositories/" + REPO + "/sweep").then().statusCode(405);
+    given()
+        .when()
+        .post("/artifacts/api/gc/repositories/no-such-repository/sweep")
+        .then()
+        .statusCode(404);
   }
 }

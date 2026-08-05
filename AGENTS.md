@@ -339,6 +339,19 @@ collection" section is the contract; these are the rules that get "helpfully" re
   **retained** in each scoped plan, because the other one's row is standing in that view. So
   `blobsRetained` is widened, never `blobsReleased` narrowed — and the scoped plan still states the
   type's whole post-plan live set, which is what lets `BlobSweep` consume it unchanged.
+- **A scoped sweep narrows what is planned, never what is protected.**
+  `POST /gc/repositories/{repo}/sweep` deletes that repository's identity rows through the same
+  per-type funnels — the adapters needed no change, because every `GcIdentity` carries its
+  repository and their delete loops already dispatch on it — and then runs the *same* whole-store
+  blob reconciliation with only that plan applied. Three belts, none of which knows what a
+  repository is. Two rules that look like candidates for a per-repository relaxation and are not:
+  the **whole-run abort** on an unreadable pin source holds identically at repository scope (one
+  repository is not a smaller blast radius at the blob layer — its released bytes can be the last
+  local reference to content a pin names by digest), and a repository whose type nobody collects
+  answers a **receipt with its reason and zeros**, not an error status. The one ordering
+  difference from the whole-store run is deliberate: the *name* is resolved before the pins are
+  read, because a repository that does not exist is a fact about the request and an aborted receipt
+  for it would claim a run was attempted.
 - **The per-repository figures do not add up, and that is the honest answer.** Σ(per-repo) ≤ the
   global sweep figure: a blob two repositories both condemn dies in a whole-store run and in
   neither scoped one. Proportional attribution was rejected — a fraction of a blob frees nothing,
@@ -560,7 +573,7 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 
 ## Tests
 
-- `mvn verify` runs 526 tests (115 in `artifacts/`, 18 in `git-storage/`, 110 in `gc/`, 283 in
+- `mvn verify` runs 545 tests (115 in `artifacts/`, 18 in `git-storage/`, 125 in `gc/`, 287 in
   `service/`) in about two minutes — counted from the surefire reports, which the previous figure
   here was not. Nothing here
   needs docker — and that is the constraint that shapes the registry suite: `docker`, `podman` and

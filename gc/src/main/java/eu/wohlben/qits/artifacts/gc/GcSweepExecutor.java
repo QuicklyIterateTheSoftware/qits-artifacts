@@ -1,8 +1,11 @@
 package eu.wohlben.qits.artifacts.gc;
 
+import eu.wohlben.qits.artifacts.control.ArtifactRepositoryService;
 import eu.wohlben.qits.artifacts.control.BlobReclaim;
 import eu.wohlben.qits.artifacts.control.LiveBlobCensus;
+import eu.wohlben.qits.artifacts.entity.ArtifactRepository;
 import eu.wohlben.qits.artifacts.entity.RepositoryType;
+import eu.wohlben.qits.artifacts.gc.dto.GcRepositorySweepReport;
 import eu.wohlben.qits.artifacts.gc.dto.GcSweepOutcome;
 import eu.wohlben.qits.artifacts.gc.dto.GcSweepReport;
 import eu.wohlben.qits.artifacts.gc.dto.GcTypeSweepResult;
@@ -51,6 +54,7 @@ public class GcSweepExecutor {
   @Inject Instance<GcStrategy> strategies;
   @Inject GcPinSources pinSources;
   @Inject GcTypeConfig config;
+  @Inject ArtifactRepositoryService repositories;
 
   /**
    * One full run: every live pin, a fresh census, every registered strategy, the unlink loop, the
@@ -69,6 +73,41 @@ public class GcSweepExecutor {
       return aborted(pins);
     }
     return execute(census.take(), strategies.stream().toList(), pins);
+  }
+
+  /**
+   * One repository's run: the same choreography, over the identities of one {@code
+   * artifact_repository} row and nothing else.
+   *
+   * <p><b>The plan applied here is the same plan, filtered.</b> The claiming strategy is asked for
+   * its whole type's plan and the answer is scoped ({@link GcStrategy.Plan#scopedTo}) before
+   * anything is applied — never a second planner, because a second planner over one type is a
+   * second policy. The adapters need no change: every {@code GcIdentity} carries its repository and
+   * their delete loops already dispatch on it, so the funnels — the npm tombstone, the OCI
+   * collect, the proxy evictions — run exactly as they do in a whole-store run.
+   *
+   * <p><b>The whole-run abort translates unchanged, and it has to.</b> A pin source that cannot
+   * answer ends this run before the census with nothing deleted, even though only one repository
+   * was in scope: blobs dedupe globally, so a blob this repository releases can be the last local
+   * reference to bytes a pin names by digest. "Only one repository" is not a smaller blast radius
+   * at the blob layer, and treating it as one would be the documented way to delete something a
+   * live service still fetches.
+   *
+   * <p><b>The name is resolved before the pins are read</b>, which is the one order difference from
+   * the whole-store run and is deliberate: a repository that does not exist is a fact about the
+   * request, not about the run, and answering an aborted receipt for it would claim a run was
+   * attempted against something that is not there. Resolving a name takes no census and touches no
+   * row, so the "pins first, before anything is deleted" rule is untouched.
+   *
+   * @throws eu.wohlben.qits.artifacts.error.NotFoundException no repository of that name
+   */
+  public GcRepositorySweepReport sweep(String name) {
+    ArtifactRepository row = repositories.require(name);
+    GcPins pins = pinSources.fetch();
+    if (!pins.complete()) {
+      return aborted(row, pins);
+    }
+    return execute(row, census.take(), strategies.stream().toList(), pins);
   }
 
   /**
@@ -100,16 +139,161 @@ public class GcSweepExecutor {
             List.of()));
   }
 
+  /**
+   * The scoped twin of {@link #aborted(GcPins)}: nothing read, nothing deleted, the reason carried.
+   *
+   * <p>No census either, for the same reason — the run is over before anything could have moved, so
+   * the row-less pool is reported as uncomputed rather than as an empty list, which would be a
+   * claim about a store this run never read.
+   */
+  private GcRepositorySweepReport aborted(ArtifactRepository row, GcPins pins) {
+    String why = "the run was aborted before anything was deleted: " + pins.whyIncomplete();
+    Log.warnf("gc sweep of %s aborted: %s", row.name, pins.whyIncomplete());
+    return new GcRepositorySweepReport(
+        row.name,
+        row.type,
+        Instant.now(),
+        false,
+        GcPlanner.iso(sweep.graceWindow()),
+        why,
+        pins.sources(),
+        null,
+        null,
+        why,
+        List.of(),
+        List.of(),
+        new GcSweepOutcome(0, 0L, 0, 0L, 0, 0, List.of()),
+        new GcUntouchablePool(
+            "not computed: this run aborted before taking a census, and deleted nothing",
+            0,
+            0L,
+            List.of()));
+  }
+
+  GcRepositorySweepReport execute(
+      ArtifactRepository row,
+      LiveBlobCensus.Census taken,
+      Collection<GcStrategy> registered,
+      GcPins pins) {
+    Instant executedAt = Instant.now();
+    Duration window = sweep.graceWindow();
+    GcStrategy.GraceWindow grace = graceSince(executedAt.minus(window));
+    RepositoryType type = row.type;
+
+    List<GcStrategy> claiming =
+        registered.stream().filter(strategy -> strategy.type() == type).toList();
+    if (claiming.isEmpty()) {
+      // Not an error status: a repository nobody collects gets a receipt saying so and zeros, the
+      // same posture the whole-store surface holds. The UI never offers the button for such a row.
+      return nothingRan(
+          row,
+          taken,
+          executedAt,
+          window,
+          pins,
+          null,
+          "no strategy registered for " + type.wireName(),
+          null);
+    }
+    if (claiming.size() > 1) {
+      return nothingRan(
+          row,
+          taken,
+          executedAt,
+          window,
+          pins,
+          names(claiming),
+          null,
+          "two strategies claim this type; a type has exactly one policy, and merging them is never"
+              + " the answer");
+    }
+
+    GcStrategy strategy = claiming.get(0);
+    String name = GcPlanner.nameOf(strategy);
+    GcStrategy.Plan scoped;
+    try {
+      scoped = strategy.plan(taken, pins).scopedTo(row.name);
+    } catch (RuntimeException refused) {
+      // Fail-closed, exactly as the whole-store run: no plan, so no row of this repository moves
+      // and the blob loop is never reached.
+      Log.infof("gc sweep of %s: refused — %s", row.name, message(refused));
+      return nothingRan(row, taken, executedAt, window, pins, name, null, message(refused));
+    }
+
+    GcStrategy.Applied applied = strategy.apply(scoped, grace);
+    Log.infof(
+        "gc sweep %s (%s): deleted %d identities, withheld %d by grace, %d errors",
+        row.name,
+        type.wireName(),
+        applied.deleted().size(),
+        applied.withheldByGraceWindow().size(),
+        applied.errors().size());
+    // The blob loop runs over the whole store with only this repository's plan applied. Every other
+    // type contributes its census live set, and every other repository of THIS type is inside the
+    // scoped plan's retained set — so a shared blob is protected by the reconciliation before the
+    // re-census and the store's own guard ever have to catch it.
+    GcSweepOutcome outcome = sweep.execute(taken, Map.of(type, scoped));
+    Log.infof(
+        "gc sweep %s blobs: unlinked %d (%d bytes), withheld %d by grace (%d bytes), %d still"
+            + " referenced, %d already gone",
+        row.name,
+        outcome.blobsUnlinked(),
+        outcome.bytesReclaimed(),
+        outcome.withheldByGraceWindow(),
+        outcome.withheldBytes(),
+        outcome.stillReferenced(),
+        outcome.alreadyGone());
+
+    return new GcRepositorySweepReport(
+        row.name,
+        type,
+        executedAt,
+        false,
+        GcPlanner.iso(window),
+        null,
+        pins.sources(),
+        name,
+        GcRules.note(config, type, strategy.note()),
+        applied.errors().isEmpty() ? null : String.join("; ", applied.errors()),
+        applied.deleted(),
+        applied.withheldByGraceWindow(),
+        outcome,
+        sweep.untouchable(taken));
+  }
+
+  /** A run that read the store, planned nothing, and therefore deleted nothing. */
+  private GcRepositorySweepReport nothingRan(
+      ArtifactRepository row,
+      LiveBlobCensus.Census taken,
+      Instant executedAt,
+      Duration window,
+      GcPins pins,
+      String strategy,
+      String note,
+      String error) {
+    return new GcRepositorySweepReport(
+        row.name,
+        row.type,
+        executedAt,
+        false,
+        GcPlanner.iso(window),
+        null,
+        pins.sources(),
+        strategy,
+        note,
+        error,
+        List.of(),
+        List.of(),
+        new GcSweepOutcome(0, 0L, 0, 0L, 0, 0, List.of()),
+        // A census WAS taken here, so the pool is a real reading rather than "not computed".
+        sweep.untouchable(taken));
+  }
+
   GcSweepReport execute(
       LiveBlobCensus.Census taken, Collection<GcStrategy> registered, GcPins pins) {
     Instant executedAt = Instant.now();
     Duration window = sweep.graceWindow();
-    Instant graceStartsAt = executedAt.minus(window);
-    GcStrategy.GraceWindow grace =
-        blobId -> {
-          Instant written = blobs.lastWrittenAt(blobId);
-          return written != null && written.isAfter(graceStartsAt);
-        };
+    GcStrategy.GraceWindow grace = graceSince(executedAt.minus(window));
 
     Map<RepositoryType, List<GcStrategy>> claimants = new EnumMap<>(RepositoryType.class);
     for (GcStrategy strategy : registered) {
@@ -197,6 +381,20 @@ public class GcSweepExecutor {
         // within-grace tarball row-less in a fresh census, and listing that as "untouchable" would
         // misname a blob the next run is going to sweep.
         sweep.untouchable(taken));
+  }
+
+  /**
+   * Whether a blob's file was written after the given instant — the run's one clock, read once.
+   *
+   * <p>Shared by both runs on purpose: a whole-store sweep and a scoped one must judge an
+   * identity's youth by the same comparison, or the same content would be withheld by one and taken
+   * by the other on the same afternoon.
+   */
+  private GcStrategy.GraceWindow graceSince(Instant graceStartsAt) {
+    return blobId -> {
+      Instant written = blobs.lastWrittenAt(blobId);
+      return written != null && written.isAfter(graceStartsAt);
+    };
   }
 
   private static String names(List<GcStrategy> claiming) {

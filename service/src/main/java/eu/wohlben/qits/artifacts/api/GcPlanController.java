@@ -5,6 +5,7 @@ import eu.wohlben.qits.artifacts.gc.GcSweepExecutor;
 import eu.wohlben.qits.artifacts.gc.dto.GcPlanReport;
 import eu.wohlben.qits.artifacts.gc.dto.GcRepositoriesPlanResponse;
 import eu.wohlben.qits.artifacts.gc.dto.GcRepositoryPlanReport;
+import eu.wohlben.qits.artifacts.gc.dto.GcRepositorySweepReport;
 import eu.wohlben.qits.artifacts.gc.dto.GcSweepReport;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
@@ -25,13 +26,15 @@ import org.eclipse.microprofile.openapi.annotations.Operation;
  * deleted over an in-grace blob would strand the blob as row-less and untouchable). It landed after
  * the user reviewed the dry-run, and nothing executes without the {@code POST}.
  *
- * <p><b>The same pair exists per repository</b>, under {@code /gc/repositories}: the listing's
- * figures, and one repository's plan in full. Scope is a <b>path segment</b> rather than a query
- * parameter, and that is a decision about the destructive half of the surface: a dropped or
- * mistyped {@code ?repository=} would silently widen a scoped call into a whole-store one, while a
- * mistyped segment is a 404 and can never widen into anything. Nothing about the rules changes with
- * scope — a repository's plan is its share of its type's one plan, reconciled against the same
- * census, never a second policy.
+ * <p><b>The same order exists per repository</b>, under {@code /gc/repositories}: the listing's
+ * figures, one repository's plan in full, and the scoped sweep behind them. Scope is a <b>path
+ * segment</b> rather than a query parameter, and that is a decision about the destructive half of
+ * the surface: a dropped or mistyped {@code ?repository=} would silently widen a scoped call into a
+ * whole-store one, while a mistyped segment is a 404 and can never widen into anything. Nothing
+ * about the rules changes with scope — a repository's plan is its share of its type's one plan,
+ * reconciled against the same census, never a second policy — and nothing about the safety changes
+ * either: the abort on an unreadable pin is still whole-run, and the blob unlinks are still
+ * reconciled over the whole store, so a blob another repository names is never a candidate.
  *
  * <p><b>The guard, honestly.</b> The sweep is a write, and {@code gc} sits in {@code
  * ArtifactsTokenFilter}'s guarded prefix set, so the {@code POST} inherits the {@code
@@ -112,5 +115,31 @@ public class GcPlanController {
   @Operation(hidden = true)
   public GcSweepReport sweep() {
     return executor.sweep();
+  }
+
+  /**
+   * Executes one sweep of <b>one repository</b>: a fresh plan of its type, scoped to it, its
+   * identity deletions, the blob unlinks, and the receipt.
+   *
+   * <p>The plan it applies is computed inside this request and scoped inside it too — there is no
+   * way to submit one, at this scope any more than at the other. That rule is not a formality here:
+   * a stored plan is a plan on stale facts, and a per-repository invocation is exactly the shape
+   * someone would be tempted to hand a reviewed plan back to.
+   *
+   * <p>A {@code POST} and nothing else, so a crawler or a probing {@code GET} can never delete a
+   * byte, and the scope is a path segment so a request that loses it is a 404 rather than a
+   * whole-store sweep. 404 for a repository that does not exist; a repository whose type nobody
+   * collects is <b>not</b> an error — it answers a receipt with its reason and zeros.
+   *
+   * <p><b>Scope does not narrow the abort rule.</b> A pin source that cannot answer ends this run
+   * before the census with nothing deleted, exactly as it ends a whole-store run, because blobs
+   * dedupe globally and one repository's released bytes can be the last local reference to content
+   * a pin names by digest.
+   */
+  @POST
+  @Path("/repositories/{repository}/sweep")
+  @Operation(hidden = true)
+  public GcRepositorySweepReport repositorySweep(@PathParam("repository") String repository) {
+    return executor.sweep(repository);
   }
 }
