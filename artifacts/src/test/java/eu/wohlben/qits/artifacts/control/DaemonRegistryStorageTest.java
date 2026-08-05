@@ -27,7 +27,7 @@ import org.junit.jupiter.api.Test;
  * the same split every other type here uses.
  */
 @QuarkusTest
-class DaemonRegistryStorageTest extends GcFixture {
+class DaemonRegistryStorageTest extends SeededStoreFixture {
 
   private static final String DAEMONS = ArtifactsRepositorySeeder.DAEMONS;
   private static final String CI_DAEMON = "qits-ci-daemon";

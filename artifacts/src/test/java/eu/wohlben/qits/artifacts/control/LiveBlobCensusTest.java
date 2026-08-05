@@ -26,7 +26,7 @@ import org.junit.jupiter.api.Test;
  * garbage.
  */
 @QuarkusTest
-class LiveBlobCensusTest extends GcFixture {
+class LiveBlobCensusTest extends SeededStoreFixture {
 
   @Inject ArtifactExplorerService explorer;
 

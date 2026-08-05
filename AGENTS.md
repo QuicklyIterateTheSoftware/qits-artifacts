@@ -49,7 +49,7 @@ Everything that had to be declared, and the symptom each one produces if it is d
 | `dto/UploadResult` | `@RegisterForReflection` | every upload 500s: the type is behind a `Response` return, so nothing registers it |
 | `CiPostReceiveNotifier` | the `HttpClient` is an instance field, not static | build fails: an `HttpClientFacade` in the image heap |
 | `npm/NpmUpstream` | the `HttpClient` is an instance field, not static | same as above — an `HttpClientFacade` frozen into the image heap |
-| `artifacts/control/CdHttpDeploymentPins` | the `HttpClient` is an instance field, not static | same as above; this is the third outbound client and the rule has not changed |
+| `gc/CdHttpDeploymentPins` | the `HttpClient` is an instance field, not static | same as above; this is the third outbound client and the rule has not changed. It moved with the class when GC became its own module — the rule travels with the client, not with the package |
 | `registry/MirrorUpstream` | the `HttpClient` is an instance field, not static — and so is `MirrorBearerTokens`' `ObjectMapper`, which is reachable from one | same as above; the fourth outbound client, and the rule still has not changed |
 | artifacts' `microprofile-config.properties` | H2 url with no `AUTO_SERVER` | the binary dies at boot on `ClassNotFoundException: org.h2.server.TcpServer` |
 | `registry/MirrorUpstream`'s config | `endpoint-override` injected as `Optional<String>`, not `String` | the binary dies at boot on `Failed to load config value of type java.lang.String` — SmallRye reads a **configured-empty** value as absent, and that key ships blank. `defaultValue = ""` does not help. Invisible to `mvn verify`, where every test sets a real value |
@@ -144,6 +144,22 @@ Two top-level packages, deliberately kept apart:
 - `eu.wohlben.qits.artifacts.*` — the blob store. `artifacts/` holds `entity`, `persistence`, `dto`,
   `mapper`, `control`, `error`; `service/` holds only `api`. Entities are Panache active-record with
   public fields; mappers are MapStruct `@Mapper(componentModel = "jakarta")`.
+  - `eu.wohlben.qits.artifacts.gc` and `.gc.dto` (module `gc`) are **garbage collection** — a
+    process modelled from within qits-artifacts rather than artifacts domain
+    (`artifacts-gc-plan.md`, settlement). A subpackage rather than a sibling top-level name, and
+    deliberately **not** `artifacts.control` in a second jar: adapters sharing a package with the
+    code they extend is the split package Quarkus' `SplitPackageProcessor` warns about on every
+    build, the same trap `githost.persistence` avoids.
+  - **The dependency runs one way: `gc` → `artifacts`, never back.** `artifacts` does not know a
+    collector exists, which is the property that keeps a retention rule out of the write path. `gc`
+    does not depend on `git-storage` either — pack blobs are row-less to the census and structurally
+    unreachable by any sweep. `service` depends on all three and hosts GC's only web surface,
+    `api/GcPlanController`.
+  - Where a strategy needs one of the store's package-private funnels, `artifacts` opens a **narrow
+    public door** — `BlobReclaim` (over `BlobStore.delete`/`lastWrittenAt`/`blobGracePeriod`),
+    `OciRegistryCollection` (`collectTag`/`collectManifest`), `NpmRegistryCollection` (`collect`) —
+    each javadoc'd as the gc module's alone. The funnels stay package-private: widening them to
+    public would hand their constraints to every package on the classpath to serve one module.
 - `eu.wohlben.qits.githost` — the git host. Mostly `service/`, plus `eu.wohlben.qits.githost.storage`
   in the `git-storage` module. It is **not** folded into `artifacts`: it shares no code with the blob
   store, and keeping the package separate keeps a future second split cheap. It now shares the
@@ -216,7 +232,10 @@ predates the name-addressed one and remains the daemon's fallback.
 **`CdDeploymentPins` is the one exception, and it breaks the rule in both halves on purpose.** It is
 a port this repo also implements (`CdHttpDeploymentPins`, a plain GET on qits-net), and absent is
 *not* a supported configuration: it throws, which fails the `oci-images` GC plan closed. Both halves
-were decided rather than drifted into (`artifacts-gc-plan.md` ⚖4). The keep-set is "which image shas
+were decided rather than drifted into (`artifacts-gc-plan.md` ⚖4), and both live in the `gc` module,
+which narrows the exception rather than removing it: the `artifacts` library dials nothing at all and
+is domain-blind again, and the one outbound call belongs to the process that needs it.
+The keep-set is "which image shas
 would a restart pull", qits-cd is the only thing that knows, and the alternative — a driver
 assembling that list and handing it in — puts a safety-critical input outside the service that acts
 on it, where the two drift and the drift deletes a running image. It is fetched at plan time every
@@ -291,8 +310,9 @@ them. Pack GC is its own later workstream and needs the DFS migration first.
 
 ## Garbage collection
 
-`README.md`'s "Garbage collection" section is the contract; these are the three rules that get
-"helpfully" refactored away.
+All of it is the **`gc/` module** (`eu.wohlben.qits.artifacts.gc`, DTOs in `.gc.dto`) except the
+route: `api/GcPlanController` stays in `service` with every other route. `README.md`'s "Garbage
+collection" section is the contract; these are the rules that get "helpfully" refactored away.
 
 - **One census.** `LiveBlobCensus` is what the store summary reads *and* what a GC plan reads. A
   second computation of "what is live" is a set the UI reports and a set a sweep protects, drifting
@@ -351,12 +371,14 @@ Two things are npm's alone, and the plan is explicit that docker needs neither:
   not there. A separate table rather than a flag on `npm_version`, because the packument is assembled
   from those rows at read time and a marker column would need a `where` clause in every reader.
 - **`NpmRegistryService.collect` is package-private with exactly one caller**,
-  `NpmPackagesGcStrategy.apply`: it is the only way a version row is ever removed, it writes the
+  `NpmPackagesGcStrategy.apply`, which reaches it across the jar boundary through the
+  `NpmRegistryCollection` facade: it is the only way a version row is ever removed, it writes the
   tombstone in the same transaction, and it refuses a version a dist-tag still names (a dist-tag
   pointing at a version the packument no longer lists is a broken package to every npm client). It
   shipped ahead of its caller so the tombstone was never a step someone had to remember.
-  `OciRegistryService.collectTag`/`collectManifest` are the OCI twins — package-private, called only
-  by `OciImageGcStrategy.apply`, and `collectManifest` refuses a manifest a tag still names.
+  `OciRegistryService.collectTag`/`collectManifest` are the OCI twins — package-private behind
+  `OciRegistryCollection`, called only by `OciImageGcStrategy.apply`, and `collectManifest` refuses a
+  manifest a tag still names.
 
 `oci-mirror` is claimed by a strategy whose whole rule is "nothing dies"
 (`append-only pending access tracking`, proxy-pulling-normal-images.md ⚖2), and the class exists
@@ -372,7 +394,10 @@ for npm-proxy" is the honest report of a decision nobody has taken.
 `BlobStore.delete` is package-private for the same reason `promote` is the one write funnel: the
 constraints (grace window off the file mtime, the pre-unlink guard inside the write lock `promote`
 also takes, `BlobDiskIndex` invalidation) only hold if there is one way in. Adding a second caller,
-or widening it to public, removes them without failing anything.
+or widening it to public, removes them without failing anything. The `gc` module reaches it through
+`BlobReclaim`, and its two siblings `OciRegistryCollection` and `NpmRegistryCollection` do the same
+for the registries' collect funnels — three named doors with one documented owner each, which is why
+none of the three funnels had to become public when GC moved out.
 
 ## Authentication
 
@@ -390,8 +415,8 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 
 ## Tests
 
-- `mvn verify` runs 493 tests (194 in `artifacts/`, 18 in `git-storage/`, 281 in `service/`) in about
-  two minutes. Nothing here
+- `mvn verify` runs 452 tests (115 in `artifacts/`, 18 in `git-storage/`, 38 in `gc/`, 281 in
+  `service/`) in about two minutes. Nothing here
   needs docker — and that is the constraint that shapes the registry suite: `docker`, `podman` and
   `skopeo` may not be assumed present, so `registry/OciClient` + `registry/TinyImage` synthesise a
   real image in memory and drive a full push/pull over the JDK `HttpClient`. It uses that rather than
@@ -512,7 +537,11 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   alias on `FakeRepositoryNameResolver`, which is a plain `@ApplicationScoped` bean in test sources
   — that is exactly the "a resolver is present" configuration production runs in.
 - `ArtifactsTestSupport` (in `artifacts/`) and `ArtifactsTestMedia` (in `service/`) are separate on
-  purpose: the two modules share no test classpath, the same way they do not in the monorepo.
+  purpose: the modules share no test classpath, the same way they do not in the monorepo. `gc/`'s
+  `GcFixture` and `artifacts/`'s `SeededStoreFixture` are the same rule and the same seeding, copied
+  rather than shared — the alternative is a published test jar and a package-private support class
+  widened across a jar boundary, which couples three suites to one classpath to save a seeding
+  method. Either copy may grow the cases its own module needs; neither is the other's contract.
 - **The explorer's size math is proved in `artifacts/`, its wire behaviour in `service/`, and the
   split is not cosmetic.** `ArtifactExplorerServiceTest` builds two images over five content blobs
   arranged so per-tag, per-image and store-wide unions all give *different* answers over the same

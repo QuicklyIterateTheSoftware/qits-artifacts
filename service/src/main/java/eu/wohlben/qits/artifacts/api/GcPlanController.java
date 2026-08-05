@@ -1,9 +1,9 @@
 package eu.wohlben.qits.artifacts.api;
 
-import eu.wohlben.qits.artifacts.control.GcPlanner;
-import eu.wohlben.qits.artifacts.control.GcSweepExecutor;
-import eu.wohlben.qits.artifacts.dto.GcPlanReport;
-import eu.wohlben.qits.artifacts.dto.GcSweepReport;
+import eu.wohlben.qits.artifacts.gc.GcPlanner;
+import eu.wohlben.qits.artifacts.gc.GcSweepExecutor;
+import eu.wohlben.qits.artifacts.gc.dto.GcPlanReport;
+import eu.wohlben.qits.artifacts.gc.dto.GcSweepReport;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.POST;

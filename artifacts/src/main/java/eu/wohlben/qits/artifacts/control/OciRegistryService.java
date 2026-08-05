@@ -310,10 +310,11 @@ public class OciRegistryService {
   /**
    * Deletes one tag row — the only way a tag ever leaves this registry.
    *
-   * <p><b>Package-private and called only by {@code OciImageGcStrategy.apply}</b>, the same shape
-   * and the same reason as {@code NpmRegistryService.collect} and {@code BlobStore.delete}: the
-   * client-facing {@code 405} on {@code /v2} deletes stays exactly as it is, and no route reaches
-   * this. Which tags die is the strategy's rule; this only knows how a row is removed.
+   * <p><b>Package-private, reached only through {@link OciRegistryCollection}</b> and called only
+   * by the {@code gc} module's {@code OciImageGcStrategy.apply} — the same shape and the same reason
+   * as {@code NpmRegistryService.collect} and {@code BlobStore.delete}: the client-facing {@code
+   * 405} on {@code /v2} deletes stays exactly as it is, and no route reaches this. Which tags die is
+   * the strategy's rule; this only knows how a row is removed.
    *
    * <p>The manifest the tag named is not touched — whether it survives is a reachability question
    * the strategy answers, and its blobs are the sweep's question after that.

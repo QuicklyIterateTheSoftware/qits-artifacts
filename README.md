@@ -21,11 +21,17 @@ with `domain.repository` — see `migration-plan.md` §3.4 in the home repo.
 |---|---|
 | `artifacts/` | `eu.wohlben.qits.artifacts.*` — entity, persistence, dto, mapper, control, error. The blob store proper. No web, no JAX-RS. |
 | `git-storage/` | `eu.wohlben.qits.githost.storage` — a JGit `DfsRepository` whose packs, pack indexes and refs are blobs, plus the two ports it declares and does not implement (`PackBlobStore`, `PackCatalog`). One compile dependency: JGit. |
+| `gc/` | `eu.wohlben.qits.artifacts.gc` (+ `.dto`) — garbage collection: the six per-type strategies, the planner, the reconciliation and the sweep, plus the `CdDeploymentPins` port and its HTTP adapter. A *process* modelled from within qits-artifacts, not artifacts domain. Depends on `artifacts` and on nothing else here. No web, no JAX-RS — `GcPlanController` is in `service/`. |
 | `service/` | `eu.wohlben.qits.artifacts.api` (the JAX-RS boundary), `eu.wohlben.qits.githost` (the Vert.x + JGit smart-HTTP host), `eu.wohlben.qits.githost.persistence` (the two adapters and the git host's entities), `eu.wohlben.qits.registry` (the Vert.x OCI Distribution API), `eu.wohlben.qits.npm` (the Vert.x npm registry and its upstream proxy) and `eu.wohlben.qits.maven` (the Vert.x maven repository). |
 | `service/src/main/webui/` | The `qits-spa-artifacts` submodule — an Angular SPA, built into the app by Quinoa and served at `/artifacts`. Not Java, and not a Maven module. |
 
-`artifacts/` and `git-storage/` are library jars and depend on nothing of each other's — they are
-different contexts, which is why `git-storage` declares ports and `service` implements them.
+`artifacts/`, `git-storage/` and `gc/` are library jars. `artifacts` and `git-storage` depend on
+nothing of each other's — they are different contexts, which is why `git-storage` declares ports and
+`service` implements them. `gc` depends on `artifacts` and on `git-storage` not at all, and the
+dependency runs **one way**: `artifacts` does not know a garbage collector exists, which is what
+keeps a retention rule out of the write path. Where a strategy needs one of the store's funnels,
+`artifacts` opens a narrow public door — `BlobReclaim`, `OciRegistryCollection`,
+`NpmRegistryCollection` — that delegates to a member which stays package-private.
 **`service/` is the application** — it carries
 `<packaging>quarkus</packaging>` and produces a process, as a JVM fast-jar or as a native binary:
 
@@ -1045,9 +1051,10 @@ when it lands, contributes them as a live set of its own; nothing about them nee
 ### The delete primitive
 
 `BlobStore.delete` is the only way bytes leave this store. It is **package-private** and its only
-permitted caller is `BlobSweep` — whose unlink loop runs only when `GcSweepExecutor` drives it
-behind the `POST`, after the strategies' identity deletions, against a census taken fresh after
-them. Three constraints are enforced in the method rather than trusted to its caller:
+permitted caller is the `gc` module's `BlobSweep`, which reaches it through `BlobReclaim` — the one
+narrow public door, javadoc'd as gc's alone. That unlink loop runs only when `GcSweepExecutor`
+drives it behind the `POST`, after the strategies' identity deletions, against a census taken fresh
+after them. Three constraints are enforced in the method rather than trusted to its caller:
 
 - **A grace window** — `qits.artifacts.gc.blob-grace-period`, default **7 days**, measured from the
   file's mtime, which is when `promote` moved it into place. It closes the upload race: a client's
@@ -1157,8 +1164,8 @@ by design and re-pushing one has always been legal, so there is no promise for a
 on that side.
 
 `NpmRegistryService.collect` is the only way a version row ever leaves, it writes the tombstone in the
-same transaction, and it refuses a version a dist-tag still names. It is package-private and its one
-caller is `NpmPackagesGcStrategy.apply` — it shipped ahead of that caller precisely so the tombstone
+same transaction, and it refuses a version a dist-tag still names. It is package-private, reached
+only through the `NpmRegistryCollection` facade, and its one caller is `NpmPackagesGcStrategy.apply` — it shipped ahead of that caller precisely so the tombstone
 was never a step someone had to remember, and both guarantees live in the mechanism where no path
 around them exists.
 
@@ -1281,7 +1288,9 @@ the resolver is called on a Vert.x worker thread with no request context bound.
 rather than left to be discovered: it is declared **and** implemented inside this repo, over HTTP,
 and it is the one place this service dials another (`qits-cd`, for the `oci-images` keep-set — see
 "Garbage collection"). Absent is not a supported configuration there, which is the other difference:
-an unanswerable pin list aborts that type's plan instead of falling back.
+an unanswerable pin list aborts that type's plan instead of falling back. It lives in `gc/` with the
+strategy that needs it — the `artifacts` library dials nothing at all, which is the domain-blindness
+the module split gave back.
 
 ## Config
 

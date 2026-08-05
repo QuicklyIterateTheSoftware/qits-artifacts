@@ -41,12 +41,15 @@
     <name>qits-artifacts</name>
 
     <modules>
-        <!-- Both libraries before the app: `service` depends on `artifacts` today and on
-             `git-storage` once the git host is wired to it. The two libraries do NOT depend on each
+        <!-- Every library before the app. `service` depends on all three; the libraries' own
+             edges are what the order records. `artifacts` and `git-storage` do NOT depend on each
              other — they are different contexts — which is why `git-storage` declares its own ports
-             and leaves the adapters to `service` (see git-storage/README.md). -->
+             and leaves the adapters to `service` (see git-storage/README.md). `gc` sits after both
+             because it depends on `artifacts` — one way, never back — and on `git-storage` not at
+             all (see gc/pom.xml). -->
         <module>artifacts</module>
         <module>git-storage</module>
+        <module>gc</module>
         <module>service</module>
     </modules>
 
@@ -122,6 +125,11 @@
             <dependency>
                 <groupId>${project.groupId}</groupId>
                 <artifactId>qits-artifacts-git-storage</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-artifacts-gc</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>

@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>eu.wohlben.qits</groupId>
+        <artifactId>qits-artifacts</artifactId>
+        <version>2026.803.160505</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <!-- GARBAGE COLLECTION: a PROCESS modelled from within qits-artifacts, not artifacts domain
+         (artifacts-gc-plan.md, settlement). The census, the per-type strategies, the reconciliation
+         and the sweep live here; the blob store, its rows and its registries live in `artifacts`.
+
+         The dependency runs ONE WAY — gc → artifacts, never back. `artifacts` does not know a
+         garbage collector exists, which is the property that keeps a strategy's rule out of the
+         store: a change here cannot reach the write path, and the store's funnels stay the only way
+         a byte or a row moves. Where a strategy needs one of those funnels, `artifacts` opens a
+         narrow public door (`BlobReclaim`, `OciRegistryCollection`, `NpmRegistryCollection`) that
+         delegates to a member that stays package-private.
+
+         NOT a dependency on `git-storage`, deliberately: git packs are row-less to the census and
+         therefore structurally unreachable by any sweep, so pack GC is a later workstream behind
+         that module's own ports rather than something this module reaches into (AGENTS.md, "We do
+         not garbage collect git").
+
+         The JAX-RS boundary is not here either. `GcPlanController` stays in `service` with every
+         other route, so this module — like `artifacts` — carries no web layer. -->
+    <artifactId>qits-artifacts-gc</artifactId>
+    <name>qits-artifacts :: gc</name>
+
+    <dependencies>
+        <dependency>
+            <!-- The store this collects: its census, its rows, its blob ids, and the three narrow
+                 doors above. The one direction that exists. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-artifacts-artifacts</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-arc</artifactId>
+        </dependency>
+        <dependency>
+            <!-- CdHttpDeploymentPins parses qits-cd's answer with an injected ObjectMapper. -->
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-jackson</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-junit5</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <artifactId>maven-compiler-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <systemPropertyVariables>
+                        <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
+                    </systemPropertyVariables>
+                </configuration>
+            </plugin>
+            <plugin>
+                <!-- Index the jar so the consuming app discovers the strategies, the planner and the
+                     sweep as CDI beans. Without it `service` finds no GcStrategy at all and the plan
+                     reports every type as unclaimed — a green build with an empty report. -->
+                <groupId>io.smallrye</groupId>
+                <artifactId>jandex-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>

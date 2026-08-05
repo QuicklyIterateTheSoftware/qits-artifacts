@@ -274,10 +274,12 @@ public class BlobStore {
   }
 
   /**
-   * Unlinks one blob. <b>The only way bytes leave this store, and the only caller is {@link
-   * BlobSweep}</b> — which is why it is package-private and why nothing in {@code api}, {@code
-   * registry} or {@code npm} can reach it. The registries' {@code 405} on delete stays exactly as it
-   * is: GC is an internal process, not an API, and no client gains deletion semantics from this.
+   * Unlinks one blob. <b>The only way bytes leave this store, and the only caller is the {@code gc}
+   * module's {@code BlobSweep}</b> — which reaches it through {@link BlobReclaim}, the one narrow
+   * public door. This method stays package-private, which is why nothing in {@code api}, {@code
+   * registry} or {@code npm} can reach it: a {@code public} delete would hand the constraints below
+   * to every package on the classpath. The registries' {@code 405} on delete stays exactly as it is:
+   * GC is an internal process, not an API, and no client gains deletion semantics from this.
    *
    * <p>Three constraints, each closing a way immutability could be broken by accident:
    *
@@ -293,7 +295,8 @@ public class BlobStore {
    *   <li><b>Row-less blobs are never candidates.</b> This method cannot see rows and does not try:
    *       the rule is the caller's, and it is structural — a candidate must have <em>lost</em> its
    *       last identity row to a strategy's deletion, so a blob that never had one is unreachable
-   *       from here. See {@code GcUntouchablePool} for why that matters more than it sounds.
+   *       from here. See the gc module's {@code GcUntouchablePool} for why that matters more than it
+   *       sounds.
    * </ul>
    *
    * <p>Deleting invalidates {@link BlobDiskIndex}, the same signal {@link #promote} sends, so the

@@ -22,7 +22,7 @@ import org.junit.jupiter.api.Test;
  * the repository behind — is a recorded decision (⚖2, append-only) rather than a leak.
  */
 @QuarkusTest
-class OciMirrorUpstreamsTest extends GcFixture {
+class OciMirrorUpstreamsTest extends SeededStoreFixture {
 
   @Inject OciMirrorUpstreams upstreams;
 

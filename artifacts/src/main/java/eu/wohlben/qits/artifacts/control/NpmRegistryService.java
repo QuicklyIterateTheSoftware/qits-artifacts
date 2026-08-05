@@ -192,11 +192,11 @@ public class NpmRegistryService {
    * Deletes one published version and leaves its identity behind — the only way a version ever
    * leaves this registry.
    *
-   * <p><b>Package-private and called by nobody today</b>, the same shape and the same reason as
-   * {@code BlobStore.delete}: the two guarantees below hold only while there is one way in. Garbage
-   * collection is dry-run — {@code NpmPackagesGcStrategy} reports what would go and deletes
-   * nothing — and this ships ahead of it so that the day a plan is applied, the tombstone is not a
-   * step someone has to remember.
+   * <p><b>Package-private, reached only through {@link NpmRegistryCollection}</b> and called only
+   * by the {@code gc} module's {@code NpmPackagesGcStrategy.apply} — the same shape and the same
+   * reason as {@code BlobStore.delete}: the two guarantees below hold only while there is one way
+   * in, and a {@code public} {@code collect} would put an unpublish within reach of every route the
+   * registry's {@code 405} exists to refuse.
    *
    * <p>The two guarantees:
    *

@@ -44,6 +44,17 @@
             <artifactId>qits-artifacts-artifacts</artifactId>
         </dependency>
         <dependency>
+            <!-- Garbage collection: the census-driven planner, the six per-type strategies and the
+                 sweep. It depends on `artifacts` and this module depends on it, which is the whole
+                 graph — `artifacts` never learns a collector exists.
+
+                 Named here because this module hosts GC's only web surface: `api/GcPlanController`
+                 (GET /gc/plan, POST /gc/sweep) sits with every other route rather than travelling
+                 with the engine, exactly as the artifacts library's REST boundary does. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-artifacts-gc</artifactId>
+        </dependency>
+        <dependency>
             <!-- The git host's second storage engine (a JGit DfsRepository over blobs). It declares
                  two ports and implements neither; the adapters are in this module
                  (githost/storage/), because git-storage may not depend on qits-artifacts-artifacts
@@ -227,9 +238,10 @@
     <profiles>
         <!-- GraalVM native build (the same profile qits-gateway and qits-workspace-daemon carry):
              `-Dnative` disables the fast-jar and enables the native image. It lives in THIS module,
-             not the root pom, because only this module is an application — `artifacts` is a library
-             jar and has nothing to native-compile. skipITs flips with it so a native build runs the
-             @QuarkusIntegrationTest suite against the binary rather than skipping it silently. -->
+             not the root pom, because only this module is an application — `artifacts`, `git-storage`
+             and `gc` are library jars and have nothing to native-compile. skipITs flips with it so a
+             native build runs the @QuarkusIntegrationTest suite against the binary rather than
+             skipping it silently. -->
         <profile>
             <id>native</id>
             <activation>

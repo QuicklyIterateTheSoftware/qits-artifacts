@@ -23,7 +23,7 @@ import org.junit.jupiter.api.Test;
  * rule, and their order is load-bearing: an existing repository always wins.
  */
 @QuarkusTest
-class OciMirrorResolutionTest extends GcFixture {
+class OciMirrorResolutionTest extends SeededStoreFixture {
 
   @Inject OciRegistryService registry;
   @Inject OciMirrorUpstreams upstreams;
