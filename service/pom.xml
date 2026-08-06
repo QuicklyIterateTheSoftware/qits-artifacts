@@ -55,14 +55,11 @@
             <artifactId>qits-artifacts-gc</artifactId>
         </dependency>
         <dependency>
-            <!-- The git host's second storage engine (a JGit DfsRepository over blobs). It declares
-                 two ports and implements neither; the adapters are in this module
-                 (githost/storage/), because git-storage may not depend on qits-artifacts-artifacts
-                 and artifacts may not depend on git-storage — they are different contexts — and
-                 this is the one module that already depends on both.
-
-                 It is in the binary whichever backend qits.repositories.git.storage selects, which
-                 is the point: the rollout is a config flip and a restart, not a rebuild. -->
+            <!-- The git host's storage engine (a JGit DfsRepository over blobs). It declares two
+                 ports and implements neither; the adapters are in this module
+                 (githost/persistence/), because git-storage may not depend on
+                 qits-artifacts-artifacts and artifacts may not depend on git-storage — they are
+                 different contexts — and this is the one module that already depends on both. -->
             <groupId>${project.groupId}</groupId>
             <artifactId>qits-artifacts-git-storage</artifactId>
         </dependency>

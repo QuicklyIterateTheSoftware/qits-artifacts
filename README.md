@@ -22,7 +22,7 @@ with `domain.repository` — see `migration-plan.md` §3.4 in the home repo.
 | `artifacts/` | `eu.wohlben.qits.artifacts.*` — entity, persistence, dto, mapper, control, error. The blob store proper. No web, no JAX-RS. |
 | `git-storage/` | `eu.wohlben.qits.githost.storage` — a JGit `DfsRepository` whose packs, pack indexes and refs are blobs, plus the two ports it declares and does not implement (`PackBlobStore`, `PackCatalog`). One compile dependency: JGit. |
 | `gc/` | `eu.wohlben.qits.artifacts.gc` (+ `.dto`) — garbage collection: the six per-type strategies, the two configured engines that will replace them, the planner, the reconciliation and the sweep, plus the two pin ports (`CdDeploymentPins`, `CiDaemonPins`) and their HTTP adapters. A *process* modelled from within qits-artifacts, not artifacts domain. Depends on `artifacts` and on nothing else here. No web, no JAX-RS — `GcPlanController` is in `service/`. |
-| `service/` | `eu.wohlben.qits.artifacts.api` (the JAX-RS boundary), `eu.wohlben.qits.githost` (the Vert.x + JGit smart-HTTP host), `eu.wohlben.qits.githost.persistence` (the two adapters and the git host's entities), `eu.wohlben.qits.registry` (the Vert.x OCI Distribution API), `eu.wohlben.qits.npm` (the Vert.x npm registry and its upstream proxy) and `eu.wohlben.qits.maven` (the Vert.x maven repository). |
+| `service/` | `eu.wohlben.qits.artifacts.api` (the JAX-RS boundary), `eu.wohlben.qits.githost` (the Vert.x + JGit smart-HTTP host), `eu.wohlben.qits.githost.persistence` (the DFS storage adapters and the git host's entities), `eu.wohlben.qits.registry` (the Vert.x OCI Distribution API), `eu.wohlben.qits.npm` (the Vert.x npm registry and its upstream proxy) and `eu.wohlben.qits.maven` (the Vert.x maven repository). |
 | `service/src/main/webui/` | The `qits-spa-artifacts` submodule — an Angular SPA, built into the app by Quinoa and served at `/artifacts`. Not Java, and not a Maven module. |
 
 `artifacts/`, `git-storage/` and `gc/` are library jars. `artifacts` and `git-storage` depend on
@@ -119,8 +119,8 @@ Reads are never guarded — a blob must be usable directly as an `<img>`/`<video
 `GitHostRoutes` mounts JGit's `UploadPack`/`ReceivePack` on plain Vert.x routes at `/artifacts/git/*` —
 deliberately **not** as a servlet, because `quarkus-undertow`'s presence breaks Quinoa's production
 static serving — which used to mean "in the consuming app" and now means in this one, since the SPA
-above is served that way. JGit speaks the wire protocol and nothing else; the git CLI remains the
-only thing that mutates a repository.
+above is served that way. JGit speaks the wire protocol and nothing else: receive-pack is the only
+writer this host has.
 
 Those routes are also why `quarkus.quinoa.ignored-path-prefixes` is spelled out in
 `application.properties` rather than left to Quinoa's derivation: Quinoa derives its ignore list
@@ -149,14 +149,14 @@ are workspace containers, which cannot hold a user session. A deployment must th
 Two addressing schemes, told apart by path length — which the fixed prefix preserves, since it adds
 one segment to both:
 
-- `/artifacts/git/:repoId` — the opaque UUID, resolving to `<data-dir>/<repoId>/origin`.
+- `/artifacts/git/:repoId` — the opaque UUID, handed straight to the storage.
 - `/artifacts/git/:projectId/:repoName` — a project's repositories served as siblings, so committed
   relative submodule urls (`../<name>.git`) resolve natively. Needs the `RepositoryNameResolver`
   port.
 
 Beside them, the base itself answers `GET /artifacts/git` with
 `{"repositories": ["<repoId>", ...]}` — every repository this host serves, sorted
-lexicographically, on whichever storage backend is selected. It is one segment shorter than every
+lexicographically. It is one segment shorter than every
 route above, so it shadows none of them. The host withheld this listing while nothing needed it;
 qits-ci's trigger engine has to enumerate candidates before it can fire an event-triggered pipeline,
 so the decision is reversed rather than left standing. Reads are unauthenticated here as everywhere
@@ -164,6 +164,29 @@ else on this host.
 
 This base is a **cross-repo contract**: qits-ci fetches pipeline config from it and
 qits-workspace-daemon's `Provisioner` clones from it, both against the literal `/artifacts/git`.
+
+### Where a repository lives
+
+In this service's own blob store. A repository is a JGit `DfsRepository`: its packs, pack indexes,
+refs and reftables are content-addressed blobs, and `git_pack`/`git_pack_file` in the H2 lineage
+are the catalog that says which of them a repository is made of. Nothing is on disk as a
+repository, there is no volume to mount and no key to point anywhere else.
+
+Three consequences:
+
+- **The git CLI cannot open one.** No directory for `--git-dir`, no worktree to add, no config file
+  to write. Every operation is the wire protocol or in-process JGit — which is the point:
+  receive-pack is the only writer, so no ref moves without firing `post-receive`.
+- **`DfsRepository.getConfig()` does not persist**, which is why the per-repository protection
+  override is a row (see below) rather than a line in a config file.
+- **Existence is the ref database's answer.** A repository that was created has a reftable in the
+  catalog; one that was not reads empty and is a 404. There is no `git_repository` row to keep in
+  step.
+
+`PUT /artifacts/git/:repoId` is therefore the only way a repository comes into being. A second
+backend — bare origins on a volume shared with qits-projects and qits-workspaces — ran beside this
+one for a release cycle behind `qits.repositories.git.storage`; both the property and the volume
+are gone.
 
 ### The default branch's seatbelt
 
@@ -201,10 +224,9 @@ that fixes it. A deployment turns it on by env; a single repository opts in or o
 decides.
 
 That override used to be `[qits] protectDefaultBranch` in the bare's own config. It became a row
-because a DFS-backed repository has no config file — `DfsRepository.getConfig()` is in-memory and its
-save is a no-op — so the old read would have answered the platform default for every repository, with
-no symptom anywhere. The row is the override for **both** backends: one question with two answer
-sources eventually gets two answers.
+because a repository has no config file — `DfsRepository.getConfig()` is in-memory and its save is a
+no-op — so the old read would have answered the platform default for every repository, with no
+symptom anywhere.
 
 Push options need `setAllowPushOptions(true)` on **both** `ReceivePack` instances — the one in
 `service(...)` that receives them and the one in `infoRefs(...)` that advertises the capability. A
@@ -943,9 +965,9 @@ a migration cannot verify one against the running store. Until then: report it; 
 
 ### Deliberately not here
 
-- **The git host.** It shares a process and a URL segment with the registries and nothing else:
-  separate volume, no blob store, no rows, no `artifact_repository` entry. Its refs are readable
-  only as pkt-line and its object counts need JGit calls nobody has written.
+- **The git host.** It shares the blob store and the datasource with the registries and nothing
+  else: no `artifact_repository` entry, so its pack blobs are row-less to the census. Its refs are
+  readable only as pkt-line and its object counts need JGit calls nobody has written.
 - **Any link to a project.** Not one column in any of the six tables joins to one. `oci_manifest.repository`
   is `"qits"` for every row — that is the image namespace, equal to the project slug by naming
   accident — and `npm_version.package_name` does not even coincide. The one genuine cross-store link
@@ -1110,7 +1132,7 @@ each — the sections below carry the reasoning:
 | `oci-mirror` | `cache`, `P30D` | a cached tag, or a manifest no tag names | anything pulled inside the window; anything a live pin names by digest | manifest closure over survivors |
 | `npm-proxy` | `cache`, `P30D` | a cached version, or a cached packument | anything installed inside the window; anything a live pin names by digest | `npm_version.tarball_blob_id` of survivors |
 | `ci-screenshots`, `ci-videos` | `excluded` | **nothing** — no engine is configured, so nothing of them is ever deleted | everything | `artifact_record.blob_id`, reported live |
-| git host (not an `artifact_repository` type) | none | superseded pack descriptions after a repack | every ref, current packs | `PackCatalog.list` per repo — blocked on the DFS migration |
+| git host (not an `artifact_repository` type) | none | superseded pack descriptions after a repack | every ref, current packs | `PackCatalog.list` per repo — its own later workstream |
 
 `GcTypeConfigTest` is the guard over that table and is edited **deliberately, once per workstream**:
 a type whose dead set moves has its new set written out there, and every other type stays
@@ -1633,8 +1655,6 @@ app's `application.properties` overrides them.
 | `qits.auth.machine.required` | `false` | the machine-token rollout gate. Off, the JSON admin write surface is open — network trust. On, its writes need a bearer with `aud=qits-artifacts` |
 | `qits.auth.machine.audience` | `qits-artifacts` | this service's own id, and the `aud` its tokens must carry |
 | `qits.artifacts.startup-seed.enabled` | `true` | self-seed `ci-screenshots` + `ci-videos` + the `qits` image repository + the two npm roots (`npm`, `npmjs`) |
-| `qits.repositories.data-dir` | `~/.qits/data/repositories` | where the `file` git backend finds `<repoId>/origin` |
-| `qits.repositories.git.storage` | `file` | which git storage backend serves repositories — `file` (bare origins on the volume) or `dfs` (packs and refs as blobs in this service's own store). Runtime; an unknown value fails the boot |
 | `qits.ci.intake-url` | `http://localhost:8080/ci/api/events/post-receive` | post-receive delivery |
 | `qits.ci.token` | blank | `X-CI-Token` on those events |
 | `quarkus.oidc-client.client-enabled` | `false` | whether those events carry a bearer for `aud=qits-ci`. On needs `QITS_ARTIFACTS_CLIENT_SECRET`, or the boot fails |
@@ -1706,7 +1726,8 @@ and only the host part is a deployment decision.
 ## What is deliberately *not* here
 
 - **The repositories/projects context.** Cloning, branches, commits, submodules, the alias table
-  itself. This repo serves bytes out of bare origins someone else creates.
+  itself. This repo provisions a repository over the wire and serves its bytes; what a caller does
+  with the history is not modelled here.
 - **CI.** The post-receive event is delivered *to* ci over HTTP; pipelines, runners and the intake
   live in [qits-ci](https://github.com/QuicklyIterateTheSoftware/qits-ci).
 - **`QitsGitServlet` / `QitsRepositoryResolver`.** The pre-Vert.x servlet implementation, deleted in

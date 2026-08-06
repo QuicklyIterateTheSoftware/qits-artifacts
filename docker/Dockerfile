@@ -27,36 +27,29 @@
 #
 # That `?` is `${user.home}`. UID 1001 has no /etc/passwd entry in ubi-minimal, and a native image
 # resolves user.home through getpwuid rather than $HOME — so setting HOME does not fix it, and the
-# three defaults this repo ships (the H2 file, the blobs dir, the git data-dir) have nowhere to land.
-# Give the datasource an absolute url and it comes up in ~0.1s, Flyway migration included.
+# two defaults this repo ships (the H2 file and the blobs dir) have nowhere to land. Give the
+# datasource an absolute url and it comes up in ~0.1s, Flyway migration included.
 #
 # An /etc/passwd line for 1001 would make it boot with no environment at all. It is deliberately not
-# here: every one of those paths would then resolve inside the container's writable layer, and this
-# service's data is not its own. `qits.repositories.data-dir` is a two-way on-disk contract now
-# (projects-volume-decoupling-plan.md BT) — this service serves the bare origins over git smart-HTTP
-# and qits-workspaces still reads pre-move workspace sidecars off the same volume, so both must
-# resolve it to the SAME volume or one of them sees stale or empty data. qits-projects no longer
-# mounts it at all: it clones its own mirrors over the wire instead. A container that came up
-# healthy on an ephemeral copy is the failure that hides; one that refuses to start is the failure
-# you see.
+# here: both paths would then resolve inside the container's writable layer, and this service's data
+# is not its own. A container that came up healthy on an ephemeral copy is the failure that hides;
+# one that refuses to start is the failure you see.
 #
-# The three paths are NOT the same kind of state, and this image treats them differently:
-#
-#   the git tree      `qits.repositories.data-dir` is settled, and nothing in it is stored in SQL —
-#                     it is bare origins on disk. The image names it itself (see the runtime stage)
-#                     so it is correct out of the box, and it names the SAME literal qits-workspaces
-#                     ships, so one volume satisfies the two-way contract without a deployment
-#                     having to get one string right in both places.
+# The two paths:
 #
 #   the database      the prototype. Deliberately unnamed here; the service will not start until a
 #                     deployment says where it goes.
 #
 #   the blob dir      files on disk, but every one of them is indexed by a row in that database —
 #                     blobs whose index did not survive are not data, they are orphans. So it stays
-#                     with the database rather than with the git tree, and is named alongside it.
+#                     with the database, and is named alongside it.
+#
+# There is no third. The git host used to keep bare origins on a volume qits-workspaces mounted too,
+# and this image named that path itself; a repository is DFS-backed now — packs and refs are blobs
+# in the dir above — so the volume, the shared contract and the env var are all gone.
 #
 # So a deployment mounts a volume at /data (which this image owns, see the runtime stage) and names
-# the two that belong to the prototype:
+# both:
 #
 #   docker run -v qits-artifacts-data:/data \
 #     -e QUARKUS_DATASOURCE_ARTIFACTS_JDBC_URL=jdbc:h2:file:/data/artifacts/h2/artifacts \
@@ -195,17 +188,10 @@ RUN chmod +x /work/qits-artifacts
 # of the config error, which reads like a bug in this image and is not one. Group-writable and
 # group-root because a ubi image is meant to survive being assigned an arbitrary UID with GID 0.
 # (A bind mount still takes its ownership from the host — nothing in an image can fix that.)
-RUN mkdir -p /data/repositories && chown -R 1001:root /data && chmod -R 775 /data
+RUN mkdir -p /data && chown -R 1001:root /data && chmod -R 775 /data
 
-# The git tree, named here rather than left to a deployment: it is not the prototype, and nothing in
-# it is stored in SQL. `/data/repositories` is a literal qits-workspaces also ships — the two-way
-# contract in the header only holds if both resolve it to the same volume, and two services each
-# told the same string separately is two chances to get it wrong. qits-projects no longer ships
-# this literal at all (projects-volume-decoupling-plan.md BT).
-#
-# Note what is NOT set beside it: no QUARKUS_DATASOURCE_* and no QITS_ARTIFACTS_BLOBS_DIR. That
-# asymmetry is the point — the git host works out of the box, the prototype's storage refuses to.
-ENV QITS_REPOSITORIES_DATA_DIR=/data/repositories
+# Nothing is named here: no QUARKUS_DATASOURCE_* and no QITS_ARTIFACTS_BLOBS_DIR. Both belong to the
+# prototype's storage, and this image refuses to start until a deployment says where they go.
 
 # One port for all of it — /artifacts/api/** (JAX-RS), /artifacts/q/** (openapi, swagger-ui) and
 # /artifacts/git/** (raw Vert.x) are three route stacks in one process, not three listeners.

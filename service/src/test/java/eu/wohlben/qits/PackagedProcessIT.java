@@ -64,12 +64,12 @@ import org.junit.jupiter.api.Test;
 class PackagedProcessIT {
 
   /**
-   * Points the process' three on-disk locations under {@code target/} instead of the {@code
-   * ~/.qits} home the shipped defaults name — a test must never write to the developer's real data
+   * Points the process' two on-disk locations under {@code target/} instead of the {@code ~/.qits}
+   * home the shipped defaults name — a test must never write to the developer's real data
    * directory, and a stale H2 file there would make this suite order-dependent.
    *
-   * <p>All four are runtime config, so they reach the already-built artifact as {@code -D} flags;
-   * nothing here re-augments. The paths are absolute because the launched process' working
+   * <p>All of these are runtime config, so they reach the already-built artifact as {@code -D}
+   * flags; nothing here re-augments. The paths are absolute because the launched process' working
    * directory is not this JVM's contract.
    */
   public static class TargetDirState implements QuarkusTestProfile {
@@ -86,8 +86,8 @@ class PackagedProcessIT {
       overrides.put(
           "quarkus.datasource.artifacts.jdbc.url", "jdbc:h2:file:" + ROOT.resolve("h2/artifacts"));
       overrides.put("quarkus.flyway.artifacts.clean-at-start", "true");
+      // The git host's packs and refs are blobs in that same store, so it needs no path of its own.
       overrides.put("qits.artifacts.blobs-dir", ROOT.resolve("blobs").toString());
-      overrides.put("qits.repositories.data-dir", ROOT.resolve("repositories").toString());
       // No CI intake in this repo; the notifier is fire-and-forget, so a closed port is the honest
       // posture here exactly as it is in the unit suite.
       overrides.put("qits.ci.intake-url", "http://localhost:1/post-receive");
@@ -418,7 +418,7 @@ class PackagedProcessIT {
   void gitSmartHttpAdvertisesRefsFromTheBinary() throws Exception {
     // JGit's UploadPack running inside the compiled binary. A 404 here would mean the route is
     // missing; a 500 would mean JGit itself did not survive the compile.
-    String repoId = seedOrigin();
+    String repoId = seedOrigin(gitBase);
     given()
         .when()
         .get("/artifacts/git/" + repoId + "/info/refs?service=git-upload-pack")
@@ -442,7 +442,7 @@ class PackagedProcessIT {
 
   @Test
   void dumbHttpIsRefusedByTheHandler() throws Exception {
-    String repoId = seedOrigin();
+    String repoId = seedOrigin(gitBase);
     given().when().get("/artifacts/git/" + repoId + "/info/refs").then().statusCode(403);
   }
 
@@ -450,8 +450,7 @@ class PackagedProcessIT {
   void cloneAndPushRoundTripAgainstTheBinary() throws Exception {
     // The whole wire protocol, both directions, driven by the real git CLI: UploadPack builds a
     // packfile and ReceivePack applies one. Nothing short of this exercises JGit's pack machinery.
-    String repoId = seedOrigin();
-    Path origin = TargetDirState.ROOT.resolve("repositories").resolve(repoId).resolve("origin");
+    String repoId = seedOrigin(gitBase);
     Path clone = Files.createTempDirectory("qits-artifacts-it-clone");
     Files.delete(clone);
 
@@ -465,7 +464,7 @@ class PackagedProcessIT {
     String pushedSha = runGit(clone, "git", "rev-parse", "HEAD").trim();
     runGit(clone, "git", "push", "origin", branch);
 
-    String originSha = runGit(origin, "git", "rev-parse", "refs/heads/" + branch).trim();
+    String originSha = remoteRefSha(gitBase, repoId, "refs/heads/" + branch);
     assertEquals(pushedSha, originSha, "push should have advanced the origin's branch ref");
   }
 
@@ -476,8 +475,7 @@ class PackagedProcessIT {
     // in the packaged binary could refuse the very push that fixes it. Nothing here overrides
     // qits.repositories.git.protect-default-branch — this is the shipped value, and the roughest
     // push there is must still go through untouched.
-    String repoId = seedOrigin();
-    Path origin = TargetDirState.ROOT.resolve("repositories").resolve(repoId).resolve("origin");
+    String repoId = seedOrigin(gitBase);
     Path clone = Files.createTempDirectory("qits-artifacts-it-inert");
     Files.delete(clone);
     runGit(null, "git", "clone", "-q", gitBase + "/" + repoId, clone.toString());
@@ -489,7 +487,7 @@ class PackagedProcessIT {
 
     assertEquals(
         rewritten,
-        runGit(origin, "git", "rev-parse", "refs/heads/main").trim(),
+        remoteRefSha(gitBase, repoId, "refs/heads/main"),
         "the shipped default must leave a force push to the default branch exactly as it was");
   }
 
@@ -723,28 +721,69 @@ class PackagedProcessIT {
   }
 
   /**
-   * Seeds a bare origin at {@code <data-dir>/<repoId>/origin} with the git CLI, the same way {@code
-   * GitHostSuite} does on the file backend — the served repository has to be a real on-disk bare,
-   * and this repo builds one rather than shipping a fixture (see AGENTS.md, the clone-alone rule).
+   * A repository with one commit on {@code main}, provisioned and seeded <b>through the running
+   * binary</b>: {@code PUT /artifacts/git/:repoId} creates it and a real push puts the commit in.
+   * There is no directory to build one in — packs and refs are blobs — and receive-pack is the only
+   * door this storage has, which makes this both the only seeding available and the honest one.
    *
    * <p>Static and package-private because {@link ProtectedGitHostIT} launches the same binary under
-   * a different configuration and seeds the same way.
+   * a different configuration and seeds the same way. A create is a create even with protection on,
+   * so the same helper serves both.
    */
-  static String seedOrigin() throws Exception {
+  static String seedOrigin(URL gitBase) throws Exception {
     String repoId = UUID.randomUUID().toString();
-    Path origin = TargetDirState.ROOT.resolve("repositories").resolve(repoId).resolve("origin");
-    Files.createDirectories(origin.getParent());
+    // The branch is pinned rather than left to the host's init.defaultBranch: the protected ref is
+    // the repository's own HEAD, and the protection cases have to know its name.
+    given()
+        .contentType("application/json")
+        .body("{\"defaultBranch\":\"main\"}")
+        .when()
+        .put("/artifacts/git/" + repoId)
+        .then()
+        .statusCode(201);
 
     Path seed = Files.createTempDirectory("qits-artifacts-it-seed");
-    // The branch is pinned rather than left to the host's init.defaultBranch: the protected ref is
-    // the bare's own HEAD, and the protection cases below have to know its name.
     runGit(null, "git", "init", "-q", "-b", "main", seed.toString());
     Files.writeString(seed.resolve("README.md"), "seed\n");
     runGit(seed, "git", "add", "README.md");
     runGit(seed, "git", "-c", "user.email=qits@local", "-c", "user.name=qits", "commit", "-q", "-m",
         "seed");
-    runGit(null, "git", "clone", "-q", "--bare", seed.toString(), origin.toString());
+    runGit(seed, "git", "push", "-q", gitBase + "/" + repoId, "main");
     return repoId;
+  }
+
+  /**
+   * What the served repository says a ref is, or {@code null} if it has none — {@code git ls-remote}
+   * rather than a {@code rev-parse} in a served bare, because there is no bare. It also asks the
+   * question the clients actually ask.
+   */
+  static String remoteRefSha(URL gitBase, String repoId, String ref) throws Exception {
+    return lsRemote(gitBase, repoId, ref, ref);
+  }
+
+  /**
+   * The sha a tag ref <b>peels to</b>, or {@code null} if it peels to nothing. An advertisement
+   * carries {@code <ref>^{}} only for a ref that names a tag OBJECT, so a non-null answer is how
+   * "annotated rather than the commit" is proved over the wire — the question {@code cat-file -t}
+   * used to answer in a directory this host does not have.
+   *
+   * <p>The pattern is globbed rather than the exact ref: {@code ls-remote} matches its patterns
+   * against ref names and {@code <ref>^{}} is not one.
+   */
+  static String peeledRemoteRef(URL gitBase, String repoId, String ref) throws Exception {
+    return lsRemote(gitBase, repoId, ref + "*", ref + "^{}");
+  }
+
+  private static String lsRemote(URL gitBase, String repoId, String pattern, String wanted)
+      throws Exception {
+    String out = runGit(null, "git", "ls-remote", gitBase + "/" + repoId, pattern);
+    for (String line : out.split("\n")) {
+      String[] parts = line.trim().split("\\s+");
+      if (parts.length == 2 && parts[1].equals(wanted)) {
+        return parts[0];
+      }
+    }
+    return null;
   }
 
   static String runGit(Path cwd, String... command) throws Exception {

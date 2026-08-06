@@ -86,7 +86,6 @@ class OciConformanceIT {
           "quarkus.datasource.artifacts.jdbc.url", "jdbc:h2:file:" + ROOT.resolve("h2/artifacts"));
       overrides.put("quarkus.flyway.artifacts.clean-at-start", "true");
       overrides.put("qits.artifacts.blobs-dir", ROOT.resolve("blobs").toString());
-      overrides.put("qits.repositories.data-dir", ROOT.resolve("repositories").toString());
       overrides.put("qits.ci.intake-url", "http://localhost:1/post-receive");
       return overrides;
     }

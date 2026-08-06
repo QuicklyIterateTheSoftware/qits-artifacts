@@ -12,8 +12,8 @@ port, and the config surface. This file is the working conventions on top of it.
 not a tradeoff to weigh, it is the thing this repo exists to avoid.
 
 That is why: the poms duplicate versions instead of inheriting them, no pom declares a `eu.wohlben:*`
-dependency, and `GitHostSuite` provisions its own origin through the git host's storage backend
-instead of using the monorepo's antrun-derived `fixtures/testing-repo.git`.
+dependency, and `GitHostTest` provisions its own origin through the git host itself instead of
+using the monorepo's antrun-derived `fixtures/testing-repo.git`.
 
 **`service/` compiles to a GraalVM native image**, the same rule qits-workspace-daemon and
 qits-gateway carry, and it extends the clone-alone rule rather than qualifying it: `.sdkmanrc` names
@@ -45,6 +45,7 @@ Everything that had to be declared, and the symptom each one produces if it is d
 |---|---|---|
 | `application.properties` | `--initialize-at-run-time` for `jgit.util.FileUtils`, `jgit.lib.internal.WorkQueue`, `jgit.internal.storage.file.WindowCache` | build fails: a seeded `Random`, a started `JGit-WorkQueue` thread in the image heap |
 | `application.properties` | `--initialize-at-run-time` for `jgit.internal.storage.dfs.DfsBlockCache` | **nothing yet** — measured, see below |
+| `application.properties` | `WindowCache` **stays** although no repository is file-backed any more | unmeasured, and the failure mode is a silent 404 on every git route — `UploadPack`/`ReceivePack` pull JGit's file-storage classes in regardless |
 | `githost/JGitReflection` | `values()` on every enum `Config.getEnum` reads | **every** git route 404s — `FileRepositoryBuilder.build` throws `NoSuchMethodException` and `open()` returns null |
 | `dto/UploadResult` | `@RegisterForReflection` | every upload 500s: the type is behind a `Response` return, so nothing registers it |
 | `CiPostReceiveNotifier` | the `HttpClient` is an instance field, not static | build fails: an `HttpClientFacade` in the image heap |
@@ -190,39 +191,34 @@ Two top-level packages, deliberately kept apart:
 subtypes) rather than the monorepo's `domain/error/*`. It always did — this is one of the few
 places where the duplicate-now register in `migration-plan.md` §5 was already satisfied at import.
 
-## The git host's two storage backends
+## The git host's storage
 
-`qits.repositories.git.storage` picks one, at **runtime**, and it ships `file`:
+A repository is a JGit `DfsRepository`: its packs, pack indexes, refs and reftables are blobs in
+this service's own content-addressed store, listed by `git_pack`/`git_pack_file`. Nothing is on
+disk as a repository, and there is no key to pick anything else.
 
-| Value | Where a repository lives | Opened by |
-|---|---|---|
-| `file` (default) | a bare origin at `<qits.repositories.data-dir>/<repoId>/origin`, on the volume qits-projects and qits-workspaces also mount | `FileGitRepositoryProvider` |
-| `dfs` | a JGit `DfsRepository` whose packs, pack indexes and refs are blobs in this service's own store, listed by `git_pack`/`git_pack_file` | `DfsGitRepositoryProvider` |
-
+`DfsGitRepositoryProvider` is the one implementation of `GitRepositoryProvider`, and
 `GitHostRoutes.open` is the **whole** seam — one method. `infoRefs` and `service` take a
-`Repository` and cannot tell the two apart, which is why the second backend needed no change above
-that line. `GitRepositoryBackend` does the selection with the `Instance<T>` pattern
-`RepositoryNameResolver` already uses, and an unknown value **fails the boot**: a typo that silently
-kept the old backend would look exactly like a successful cutover until someone went looking for the
-data.
+`Repository` and never learn where it came from.
 
-Three things about the DFS backend that are not obvious and cost time to rediscover:
+A second backend — bare origins at `<qits.repositories.data-dir>/<repoId>/origin`, on a volume
+qits-projects and qits-workspaces also mounted — ran beside this one for a release cycle, selected
+by `qits.repositories.git.storage`. Both it and the volume are gone: the property, the data-dir
+property, `FileGitRepositoryProvider` and `GitRepositoryBackend` no longer exist, and neither does
+the two-way volume contract the Dockerfile used to carry.
+
+Three things about DFS storage that are not obvious and cost time to rediscover:
 
 - **The git CLI cannot open one.** No directory to point `--git-dir` at, no worktree to add, no
   config file to write. Every operation is the wire protocol or in-process JGit — which is the point,
   not a limitation: receive-pack becomes the only writer, so no ref moves without firing
   `post-receive`.
-- **`getConfig()` does not persist.** That is why `[qits] protectDefaultBranch` became a row, and why
-  the row is the override for **both** backends. One question with two answer sources eventually gets
-  two answers, and the disagreement would surface as a push refused on one engine and accepted on the
-  other.
+- **`getConfig()` does not persist.** That is why `[qits] protectDefaultBranch` is a row rather than
+  a line in a repository's config: the config write is a no-op, so the old read would have answered
+  the platform default for every repository with no symptom anywhere.
 - **Existence is answered by the ref database, not by a table.** A repository that has been created
-  has a reftable in the catalog; one that has not reads empty and is a 404, the same answer a missing
-  directory gets on the file backend. There is deliberately no `git_repository` row to keep in step.
-
-Both backends stay for at least one full release cycle after the rollout. The git host serves the
-push that redeploys the git host, so rollback has to be a config flip and a restart — which it is,
-because no bare is ever deleted.
+  has a reftable in the catalog; one that has not reads empty and is a 404. There is deliberately no
+  `git_repository` row to keep in step.
 
 ## Adding a dependency on another context
 
@@ -573,7 +569,7 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 
 ## Tests
 
-- `mvn verify` runs 545 tests (115 in `artifacts/`, 18 in `git-storage/`, 125 in `gc/`, 287 in
+- `mvn verify` runs 504 tests (115 in `artifacts/`, 18 in `git-storage/`, 125 in `gc/`, 246 in
   `service/`) in about two minutes — counted from the surefire reports, which the previous figure
   here was not. Nothing here
   needs docker — and that is the constraint that shapes the registry suite: `docker`, `podman` and
@@ -639,7 +635,7 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   `@QuarkusTest` asserting anything about `/artifacts/` passes against a process that has no client
   in it. Two of them are that, and they are the guard on
   `quarkus.quinoa.ignored-path-prefixes`.
-  Its `@TestProfile` points the datasource, the blobs dir and the git data-dir under `target/`,
+  Its `@TestProfile` points the datasource and the blobs dir under `target/`,
   passed to the launched binary as `-D` flags; it uses a **file** H2 of the same shape the
   deployment runs, not the unit suite's in-memory one, because the file/embedded shape is the thing
   that broke. Do not add a build-time property there — an IT cannot re-augment.
@@ -657,26 +653,26 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   `RegistryTest`, because that suite drives a client written from the same misreading. **The fixes are
   guarded by unit tests, not by this IT** — it is opt-in and needs Go, so anything it proves must also
   be provable by `mvn verify` alone or it is not actually guarded.
-- The git host's protection cases are **four** `@QuarkusTest` classes, not one, and the split is
-  forced: `qits.repositories.git.push-token` configured / configured-empty / unset and
-  `qits.repositories.git.storage` file / dfs are process configurations, and a `@TestProfile` is per
-  class. `GitHostTest` runs under the SHIPPED config (protection off, token unset, file backend);
-  `GitHostDfsTest` is the same suite with one config value changed; `GitHostPushTokenTest` and
+- The git host's protection cases are **three** `@QuarkusTest` classes, not one, and the split is
+  forced: `qits.repositories.git.push-token` configured / configured-empty / unset are process
+  configurations, and a `@TestProfile` is per class. `GitHostTest` runs under the SHIPPED config
+  (protection off, token unset) and carries no profile at all; `GitHostPushTokenTest` and
   `GitHostEmptyPushTokenTest` carry the token cases. `GitHostFixture` is the shared git CLI driver —
-  static, because the token classes cannot usefully share a base class. Note that SmallRye reads a
+  static, because the three classes cannot usefully share a base class. Note that SmallRye reads a
   configured-empty value as *absent* for an `Optional<String>`, which is why the hook must treat
   unset and empty identically rather than distinguishing them.
-- **`GitHostSuite` reads no directory, and that constraint is what makes it run on both backends.**
-  A repository is provisioned through the selected `GitRepositoryProvider` and every fact about it is
-  then asked over the wire — `git ls-remote`, not `git rev-parse` in the served bare. The old suite
-  read the bare on disk, which cannot be translated at all: a `DfsRepository` has no directory for
-  the git CLI to open, by design. Two consequences worth knowing before extending it: protection is
-  turned on through `RepositoryProtectionStore`, not by writing a repository's config; and an
-  annotated tag is proved annotated by the `<ref>^{}` line in the advertisement rather than by
-  `cat-file -t`. `ls-remote` **filters that peeled line out** when the pattern is the exact ref name,
-  because it matches patterns against ref names and `<ref>^{}` is not one — the fixture globs.
-- **Tag pushes are measured, not assumed** (`GitHostSuite`, the "tags" block, run against both
-  backends, and one native case).
+  `GitHostTest` used to be an abstract `GitHostSuite` with one subclass per storage backend; there
+  is one backend, so it is one class again.
+- **`GitHostTest` reads no directory, and that constraint outlived the second backend.**
+  A repository is provisioned through `GitRepositoryProvider` and every fact about it is then asked
+  over the wire — `git ls-remote`, not `git rev-parse` in the served bare. There is no bare to read:
+  a `DfsRepository` has no directory for the git CLI to open, by design. Two consequences worth
+  knowing before extending it: protection is turned on through `RepositoryProtectionStore`, not by
+  writing a repository's config; and an annotated tag is proved annotated by the `<ref>^{}` line in
+  the advertisement rather than by `cat-file -t`. `ls-remote` **filters that peeled line out** when
+  the pattern is the exact ref name, because it matches patterns against ref names and `<ref>^{}` is
+  not one — the fixture globs.
+- **Tag pushes are measured, not assumed** (`GitHostTest`, the "tags" block, and one native case).
   Four answers other repos build on:
   - An annotated tag push is **accepted** with protection on and no push option. `ProtectedRefHook`
     guards one ref name — the repository's `HEAD` — so a tag is just another ref to it.
@@ -691,10 +687,12 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
     move under `--force`, because JGit's `receive.denyNonFastForwards` default is off. So a release
     push must never pass `--force`, and it should pass `--atomic` — otherwise a duplicate version
     rejects the tag while its merge commit lands on main.
-- `GitHostTest.seedOrigin()` shells `git init` + `git clone --bare` into
-  `target/githost-test-repos/<uuid>/origin`. Tests that need the name-addressed scheme register the
-  alias on `FakeRepositoryNameResolver`, which is a plain `@ApplicationScoped` bean in test sources
-  — that is exactly the "a resolver is present" configuration production runs in.
+- `GitHostFixture.seedOrigin()` asks `GitRepositoryProvider` for an empty repository and pushes one
+  commit into it over the served endpoint. `PackagedProcessIT.seedOrigin()` does the same against
+  the binary through `PUT /artifacts/git/:repoId` — no in-JVM bean there — and both ITs read every
+  ref back with `ls-remote` rather than in a directory. Tests that need the name-addressed scheme
+  register the alias on `FakeRepositoryNameResolver`, which is a plain `@ApplicationScoped` bean in
+  test sources — that is exactly the "a resolver is present" configuration production runs in.
 - `ArtifactsTestSupport` (in `artifacts/`) and `ArtifactsTestMedia` (in `service/`) are separate on
   purpose: the modules share no test classpath, the same way they do not in the monorepo. `gc/`'s
   `GcFixture` and `artifacts/`'s `SeededStoreFixture` are the same rule and the same seeding, copied
