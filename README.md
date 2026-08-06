@@ -125,7 +125,7 @@ writer this host has.
 Those routes are also why `quarkus.quinoa.ignored-path-prefixes` is spelled out in
 `application.properties` rather than left to Quinoa's derivation: Quinoa derives its ignore list
 from `quarkus.rest.path` and `quarkus.http.non-application-root-path`, and no config key names
-`/artifacts/git` at all. The six routes below match ahead of Quinoa's SPA re-route on their own, but
+`/artifacts/git` at all. The routes below match ahead of Quinoa's SPA re-route on their own, but
 the paths *between* them — `/artifacts/git/<repoId>` with no suffix — match nothing, and without the
 ignore they would answer `200 text/html` where `git` needs a 404.
 
@@ -164,6 +164,39 @@ else on this host.
 
 This base is a **cross-repo contract**: qits-ci fetches pipeline config from it and
 qits-workspace-daemon's `Provisioner` clones from it, both against the literal `/artifacts/git`.
+
+### Reading one file without cloning
+
+The wire protocol has no blob-at-path verb, so a consumer that wanted one file kept a local mirror
+and re-fetched it. Two routes on the id-addressed base answer that question directly:
+
+- `GET /artifacts/git/<repoId>/blob/<rev>/<path>` — the raw bytes, `application/octet-stream`.
+- `GET /artifacts/git/<repoId>/tree/<rev>[/<path>]` — `{"entries": [{"name", "type"}]}` for that
+  directory; no path lists the root. `type` is `blob` or `tree`, and a symlink or a submodule
+  gitlink is listed as `blob` — neither can be descended into. The order is git's own tree order.
+
+Both carry the resolved commit in a **`Git-Commit-Sha`** response header. The name deliberately
+avoids the `X-Qits-` prefix, which qits-gateway strips unconditionally — the same fact that makes
+the push bypasses push options rather than headers. It is what makes a read at a branch name
+useful: the caller learns which commit it got and can pin the next read to that sha.
+
+`<rev>` is a full sha or a ref name, resolved by JGit's `Repository.resolve`, and **any commit the
+repository holds is readable — reachable from a ref or not**. That is the point: a post-receive
+consumer reads at the sha it was told about instead of racing the branch. It costs nothing, because
+a content read walks one tree while `UploadPack`'s want policy stays `ADVERTISED` precisely to avoid
+reachability walks. A rev is one path segment, so `feature/x` is written `feature%2Fx`. Revision
+*expressions* (`main^{tree}`, `HEAD@{2}`) are refused: this route serves a sha or a ref.
+
+The answers: 200; 404 for a repository, rev or path that does not resolve, and for a path that is
+the wrong kind of object (a directory read as a blob, a file listed as a tree); 400 for a rev or
+path this route will not look up at all; 413 for a blob past the 8 MiB `MAX_BLOB_BYTES` constant,
+which is sized for source files because that is what the route is for — bulk bytes are what cloning
+is for. Reads are unauthenticated, like everything else on this host.
+
+`blob` and `tree` are literal second segments, where the name-addressed scheme carries a repository
+*name*. They are registered first, and the one request both shapes match — a clone of a repository
+actually called `blob` or `tree`, whose `info/refs` looks like a content read — is handed back to
+the router instead of answered, so no repository becomes unclonable because of what it is called.
 
 ### Where a repository lives
 

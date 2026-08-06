@@ -469,6 +469,38 @@ class PackagedProcessIT {
   }
 
   @Test
+  void contentReadsSurviveTheCompile() throws Exception {
+    // TreeWalk and RevWalk reach parts of JGit no other route here touches — object inflation and
+    // tree parsing rather than the pack machinery — and a native-image gap in any of them is a
+    // green `mvn verify` and a 500, or a silent 404, in the binary. The seeded repository holds
+    // README.md at the root, which both routes are asked about at a branch name and at a sha.
+    String repoId = seedOrigin(gitBase);
+    String head = remoteRefSha(gitBase, repoId, "refs/heads/main");
+
+    byte[] blob =
+        given()
+            .when()
+            .get("/artifacts/git/" + repoId + "/blob/main/README.md")
+            .then()
+            .statusCode(200)
+            .contentType(containsString("application/octet-stream"))
+            .header("Git-Commit-Sha", equalTo(head))
+            .extract()
+            .asByteArray();
+    assertEquals("seed\n", new String(blob));
+
+    given()
+        .when()
+        .get("/artifacts/git/" + repoId + "/tree/" + head)
+        .then()
+        .statusCode(200)
+        .contentType(containsString("application/json"))
+        .header("Git-Commit-Sha", equalTo(head))
+        .body("entries.name", hasItems("README.md"))
+        .body("entries.find { it.name == 'README.md' }.type", equalTo("blob"));
+  }
+
+  @Test
   void theShippedDefaultsLeaveTheDefaultBranchUnprotected() throws Exception {
     // The trap this feature is shaped around, asserted against the artifact that actually ships:
     // qits-artifacts is the git host that serves its own redeploy, so a protection default of TRUE

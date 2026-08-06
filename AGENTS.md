@@ -58,6 +58,11 @@ Everything that had to be declared, and the symptom each one produces if it is d
 Only the first is a build-time failure. The rest are green builds that fail in production, which is
 why the IT exists and why it drives a real `git clone`/`push` rather than asserting a status code.
 
+The git host's content reads (`blob`/`tree`) needed **nothing added** — `TreeWalk` and `RevWalk`
+read only config enums `JGitReflection` already names — but they reach JGit's object and tree
+parsing, which no other route here does, so `PackagedProcessIT.contentReadsSurviveTheCompile` is
+what says so rather than an assumption.
+
 `DfsBlockCache` is the one entry here that is **precautionary rather than earned**, and it is
 labelled so rather than quietly padding the list: the image builds green with and without it —
 measured, both ways — so nothing observed has needed it. It is the direct analogue of `WindowCache`
@@ -133,6 +138,12 @@ Two outbound/inbound addresses are contracts other repos hold:
 
 - `/artifacts/git/<repoId>` and `/artifacts/git/<projectId>/<repoName>` — dialled by qits-ci and by
   qits-workspace-daemon's `Provisioner`.
+- `/artifacts/git/<repoId>/blob/<rev>/<path>` and `/artifacts/git/<repoId>/tree/<rev>[/<path>]` —
+  the content reads qits-ci's pipeline-config reader uses instead of a local mirror. Both answer
+  the resolved commit in a `Git-Commit-Sha` header, **not** an `X-Qits-*` one: the gateway strips
+  that prefix unconditionally. `blob`/`tree` are literal second segments and the routes are
+  registered ahead of the name-addressed scheme; a clone of a repository *called* blob or tree is
+  the one overlap, and the handler `next()`s it back to the router rather than answering it.
 - `qits.ci.intake-url` → `/ci/api/events/post-receive` — qits-ci's path, not ours. The notifier
   swallows delivery failures at debug, so a wrong value here produces no error anywhere and CI
   simply never runs. It carries a bearer for `aud=qits-ci` when this deployment has client
@@ -569,7 +580,7 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 
 ## Tests
 
-- `mvn verify` runs 504 tests (115 in `artifacts/`, 18 in `git-storage/`, 125 in `gc/`, 246 in
+- `mvn verify` runs 512 tests (115 in `artifacts/`, 18 in `git-storage/`, 125 in `gc/`, 254 in
   `service/`) in about two minutes — counted from the surefire reports, which the previous figure
   here was not. Nothing here
   needs docker — and that is the constraint that shapes the registry suite: `docker`, `podman` and
@@ -620,8 +631,8 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   per-domain endpoint config. With every upstream pointed at one stub, the wire suites would pass
   just as well if the derivation were a single hardcoded host — so `MirrorEndpointsTest` is a plain
   JUnit test over the three prefilled domains, and it is what makes "table-driven" a measurement.
-- `mvn verify -Dnative` runs those, then 22 more against the compiled binary: `PackagedProcessIT`
-  (20) and `ProtectedGitHostIT` (2). They are two classes because they are two process
+- `mvn verify -Dnative` runs those, then 23 more against the compiled binary: `PackagedProcessIT`
+  (21) and `ProtectedGitHostIT` (2). They are two classes because they are two process
   configurations — `PackagedProcessIT` asserts the SHIPPED defaults leave the default branch
   unprotected, and the seatbelt cases need it on — and `@TestProfile` is per class. The protection
   cases used to turn it on per repository with one `git config` on the served bare; the override is
