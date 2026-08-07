@@ -17,6 +17,8 @@ import eu.wohlben.qits.artifacts.error.NotFoundException;
 import eu.wohlben.qits.artifacts.persistence.ArtifactRecordRepository;
 import eu.wohlben.qits.artifacts.persistence.ArtifactRepositoryRepository;
 import eu.wohlben.qits.artifacts.persistence.DaemonBinaryRepository;
+import eu.wohlben.qits.artifacts.persistence.DocsFileRepository;
+import eu.wohlben.qits.artifacts.persistence.DocsSiteRepository;
 import eu.wohlben.qits.artifacts.persistence.MavenArtifactRepository;
 import eu.wohlben.qits.artifacts.persistence.NpmDistTagRepository;
 import eu.wohlben.qits.artifacts.persistence.NpmVersionRepository;
@@ -62,6 +64,8 @@ public class ArtifactExplorerService {
   @Inject NpmDistTagRepository distTags;
   @Inject MavenArtifactRepository mavenArtifacts;
   @Inject DaemonBinaryRepository daemonBinaries;
+  @Inject DocsSiteRepository docsSites;
+  @Inject DocsFileRepository docsFiles;
   @Inject OciManifestFootprints footprints;
   @Inject BlobDiskIndex diskIndex;
   @Inject LiveBlobCensus census;
@@ -289,6 +293,9 @@ public class ArtifactExplorerService {
       // Published versions across every daemon this repository holds — one number, the same
       // type-dependent meaning the line above has.
       case DAEMON_BINARIES -> daemonBinaries.countByRepository(repository.name);
+      // Published VERSIONS, not files. A docs bundle is fifty-odd paths and none of them is an
+      // identity, so counting files here would report a number no other view of this type uses.
+      case DOCS -> docsSites.countByRepository(repository.name);
       case CI_SCREENSHOTS, CI_VIDEOS -> records.countByRepository(repository.name);
     };
   }
@@ -302,6 +309,7 @@ public class ArtifactExplorerService {
       // The union over distinct blob ids, sized from the rows — the one protocol table that has it.
       case MAVEN_PACKAGES -> mavenBytes(repository.name);
       case DAEMON_BINARIES -> daemonBytes(repository.name);
+      case DOCS -> docsBytes(repository.name);
       case CI_SCREENSHOTS, CI_VIDEOS -> recordBytes(repository.name);
     };
   }
@@ -330,6 +338,21 @@ public class ArtifactExplorerService {
   private long mavenBytes(String repository) {
     Map<String, Long> distinct = new TreeMap<>();
     for (Object[] blob : mavenArtifacts.listDistinctBlobs(repository)) {
+      distinct.putIfAbsent((String) blob[0], (Long) blob[1]);
+    }
+    return OciManifestFootprints.sum(distinct);
+  }
+
+  /**
+   * Distinct content of a docs repository — the daemon half verbatim, sized from the rows.
+   *
+   * <p>The {@code distinct} here does more work than in its two siblings: a bundle's fonts and
+   * unchanged chunks repeat across every version that references them, so the row count and the blob
+   * count differ by design and summing rows would overstate the disk several times over.
+   */
+  private long docsBytes(String repository) {
+    Map<String, Long> distinct = new TreeMap<>();
+    for (Object[] blob : docsFiles.listDistinctBlobs(repository)) {
       distinct.putIfAbsent((String) blob[0], (Long) blob[1]);
     }
     return OciManifestFootprints.sum(distinct);
