@@ -14,6 +14,7 @@ import jakarta.inject.Inject;
 import jakarta.transaction.Transactional;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
@@ -101,10 +102,47 @@ public class DocsRegistryService {
         .toList();
   }
 
-  /** Every site in the repository, by name — the catalog qits-docs lists. */
+  /** Every site in the repository, by name — the catalog qits-platform-docs lists. */
   @ActivateRequestContext
   public List<String> listNames(String repository) {
     return sites.listNames(repository);
+  }
+
+  /** One site in the catalog: what it is called, how many versions it has, and its newest. */
+  public record CatalogEntry(
+      String name, int versionCount, String latestVersion, Instant latestPublishedAt) {}
+
+  /**
+   * The whole catalog of one repository — every site with its version count and its newest version.
+   *
+   * <p><b>It carries no grouping.</b> A reader that wants scopes derives them from the names, which
+   * is where a scope lives; deciding here that {@code @qits/ui-components} belongs under
+   * {@code @qits} would put a presentation choice in the byte plane and make a second reader with a
+   * different idea impossible. The store's job is to say what exists.
+   */
+  @ActivateRequestContext
+  public List<CatalogEntry> listCatalog(String repository) {
+    List<CatalogEntry> catalog = new ArrayList<>();
+    String current = null;
+    int count = 0;
+    DocsSite newest = null;
+    // The rows arrive by name then newest-first, so the first row of each run IS that site's
+    // newest — no comparison needed, and the ordering is the query's single responsibility.
+    for (DocsSite row : sites.listAllByRepository(repository)) {
+      if (!row.name.equals(current)) {
+        if (current != null) {
+          catalog.add(new CatalogEntry(current, count, newest.version, newest.publishedAt));
+        }
+        current = row.name;
+        count = 0;
+        newest = row;
+      }
+      count++;
+    }
+    if (current != null) {
+      catalog.add(new CatalogEntry(current, count, newest.version, newest.publishedAt));
+    }
+    return List.copyOf(catalog);
   }
 
   /**

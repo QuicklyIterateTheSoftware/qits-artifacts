@@ -100,6 +100,7 @@ public class DocsRoutes {
 
     router.getWithRegex(DocsPaths.BUNDLE).blockingHandler(guarded("get version", this::version));
     router.getWithRegex(DocsPaths.SITE).blockingHandler(guarded("list versions", this::versions));
+    router.getWithRegex(DocsPaths.SITES).blockingHandler(guarded("list sites", this::sites));
 
     // The publish PUT streams rather than buffers, for the two reasons OciRequestBody exists: a
     // BodyHandler would cap at 10 MiB, and a raw HttpServerRequest read is bounded by nothing.
@@ -207,6 +208,32 @@ public class DocsRoutes {
             .orElseThrow(
                 () -> new DocsException(404, "no such docs version: " + name + "@" + version));
     respond(rc, 200, describe(site));
+  }
+
+  /**
+   * {@code GET …/<repository>} — every site, with its version count and its newest.
+   *
+   * <p>Flat, and ungrouped on purpose: a scope lives in a site's name, so a reader that wants to
+   * show {@code @qits/ui-components} under {@code @qits} derives that itself. Deciding it here would
+   * put a presentation choice in the byte plane and make a second reader with a different idea
+   * impossible.
+   */
+  private void sites(RoutingContext rc) {
+    String repository = rc.pathParam("repository");
+    registry.requireDocsRepository(repository);
+
+    JsonArray listed = new JsonArray();
+    for (DocsRegistryService.CatalogEntry entry : registry.listCatalog(repository)) {
+      listed.add(
+          new JsonObject()
+              .put("name", entry.name())
+              .put("versionCount", entry.versionCount())
+              .put("latestVersion", entry.latestVersion())
+              .put("latestPublishedAt", entry.latestPublishedAt().toString()));
+    }
+    // An empty store is an empty list and a 200, not a 404: "nothing is published yet" is a fact
+    // about the platform that a catalog page has to be able to render.
+    respond(rc, 200, new JsonObject().put("sites", listed));
   }
 
   /**

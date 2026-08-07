@@ -77,6 +77,14 @@ final class DocsPaths {
    */
   private static final String PATH = "(?<path>.+)";
 
+  /**
+   * {@code /artifacts/docs/<repository>} — every site, with its version count and its newest.
+   *
+   * <p>Cannot collide with {@link #SITE}: that one needs a name segment after the repository, and
+   * this one is the repository alone.
+   */
+  static final String SITES = route(REPOSITORY);
+
   /** {@code /artifacts/docs/<repository>/<site>} — the version list. */
   static final String SITE = route(REPOSITORY + "/" + NAME);
 

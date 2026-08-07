@@ -21,7 +21,7 @@ public class DocsSiteRepository implements PanacheRepositoryBase<DocsSite, DocsS
     return list("repository = ?1 and name = ?2 order by publishedAt desc", repository, name);
   }
 
-  /** Every site in one repository, by name — the catalog qits-docs lists. */
+  /** Every site in one repository, by name — the catalog qits-platform-docs lists. */
   public List<String> listNames(String repository) {
     return getEntityManager()
         .createQuery(
@@ -30,6 +30,20 @@ public class DocsSiteRepository implements PanacheRepositoryBase<DocsSite, DocsS
             String.class)
         .setParameter("repository", repository)
         .getResultList();
+  }
+
+  /**
+   * Every published version of every site in one repository, by site name then newest first — one
+   * query behind the whole catalog.
+   *
+   * <p>Rows rather than a {@code group by}, and that is a size judgement rather than a shortcut: a
+   * docs store holds sites times a handful of retained versions, so the whole table is small and
+   * grouping it in Java costs nothing — while a {@code group by} would answer counts and a maximum
+   * timestamp but not the newest version's <em>name</em>, which is the one thing the catalog exists
+   * to show. Revisit if a store ever holds thousands of sites.
+   */
+  public List<DocsSite> listAllByRepository(String repository) {
+    return list("repository = ?1 order by name, publishedAt desc", repository);
   }
 
   /**

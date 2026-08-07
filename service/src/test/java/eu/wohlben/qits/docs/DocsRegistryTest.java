@@ -328,8 +328,44 @@ class DocsRegistryTest {
   @Test
   void theBaseItselfIsAPlainTextFourHundredAndFour() {
     try (DocsClient client = client()) {
+      // The base names no repository, so there is nothing to list.
       assertEquals(404, client.getAbsolute("/artifacts/docs").statusCode());
-      assertEquals(404, client.getAbsolute("/artifacts/docs/docs").statusCode());
+    }
+  }
+
+  @Test
+  void theRepositoryItselfIsTheCatalog() {
+    // One site per name with its version count and its newest — flat and ungrouped, because a scope
+    // lives in the name and deciding that @qits/ui-components belongs under @qits is a reading
+    // choice this service does not get to make for every reader.
+    String salt = salt();
+    String site = "@qits/ui-" + salt;
+    try (DocsClient client = client()) {
+      client.publish(site, "2026.806.1", TinyBundle.storybookLike(salt).toTarGz());
+      client.publish(site, "2026.807.1", TinyBundle.storybookLike(salt + "b").toTarGz());
+
+      JsonArray listed =
+          new JsonObject(client.getAbsolute("/artifacts/docs/docs").body()).getJsonArray("sites");
+      JsonObject mine = null;
+      for (int i = 0; i < listed.size(); i++) {
+        if (site.equals(listed.getJsonObject(i).getString("name"))) {
+          mine = listed.getJsonObject(i);
+        }
+      }
+      assertNotNull(mine, "the catalog must list a site that has just been published");
+      assertEquals(2, mine.getInteger("versionCount"));
+      assertEquals("2026.807.1", mine.getString("latestVersion"), "newest, not first");
+    }
+  }
+
+  @Test
+  void anEmptyCatalogIsAnEmptyListAndNotAFourHundredAndFour() {
+    // "Nothing is published yet" is a fact a catalog page has to be able to render. This suite has
+    // published plenty, so the assertion is on the shape rather than on emptiness.
+    try (DocsClient client = client()) {
+      var response = client.getAbsolute("/artifacts/docs/docs");
+      assertEquals(200, response.statusCode());
+      assertNotNull(new JsonObject(response.body()).getJsonArray("sites"));
     }
   }
 
