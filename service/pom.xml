@@ -150,6 +150,14 @@
             <artifactId>quarkus-quinoa</artifactId>
         </dependency>
         <dependency>
+            <!-- Reads the tar inside a docs bundle. DocsRoutes streams the upload to a temp file,
+                 then walks the archive one entry at a time into BlobStore — so the whole bundle is
+                 never in memory and no entry is trusted to name its own destination. The gzip half
+                 is the JDK's; this is the tar half only. -->
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-compress</artifactId>
+        </dependency>
+        <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-junit5</artifactId>
             <scope>test</scope>

@@ -27,20 +27,21 @@ class ArtifactsRepositorySeederTest extends ArtifactsTestSupport {
   @Inject OciMirrorUpstreams upstreams;
 
   @Test
-  void seedsTheTwoCiTypesThePlatformImageRepositoryTheTwoNpmRootsTheMavenAndDaemonRootsAndTheThreeMirrorNamespaces() {
+  void seedsTheTwoCiTypesThePlatformImageRepositoryTheTwoNpmRootsTheMavenDaemonAndDocsRootsAndTheThreeMirrorNamespaces() {
     seeder.ensureDefaults();
     assertEquals(
-        Map.of(
-            ArtifactsRepositorySeeder.CI_SCREENSHOTS, RepositoryType.CI_SCREENSHOTS,
-            ArtifactsRepositorySeeder.CI_VIDEOS, RepositoryType.CI_VIDEOS,
-            ArtifactsRepositorySeeder.IMAGES, RepositoryType.OCI_IMAGES,
-            ArtifactsRepositorySeeder.NPM, RepositoryType.NPM_PACKAGES,
-            ArtifactsRepositorySeeder.NPM_PROXY, RepositoryType.NPM_PROXY,
-            ArtifactsRepositorySeeder.MAVEN, RepositoryType.MAVEN_PACKAGES,
-            ArtifactsRepositorySeeder.DAEMONS, RepositoryType.DAEMON_BINARIES,
-            "hub", RepositoryType.OCI_MIRROR,
-            "quay", RepositoryType.OCI_MIRROR,
-            "redhat", RepositoryType.OCI_MIRROR),
+        Map.ofEntries(
+            Map.entry(ArtifactsRepositorySeeder.CI_SCREENSHOTS, RepositoryType.CI_SCREENSHOTS),
+            Map.entry(ArtifactsRepositorySeeder.CI_VIDEOS, RepositoryType.CI_VIDEOS),
+            Map.entry(ArtifactsRepositorySeeder.IMAGES, RepositoryType.OCI_IMAGES),
+            Map.entry(ArtifactsRepositorySeeder.NPM, RepositoryType.NPM_PACKAGES),
+            Map.entry(ArtifactsRepositorySeeder.NPM_PROXY, RepositoryType.NPM_PROXY),
+            Map.entry(ArtifactsRepositorySeeder.MAVEN, RepositoryType.MAVEN_PACKAGES),
+            Map.entry(ArtifactsRepositorySeeder.DAEMONS, RepositoryType.DAEMON_BINARIES),
+            Map.entry(ArtifactsRepositorySeeder.DOCS, RepositoryType.DOCS),
+            Map.entry("hub", RepositoryType.OCI_MIRROR),
+            Map.entry("quay", RepositoryType.OCI_MIRROR),
+            Map.entry("redhat", RepositoryType.OCI_MIRROR)),
         seededTypesByName());
   }
 
@@ -65,7 +66,7 @@ class ArtifactsRepositorySeederTest extends ArtifactsTestSupport {
     // the seed must never be what keeps a restarted instance from coming up.
     seeder.ensureDefaults();
     seeder.ensureDefaults();
-    assertEquals(10, service.list().size());
+    assertEquals(11, service.list().size());
     assertEquals(3, upstreams.list().size());
   }
 

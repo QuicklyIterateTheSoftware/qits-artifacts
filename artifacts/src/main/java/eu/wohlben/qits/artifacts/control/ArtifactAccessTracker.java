@@ -2,6 +2,7 @@ package eu.wohlben.qits.artifacts.control;
 
 import eu.wohlben.qits.artifacts.persistence.ArtifactRecordRepository;
 import eu.wohlben.qits.artifacts.persistence.DaemonBinaryRepository;
+import eu.wohlben.qits.artifacts.persistence.DocsSiteRepository;
 import eu.wohlben.qits.artifacts.persistence.MavenArtifactRepository;
 import eu.wohlben.qits.artifacts.persistence.NpmVersionRepository;
 import eu.wohlben.qits.artifacts.persistence.OciManifestRepository;
@@ -24,6 +25,7 @@ public class ArtifactAccessTracker {
   @Inject NpmVersionRepository npmVersions;
   @Inject MavenArtifactRepository mavenArtifacts;
   @Inject DaemonBinaryRepository daemonBinaries;
+  @Inject DocsSiteRepository docsSites;
 
   @Transactional
   public void touchArtifact(String repository, String blobId, Instant now) {
@@ -66,6 +68,19 @@ public class ArtifactAccessTracker {
   @Transactional
   public void touchDaemonBinary(String repository, String name, String version, Instant now) {
     daemonBinaries.touch(repository, name, version, cutoff(now), now);
+  }
+
+  /**
+   * One published docs version, reached by any file in it.
+   *
+   * <p>There is no per-file twin and no {@code docs_file} column to write: the site is what ages out
+   * and so the site is what records being wanted. It also makes the coalescing matter more than
+   * anywhere else here — one page load is fifty requests against one row, and the one-hour window
+   * turns that into a single update.
+   */
+  @Transactional
+  public void touchDocsSite(String repository, String name, String version, Instant now) {
+    docsSites.touch(repository, name, version, cutoff(now), now);
   }
 
   private static Instant cutoff(Instant now) {

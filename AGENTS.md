@@ -85,6 +85,7 @@ gateway. Five second-level segments and the segment itself, plus one root-level 
 | `/artifacts/npm/**` | raw Vert.x routes in `NpmRoutes` (the npm registry, hosted + proxy) | **nothing** — a literal, and `NpmPaths.BASE` is the only place it is spelled |
 | `/artifacts/maven/**` | raw Vert.x routes in `MavenRoutes` (the maven repository, hosted) | **nothing** — a literal, and `MavenPaths.BASE` is the only place it is spelled |
 | `/artifacts/daemons/**` | raw Vert.x routes in `DaemonRoutes` (the platform's own daemon binaries) | **nothing** — a literal, and `DaemonPaths.BASE` is the only place it is spelled |
+| `/artifacts/docs/**` | raw Vert.x routes in `DocsRoutes` (published documentation bundles) | **nothing** — a literal, and `DocsPaths.BASE` is the only place it is spelled |
 | `/v2/**` | raw Vert.x routes in `RegistryRoutes` (the OCI Distribution API) | **nothing** — a literal, and not under `/artifacts` at all |
 
 `/artifacts/npm` is *not* forced on us the way `/v2` is: npm accepts a registry URL of any depth, so
@@ -98,7 +99,7 @@ The SPA is the one that takes the *whole* segment, so it is the one that can swa
 Quinoa's SPA re-route is a catch-all at `/artifacts/*` registered near-last, so anything with a real
 route in front of it still wins — but a request matching **no** route is rerouted to `index.html` and
 answers `200 text/html`. `quarkus.quinoa.ignored-path-prefixes` is what stops that, and it is set
-explicitly (`/api,/q,/git,/npm,/maven,/daemons,/v2`) rather than left to Quinoa's derivation,
+explicitly (`/api,/q,/git,/npm,/maven,/daemons,/docs,/v2`) rather than left to Quinoa's derivation,
 because the
 derivation reads `quarkus.rest.path` and `quarkus.http.non-application-root-path` and **nothing
 names `/git`, `/npm`, `/maven` or `/daemons`**. `/daemons` is the least forgiving omission of the
@@ -276,7 +277,11 @@ moved when the upstream could not be reached (a failed check that touched it wou
 next attempt for a whole TTL). The maven repository owns one (V8): `maven_artifact`, path-keyed
 with its `size_bytes` beside the blob id. The daemon-binaries type owns one (V10): `daemon_binary`,
 keyed `(repository, name, version)` with its `size_bytes` beside the blob id too — those two are the
-protocol tables the census sizes without a disk read. `daemon_binary` deliberately holds **no
+protocol tables the census sizes without a disk read. The docs type owns two (V12): `docs_site`, keyed
+`(repository, name, version)`, and `docs_file`, whose key is that plus the path and whose foreign
+key **cascades** — that cascade is what makes a *version* the unit of eviction at the schema level,
+so no sweep, bug or hand-written query can leave a site half-collected and serving 404s from a
+version that still lists itself. `daemon_binary` deliberately holds **no
 prefill**: adopting the ELF blobs already on a deployment's volume is an ops action, because the
 lineage must not embed live-platform digests and a migration cannot verify one against the running
 store. Access tracking owns two: V9 put a nullable `accessed_at` on `artifact_record`,
@@ -419,7 +424,8 @@ collection" section is the contract; these are the rules that get "helpfully" re
   2026-08-05) replaced the bespoke strategies with `CacheEvictionStrategy` + `OwnArtifactsStrategy`,
   mapped onto types by `qits.artifacts.gc.type.<wire-name>.strategy|window` (`GcTypeConfig`).
   `oci-mirror` and `npm-proxy` run the cache engine; `oci-images`, `daemon-binaries`,
-  `npm-packages` and `maven-packages` run the own engine; only the two CI types are `excluded`, and
+  `npm-packages`, `maven-packages` and `docs` run the own engine; only the two CI types are
+  `excluded`, and
   that is a decision rather than a gap. `GcTypeConfigTest` is the guard, and it is edited
   **deliberately, once per workstream**: the moving types' new dead sets are written out there, and
   every other type stays identity-for-identity as it was.
@@ -486,10 +492,10 @@ collection" section is the contract; these are the rules that get "helpfully" re
   `qits.artifacts.gc`: a mapping rooted at the wider prefix would claim `blob-grace-period` and the
   pin urls, which other classes read.
 
-Eight strategy classes exist, one per type, and **six of them are thin binders rather than rules** —
+Nine strategy classes exist, one per type, and **seven of them are thin binders rather than rules** —
 `OciMirrorGcStrategy` and `NpmProxyGcStrategy` on the cache engine, `OciImageGcStrategy`,
-`DaemonBinariesGcStrategy`, `NpmPackagesGcStrategy` and `MavenPackagesGcStrategy` on the own
-engine, each naming its `*GcAdapter` and nothing else. A class that is four lines long is doing its
+`DaemonBinariesGcStrategy`, `NpmPackagesGcStrategy`, `MavenPackagesGcStrategy` and
+`DocsGcStrategy` on the own engine, each naming its `*GcAdapter` and nothing else. A class that is four lines long is doing its
 job; a rule appearing in one is the settlement being unpicked one type at a time. The two CI stubs
 (`CiScreenshotsGcStrategy`, `CiVideosGcStrategy`) are the exception and are deliberately two
 classes, because their intended rules diverge in kind (branch-scoped against byte-budgeted) and one
@@ -791,9 +797,9 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 - The blob store's `RepositoryType` enum hardcodes its types. Adding one is a schema check
   constraint change plus a validation profile, not a config knob — since V2 the constraint is named
   (`ck_artifact_repository_type`), so widening it is a one-liner (V3 is that one-liner, twice over).
-- **The six protocol types' profiles are empty and their `maxBytes()` is `0`, and that is not an
-  oversight.** `OCI_IMAGES`, `NPM_PACKAGES`, `NPM_PROXY`, `OCI_MIRROR`, `MAVEN_PACKAGES` and
-  `DAEMON_BINARIES` never
+- **The seven protocol types' profiles are empty and their `maxBytes()` is `0`, and that is not an
+  oversight.** `OCI_IMAGES`, `NPM_PACKAGES`, `NPM_PROXY`, `OCI_MIRROR`, `MAVEN_PACKAGES`,
+  `DAEMON_BINARIES` and `DOCS` never
   flow through
   `BlobService` — their
   bytes arrive on their own wire routes and go straight to `BlobStore` — so there is no media type to

@@ -2,8 +2,9 @@
 
 qits' **byte plane**: the metadata-rich blob store, the in-process git smart-HTTP host workspace
 containers clone from and push to, the OCI registry they pull images from, the npm registry —
-hosted, plus a pull-through cache of npmjs — they install from, and the maven repository they
-deploy their own library to.
+hosted, plus a pull-through cache of npmjs — they install from, the maven repository they deploy
+their own library to, and the documentation bundles the platform publishes and qits-platform-docs
+serves back.
 
 One repo, because every one of them is "qits serves bytes over HTTP against on-disk state it owns"
 and none has an inbound edge from the rest of qits. The protocol registries are the third through
@@ -38,7 +39,8 @@ keeps a retention rule out of the write path. Where a strategy needs one of the 
     ./mvnw verify
     java -jar service/target/quarkus-app/quarkus-run.jar   # :8080 — SPA /artifacts/, blobs /artifacts/api/**,
                                                            #         git /artifacts/git/**, npm /artifacts/npm/**,
-                                                           #         maven /artifacts/maven/**, images /v2/**
+                                                           #         maven /artifacts/maven/**, docs /artifacts/docs/**,
+                                                           #         images /v2/**
 
     ./mvnw verify -Dnative
     ./service/target/qits-artifacts                        # same routes, ~35ms to listening
@@ -73,7 +75,8 @@ Everything is served under the `/artifacts` gateway segment, because `qits-gatew
 verbatim by prefix and rewrites nothing — there is no unprefixed form, on `qits-net` either.
 
 Note the route stacks resolve differently: `/artifacts/api/**` is JAX-RS and moves with
-`quarkus.rest.path`; `/artifacts/git/**`, `/artifacts/npm/**`, `/artifacts/maven/**` and `/v2/**`
+`quarkus.rest.path`; `/artifacts/git/**`, `/artifacts/npm/**`, `/artifacts/maven/**`,
+`/artifacts/docs/**` and `/v2/**`
 are registered straight onto the Vert.x router with the segment as a literal, and do not. A `git
 clone http://<host>/artifacts/git/<repoId>` against the packaged process is the check that matters,
 because nothing in the JAX-RS configuration can prove it.
@@ -833,6 +836,61 @@ The publish `PUT` streams rather than buffers, capped by `qits.artifacts.daemon.
 (default 256M). It uses **no `BodyHandler`**, and that is the point: vertx-web defaults one to
 10 MiB and the binary is 43 MB, so the obvious implementation would have 413'd every real publish
 while passing every test small enough to be quick.
+
+## The documentation bundles
+
+`DocsRoutes` serves published documentation sites at `/artifacts/docs/<repository>/<site>/-/<version>`.
+`docs` (type `docs`) is seeded at startup alongside `npm`, `npmjs`, `maven` and `daemons`.
+
+```
+PUT  /artifacts/docs/<repo>/<site>/-/<version>          publish one bundle — a streamed .tar.gz
+GET  /artifacts/docs/<repo>/<site>/-/<version>/<path>   one file of it, zero-copy
+GET  /artifacts/docs/<repo>/<site>/-/<version>          that version's metadata, as JSON
+GET  /artifacts/docs/<repo>/<site>                      its versions, newest first
+DELETE anywhere under the base                          405 — no delete; the append-only stance
+anything else under the base                            404 with a short text body, never HTML
+```
+
+A `<site>` is whatever namespacing the publishing project already uses — `@qits/ui-components` where
+there is an npm package, `someproject/somelib` where there is not, up to four segments. **The `/-/`
+between the name and the version is npm's separator, reused**: `/artifacts/npm/<repo>/<pkg>/-/<file>`
+has had it all along, and a multi-segment name needs a marker or `<name>/<version>/<path>` could be
+split more than one way. What closes the ambiguity is the segment shape rather than route ordering —
+a bare `-` cannot begin a name segment, which `DocsPathsTest` pins.
+
+**A whole bundle is one request, and a version is the unit of everything.** The `PUT` streams a
+`.tar.gz` to a temp file, walks it entry by entry into `BlobStore`, and writes one `docs_site` row
+plus one `docs_file` row per path — **all in one transaction**. So a version is either wholly
+published or not published at all, which matters more here than for any single-file type: a
+half-written site is one that lists itself and then 404s its own stylesheet, which reads as a broken
+deployment rather than a failed publish. Eviction is the same shape from the other end — the
+`docs_file` foreign key cascades, so a GC strategy plans one candidate per *version* and there is no
+coordinate for a per-file one.
+
+**Exploded into blobs, not stored as a tarball**, and the dedupe is the reason. Every file is an
+ordinary content-addressed blob, so serving one is a row read and a `sendFile` with no unpacking and
+no extraction cache — and, far more valuably, unchanged fonts and chunks are byte-identical between
+releases and are stored once. Measured on the real Storybook bundle: 53 files, 9.93 MB, and a second
+version differing only in `index.html` added **one** blob.
+
+**Versions are immutable**: re-publishing is `409` even for identical bytes, `daemon_binary`'s stance
+and its reasoning. That is what lets qits-platform-docs be stateless — `latest` is a query over these
+rows rather than a pointer something has to keep correct.
+
+**A hostile archive has nowhere to land, structurally.** An entry's bytes go into `BlobStore` under
+their own SHA-256 at a path it computes; the entry's *name* survives only as a database string, so
+there is no `resolve(entry.getName())` anywhere in this service. Traversing and absolute names are
+refused anyway, as defence in depth. What is left is size, and a compressed archive makes that cheap
+to send — so the cap (`qits.artifacts.docs.max-bundle-size`, default 256M) is checked against the
+**uncompressed** running total and the file count, not against `Content-Length`, which measures the
+wrong number entirely.
+
+**Nothing here is authenticated**, the posture `/v2`, `/artifacts/npm`, `/artifacts/maven` and
+`/artifacts/daemons` all hold, and for the same reason: a version is immutable, so an open publish
+can add one and can never change one.
+
+`media_type` is resolved from the file **extension** at publish and stored, never sniffed —
+`MediaTypeSniffer` has no `woff2` entry and would reject exactly the files a static site is made of.
 
 ## The explorer API
 

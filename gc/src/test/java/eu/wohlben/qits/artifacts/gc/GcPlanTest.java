@@ -47,6 +47,7 @@ class GcPlanTest extends GcFixture {
     // The report a reviewer sees first. "Nothing to collect", "refused to plan" and a real plan are
     // three different facts, so every type is listed with its own reason rather than omitted. Six
     // types demonstrate the refusal here: every type on an engine reads live pins, this suite has no
+    // (seven with docs, which reads no pin source of its own but still takes the digest floor)
     // qits-platform-deployments and no qits-ci, and a keep-set that cannot be established reclaims nothing. The two CI
     // stubs are the second — zero rows, a named intended rule, and a note saying the loop has never
     // produced content.
@@ -57,6 +58,7 @@ class GcPlanTest extends GcFixture {
             "CiScreenshotsGcStrategy",
             "CiVideosGcStrategy",
             "DaemonBinariesGcStrategy",
+            "DocsGcStrategy",
             "MavenPackagesGcStrategy",
             "NpmPackagesGcStrategy",
             "NpmProxyGcStrategy",

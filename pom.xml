@@ -78,6 +78,10 @@
              older core runs on a newer one. 2.8.3 is built against 3.36.2 and would be an extension
              asking this core for API it may not have. Bump it only past a platform bump. -->
         <quinoa.version>2.8.2</quinoa.version>
+        <!-- Not in the platform BOM either. Reads the tar inside a docs bundle's .tar.gz; the gzip
+             half is the JDK's. Pure stream parsing with no reflection, so it needs nothing
+             registered for the native image — which `mvn verify -Dnative` is what proves. -->
+        <commons-compress.version>1.28.0</commons-compress.version>
         <failsafe-plugin.version>${surefire-plugin.version}</failsafe-plugin.version>
 
         <!-- Integration tests run against a PACKAGED artifact, so a plain `mvn verify` — which
@@ -115,6 +119,11 @@
                 <groupId>io.quarkiverse.quinoa</groupId>
                 <artifactId>quarkus-quinoa</artifactId>
                 <version>${quinoa.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.commons</groupId>
+                <artifactId>commons-compress</artifactId>
+                <version>${commons-compress.version}</version>
             </dependency>
             <!-- The reactor's own modules, so `service` depends on them version-less. -->
             <dependency>
