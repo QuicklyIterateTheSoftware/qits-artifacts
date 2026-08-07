@@ -128,18 +128,18 @@ class OciImagesGcAdapterTest extends GcFixture {
     // would be the drift the pin port exists to remove.
     repository();
     String config = config();
-    tag("qits-cd", SHA_A, image("qits-cd", config, 301), daysAgo(400));
-    tag("qits-cd", SHA_B, image("qits-cd", config, 302), daysAgo(300));
-    tag("qits-cd", SHA_C, image("qits-cd", config, 303), daysAgo(200));
-    tag("qits-cd", SHA_D, image("qits-cd", config, 304), daysAgo(100));
+    tag("qits-platform-deployments", SHA_A, image("qits-platform-deployments", config, 301), daysAgo(400));
+    tag("qits-platform-deployments", SHA_B, image("qits-platform-deployments", config, 302), daysAgo(300));
+    tag("qits-platform-deployments", SHA_C, image("qits-platform-deployments", config, 303), daysAgo(200));
+    tag("qits-platform-deployments", SHA_D, image("qits-platform-deployments", config, 304), daysAgo(100));
 
-    GcStrategy.Plan plan = strategy.plan(census.take(), pinning("qits-cd", SHA_A, SHA_B));
+    GcStrategy.Plan plan = strategy.plan(census.take(), pinning("qits-platform-deployments", SHA_A, SHA_B));
 
-    assertEquals(GcPins.BY_CD, ruleFor(plan.kept(), "qits-cd:" + SHA_A));
-    assertEquals(GcPins.BY_CD, ruleFor(plan.kept(), "qits-cd:" + SHA_B));
+    assertEquals(GcPins.BY_CD, ruleFor(plan.kept(), "qits-platform-deployments:" + SHA_A));
+    assertEquals(GcPins.BY_CD, ruleFor(plan.kept(), "qits-platform-deployments:" + SHA_B));
     assertEquals(
-        OwnArtifactsStrategy.deadUnaccessed(WINDOW), ruleFor(plan.dead(), "qits-cd:" + SHA_C));
-    assertEquals(OciImagesGcAdapter.KEPT_NEWEST, ruleFor(plan.kept(), "qits-cd:" + SHA_D));
+        OwnArtifactsStrategy.deadUnaccessed(WINDOW), ruleFor(plan.dead(), "qits-platform-deployments:" + SHA_C));
+    assertEquals(OciImagesGcAdapter.KEPT_NEWEST, ruleFor(plan.kept(), "qits-platform-deployments:" + SHA_D));
   }
 
   @Test
@@ -268,11 +268,11 @@ class OciImagesGcAdapterTest extends GcFixture {
             "",
             Set.of(),
             Set.of(),
-            List.of("qits-cd deployment pins: unreachable at http://qits-cd:8080/cd/api"));
+            List.of("qits-platform-deployments deployment pins: unreachable at http://qits-platform-deployments:8080/platform-deployments/api"));
 
     IllegalStateException aborted =
         assertThrows(IllegalStateException.class, () -> strategy.plan(taken, broken));
-    assertTrue(aborted.getMessage().contains("qits-cd"));
+    assertTrue(aborted.getMessage().contains("qits-platform-deployments"));
     assertTrue(strategy.readsPins(), "and it says so, which is what makes the planner skip it");
   }
 

@@ -344,7 +344,7 @@ class GcSweepExecutorTest extends GcFixture {
     GcRepositorySweepReport report = executor.sweep("npm");
 
     assertNotNull(report.aborted());
-    assertTrue(report.aborted().contains("qits-cd"), report.aborted());
+    assertTrue(report.aborted().contains("qits-platform-deployments"), report.aborted());
     assertTrue(report.aborted().contains("qits-ci"), report.aborted());
     assertEquals(List.of(), report.deleted());
     assertEquals(0, report.sweep().blobsUnlinked());

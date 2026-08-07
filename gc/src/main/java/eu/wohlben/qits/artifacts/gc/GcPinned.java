@@ -9,7 +9,7 @@ package eu.wohlben.qits.artifacts.gc;
  * breaks a restart.
  *
  * <p>The rule comes back as a sentence rather than a boolean so the report can name the pin that
- * saved an identity ("pinned by qits-cd deployment", "pinned by qits-ci daemon ladder"). A keep with
+ * saved an identity ("pinned by a qits-platform-deployments deployment", "pinned by qits-ci daemon ladder"). A keep with
  * no rule beside it is a line nobody can argue with, which is the property the whole dry-run rests
  * on.
  *

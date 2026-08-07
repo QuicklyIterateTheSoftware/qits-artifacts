@@ -17,14 +17,14 @@ import java.util.List;
  * reviewer can compare against the {@code kept} lists further down the report. An empty keeps list
  * beside {@code answered: true} is an answer too: qits-ci saying no daemon is pinned.
  *
- * @param source the service asked — {@code qits-cd} or {@code qits-ci}
+ * @param source the service asked — {@code qits-platform-deployments} or {@code qits-ci}
  * @param url the full url this run called, so a reviewer can repeat the request by hand
  * @param answered whether it answered at all. False is what makes the whole run refuse: a sweep
  *     aborts before the census and a plan reports itself non-executable.
  * @param outcome one sentence — what it answered, or why it could not
  * @param readAt when the call was made. Pins are never cached, so this is always within this run.
  * @param tookMillis how long it took, including a connect that failed
- * @param pinCount how many pins the source reported: applications for qits-cd, ladder rungs for
+ * @param pinCount how many pins the source reported: applications for qits-platform-deployments, ladder rungs for
  *     qits-ci
  * @param keeps the keep-identities the answer resolved to, sorted — {@code qits-ci:3ff84c05…} per
  *     pinned image sha, {@code qits-ci-daemon@2026.802.40} per rung, and {@code blob <digest>} for a

@@ -26,12 +26,12 @@ import org.junit.jupiter.api.Test;
  * What a run does when a pin source cannot answer: the sweep refuses whole, the dry-run degrades.
  *
  * <p>This suite runs under the shipped test configuration, which points both pin urls at a closed
- * port — so every case here is the deployed failure rather than a simulated one. Neither qits-cd nor
+ * port — so every case here is the deployed failure rather than a simulated one. Neither qits-platform-deployments nor
  * qits-ci exists in this repository, and that is what makes the refusal path the easy one to
  * exercise honestly.
  *
  * <p><b>The settlement's rule is all-or-nothing, and the second case is why.</b> It would be
- * tempting to let the types that read no pins run anyway — npm's rule needs nothing from qits-cd.
+ * tempting to let the types that read no pins run anyway — npm's rule needs nothing from qits-platform-deployments.
  * But blobs dedupe globally: a tarball npm releases may be the last reference to bytes an image a
  * deployment pins also names, and with the pins unavailable nothing can tell. So the run stops
  * before the census, and the receipt says why.
@@ -56,16 +56,16 @@ class GcPinsTest extends GcFixture {
 
     assertFalse(pins.complete());
     assertEquals(2, pins.failures().size(), "both sources are asked, so both outages are named");
-    assertTrue(pins.whyIncomplete().contains("qits-cd"));
+    assertTrue(pins.whyIncomplete().contains("qits-platform-deployments"));
     assertTrue(pins.whyIncomplete().contains("qits-ci"));
 
     // And the provenance says which url produced which outage, so a fix starts from the report
     // rather than from a grep for the config key.
     assertEquals(2, pins.sources().size());
-    GcPinSource cd = source(pins, "qits-cd");
+    GcPinSource cd = source(pins, "qits-platform-deployments");
     assertFalse(cd.answered());
-    assertTrue(cd.url().endsWith("/cd/api/pins"), cd.url());
-    assertTrue(cd.outcome().contains("qits-cd"), cd.outcome());
+    assertTrue(cd.url().endsWith("/platform-deployments/api/pins"), cd.url());
+    assertTrue(cd.outcome().contains("qits-platform-deployments"), cd.outcome());
     assertEquals(0, cd.pinCount());
     assertEquals(List.of(), cd.keeps());
     assertTrue(source(pins, "qits-ci").url().endsWith("/ci/api/daemon"));
@@ -76,22 +76,23 @@ class GcPinsTest extends GcFixture {
     // The pins section a healthy run carries, which is the half of a keep-set a reviewer can check
     // against their own deployments: not "3 pins" but which image at which sha, and — for the
     // daemon — the blob a digest rung protects beside the row it names. Built by hand because
-    // neither qits-cd nor qits-ci exists in this repository.
+    // neither qits-platform-deployments nor qits-ci exists in this repository.
     GcPinSources sources = new GcPinSources();
     sources.cd =
         () ->
             List.of(
                 new CdDeploymentPins.ApplicationPin("qits-ci", List.of("aaaa", "bbbb")),
-                new CdDeploymentPins.ApplicationPin("qits-cd", List.of("cccc")));
+                new CdDeploymentPins.ApplicationPin("qits-platform-deployments", List.of("cccc")));
     sources.ci = () -> new CiDaemonPins.DaemonPin("qits-ci-daemon", DIGEST, "2026.802.40", "adopted");
 
     GcPins pins = sources.fetch();
 
     assertTrue(pins.complete());
-    GcPinSource cd = source(pins, "qits-cd");
+    GcPinSource cd = source(pins, "qits-platform-deployments");
     assertTrue(cd.answered());
-    assertEquals(2, cd.pinCount(), "applications, which is what cd answers with");
-    assertEquals(List.of("qits-cd:cccc", "qits-ci:aaaa", "qits-ci:bbbb"), cd.keeps());
+    assertEquals(2, cd.pinCount(), "applications, which is what the deployer answers with");
+    // Sorted: the keeps are a TreeSet, so this is name order and not the order the pins arrived in.
+    assertEquals(List.of("qits-ci:aaaa", "qits-ci:bbbb", "qits-platform-deployments:cccc"), cd.keeps());
     assertTrue(cd.outcome().contains("3 image shas"), cd.outcome());
     assertTrue(cd.tookMillis() >= 0);
 
@@ -144,7 +145,7 @@ class GcPinsTest extends GcFixture {
     GcSweepReport report = executor.sweep();
 
     assertNotNull(report.aborted(), "a receipt of a run that never started still says why");
-    assertTrue(report.aborted().contains("qits-cd"));
+    assertTrue(report.aborted().contains("qits-platform-deployments"));
     assertTrue(report.aborted().contains("qits-ci"));
     assertFalse(report.dryRun(), "it is still the execute surface's receipt");
     assertEquals(RepositoryType.values().length, report.types().size());

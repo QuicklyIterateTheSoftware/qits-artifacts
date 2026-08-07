@@ -15,9 +15,9 @@ import java.util.List;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /**
- * One GET on qits-net, at plan time, every time: {@code GET /cd/api/pins}.
+ * One GET on qits-net, at plan time, every time: {@code GET /platform-deployments/api/pins}.
  *
- * <p><b>One call, not two, and cd's rule rather than ours.</b> This used to list environments and
+ * <p><b>One call, not two, and the deployer's rule rather than ours.</b> This used to list environments and
  * then each environment's deployments, and derive the keep-set here. cd answers the question
  * directly now — {@code {"pins":[{"applicationName":…,"shas":[…]}]}}, a union over every
  * environment — so the derivation is gone along with the bug it carried, and the request count is
@@ -72,7 +72,7 @@ public class CdHttpDeploymentPins implements CdDeploymentPins {
     JsonNode body = get(url);
     JsonNode pins = body.get("pins");
     if (pins == null || !pins.isArray()) {
-      throw new IllegalStateException("qits-cd answered without a 'pins' array for " + url);
+      throw new IllegalStateException("qits-platform-deployments answered without a 'pins' array for " + url);
     }
     List<ApplicationPin> rows = new ArrayList<>();
     for (JsonNode pin : pins) {
@@ -82,7 +82,7 @@ public class CdHttpDeploymentPins implements CdDeploymentPins {
         // A pin cd cannot name an image for pins nothing, and guessing is how a pinned tag gets
         // deleted. Refusing the whole answer is the honest response to a shape this does not know.
         throw new IllegalStateException(
-            "qits-cd returned a pin with no applicationName or no shas array");
+            "qits-platform-deployments returned a pin with no applicationName or no shas array");
       }
       List<String> commits = new ArrayList<>();
       for (JsonNode sha : shas) {
@@ -102,11 +102,11 @@ public class CdHttpDeploymentPins implements CdDeploymentPins {
               HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
       if (response.statusCode() != 200) {
         throw new IllegalStateException(
-            "qits-cd answered " + response.statusCode() + " for " + url);
+            "qits-platform-deployments answered " + response.statusCode() + " for " + url);
       }
       JsonNode body = objectMapper.readTree(response.body());
       if (body == null || !body.isObject()) {
-        throw new IllegalStateException("qits-cd answered a non-object body for " + url);
+        throw new IllegalStateException("qits-platform-deployments answered a non-object body for " + url);
       }
       return body;
     } catch (InterruptedException interrupted) {
@@ -116,7 +116,7 @@ public class CdHttpDeploymentPins implements CdDeploymentPins {
       throw refused;
     } catch (Exception unreachable) {
       throw new IllegalStateException(
-          "qits-cd unreachable at " + url + ": " + unreachable, unreachable);
+          "qits-platform-deployments unreachable at " + url + ": " + unreachable, unreachable);
     }
   }
 

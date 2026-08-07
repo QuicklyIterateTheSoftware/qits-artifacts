@@ -122,7 +122,7 @@ class CiDaemonPinsTest {
     GcPinSources sources = new GcPinSources();
     sources.cd =
         () -> {
-          throw new IllegalStateException("qits-cd unreachable at http://qits-cd:8080/cd/api/pins");
+          throw new IllegalStateException("qits-platform-deployments unreachable at http://qits-platform-deployments:8080/platform-deployments/api/pins");
         };
     sources.ci =
         () -> {
@@ -132,7 +132,7 @@ class CiDaemonPinsTest {
     GcPins pins = sources.fetch();
 
     assertEquals(2, pins.failures().size());
-    assertTrue(pins.whyIncomplete().contains("qits-cd"));
+    assertTrue(pins.whyIncomplete().contains("qits-platform-deployments"));
     assertTrue(pins.whyIncomplete().contains("qits-ci"));
   }
 

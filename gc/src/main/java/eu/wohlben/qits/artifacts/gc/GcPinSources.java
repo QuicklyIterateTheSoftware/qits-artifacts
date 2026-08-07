@@ -26,7 +26,7 @@ import java.util.TreeSet;
  *
  * <p><b>Each read also records how it went</b> ({@link GcPinSource}): the url, the outcome, the time
  * it took and the keep-identities the answer resolved to. That is the half of a keep-set a reviewer
- * cannot check from the plan alone — a run pointed at the wrong qits-cd answers plausibly and pins
+ * cannot check from the plan alone — a run pointed at the wrong deployer answers plausibly and pins
  * the wrong shas — and it is recorded here, at the only place that knows what was actually called.
  */
 @ApplicationScoped
@@ -58,7 +58,7 @@ public class GcPinSources {
       }
       sources.add(
           answered(
-              "qits-cd",
+              "qits-platform-deployments",
               cd.url(),
               startedCd,
               pins.size()
@@ -68,9 +68,9 @@ public class GcPinSources {
               pins.size(),
               keeps));
     } catch (RuntimeException unreachable) {
-      String why = "qits-cd deployment pins: " + message(unreachable);
+      String why = "qits-platform-deployments deployment pins: " + message(unreachable);
       failures.add(why);
-      sources.add(failed("qits-cd", cd.url(), startedCd, why));
+      sources.add(failed("qits-platform-deployments", cd.url(), startedCd, why));
     }
 
     Instant startedCi = Instant.now();

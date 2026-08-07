@@ -91,11 +91,11 @@ class PackagedProcessIT {
       // No CI intake in this repo; the notifier is fire-and-forget, so a closed port is the honest
       // posture here exactly as it is in the unit suite.
       overrides.put("qits.ci.intake-url", "http://localhost:1/post-receive");
-      // No qits-cd or qits-ci here either, and the shipped defaults name them by their qits-net
+      // No qits-platform-deployments or qits-ci here either, and the shipped defaults name them by their qits-net
       // aliases — which on a build machine resolve to whatever the resolver feels like, or hang.
       // Closed ports make the refusal deterministic while still driving a real HttpClient inside
       // the binary.
-      overrides.put("qits.artifacts.gc.pins.cd-base-url", "http://localhost:1/cd/api");
+      overrides.put("qits.artifacts.gc.pins.cd-base-url", "http://localhost:1/platform-deployments/api");
       overrides.put("qits.artifacts.gc.pins.ci-base-url", "http://localhost:1/ci/api");
       // And the same for the mirror's three upstreams, where the shipped defaults name real public
       // registries: this key redirects every one of them, so a closed port is what keeps an IT from
@@ -620,7 +620,7 @@ class PackagedProcessIT {
     // figures are a real reading rather than a zero that would pass either way.
     //
     // Every one of the eight types is claimed now. oci-images and daemon-binaries must name their
-    // strategy — and, with no qits-cd and no qits-ci to answer, must report the refusal rather than
+    // strategy — and, with no qits-platform-deployments and no qits-ci to answer, must report the refusal rather than
     // a plan. That
     // fail-closed path only exists in the binary if the JDK HttpClient survived the compile, so this
     // is the one assertion here that a JVM test cannot make on its behalf, and every type on an
@@ -634,7 +634,7 @@ class PackagedProcessIT {
         .body("graceWindow", equalTo("P7D"))
         .body("types", hasSize(8))
         .body("types.find { it.type == 'oci-images' }.strategy", equalTo("OciImageGcStrategy"))
-        .body("types.find { it.type == 'oci-images' }.error", containsString("qits-cd"))
+        .body("types.find { it.type == 'oci-images' }.error", containsString("qits-platform-deployments"))
         .body("types.find { it.type == 'oci-images' }.dead", hasSize(0))
         .body(
             "types.find { it.type == 'npm-packages' }.strategy", equalTo("NpmPackagesGcStrategy"))
@@ -680,10 +680,9 @@ class PackagedProcessIT {
     given().when().post("/artifacts/api/gc/plan").then().statusCode(405);
 
     // And the execute surface itself, in the binary: one more Jackson-serialised record family, and
-    // the receipt of a sweep over a store whose every blob this process wrote seconds ago — the
-    // grace window withholds identities and files alike, so the honest answer is zeros with the
-    // withheld figures carrying the story. The store summary above already proved the blobs exist;
-    // this proves invoking the sweep did not touch them.
+    // the receipt of a sweep with no pin source to read. It ABORTS whole rather than degrading the
+    // way the plan above does, which is the settlement's all-or-nothing rule — so every type
+    // carries the abort and nothing is deleted.
     given()
         .when()
         .post("/artifacts/api/gc/sweep")
@@ -692,11 +691,15 @@ class PackagedProcessIT {
         .body("dryRun", equalTo(false))
         .body("graceWindow", equalTo("P7D"))
         .body("types", hasSize(8))
-        .body("types.find { it.type == 'oci-images' }.error", containsString("qits-cd"))
+        .body("aborted", containsString("qits-platform-deployments"))
+        .body("types.find { it.type == 'oci-images' }.error", containsString("qits-platform-deployments"))
         .body("types.find { it.type == 'npm-packages' }.deleted", hasSize(0))
         .body("sweep.blobsUnlinked", equalTo(0))
         .body("sweep.unlinkedBlobIds", hasSize(0))
-        .body("untouchable.reason", containsString("LOSES its last row"));
+        // NOT the plan's "LOSES its last row": an aborted run never took a census, and claiming an
+        // untouchable pool it never measured would be claiming something. GcPinsTest pins the same
+        // sentence on the JVM side.
+        .body("untouchable.reason", containsString("not computed"));
   }
 
   @Test

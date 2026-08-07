@@ -277,7 +277,7 @@ public class GcPlanner {
     GcStrategy strategy = claiming.get(0);
     String name = nameOf(strategy);
     if (strategy.readsPins() && !pins.complete()) {
-      // Not asked to plan at all: its keep-set is partly qits-cd's or qits-ci's answer, and
+      // Not asked to plan at all: its keep-set is partly qits-platform-deployments's or qits-ci's answer, and
       // planning it against "nothing is pinned" is the one mistake that condemns everything.
       return new Outcome(name, null, "live pins unavailable — " + pins.whyIncomplete(), null);
     }
@@ -286,7 +286,7 @@ public class GcPlanner {
       return new Outcome(name, GcRules.note(config, type, strategy.note()), null, plan);
     } catch (RuntimeException aborted) {
       // Fail-closed: no plan, so the sweep keeps this type's whole census set. A strategy whose
-      // keep-set comes from elsewhere (the OCI rule reads qits-cd's live pins) must land here
+      // keep-set comes from elsewhere (the OCI rule reads qits-platform-deployments's live pins) must land here
       // rather than plan on facts it could not fetch.
       return new Outcome(name, null, message(aborted), null);
     }

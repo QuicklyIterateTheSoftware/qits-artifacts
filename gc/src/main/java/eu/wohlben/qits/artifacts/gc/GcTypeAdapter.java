@@ -45,7 +45,7 @@ public interface GcTypeAdapter {
    * <p><b>Pins by blob digest are not asked for here.</b> Blobs dedupe globally, so that check is
    * identical for every type and the binder applies it to every candidate as a floor under whatever
    * this method answers. What belongs here is only what a type's own coordinates mean: an image sha
-   * qits-cd would pull, a daemon version qits-ci's ladder would launch, a dist-tag an npm client
+   * qits-platform-deployments would pull, a daemon version qits-ci's ladder would launch, a dist-tag an npm client
    * would resolve.
    *
    * <p>The answer is a sentence rather than a boolean, so a report names the pin that saved a row.

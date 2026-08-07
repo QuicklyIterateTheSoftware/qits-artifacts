@@ -26,7 +26,7 @@ import java.util.regex.Pattern;
 
 /**
  * The platform's own images, as facts: what a coordinate is, what a release is, which of two
- * releases is newer, what qits-cd would pull, and how a row goes.
+ * releases is newer, what qits-platform-deployments would pull, and how a row goes.
  *
  * <h2>What a release is here</h2>
  *
@@ -38,7 +38,7 @@ import java.util.regex.Pattern;
  *
  * <h2>The one belt this type derives itself: the newest build tag per image</h2>
  *
- * <p>{@link #pinnedBy} keeps every sha qits-cd names <b>and</b> each image's most recently written
+ * <p>{@link #pinnedBy} keeps every sha qits-platform-deployments names <b>and</b> each image's most recently written
  * build tag. The second is a pin in all but name — the pull the <em>next</em> deploy will make —
  * and it is here rather than in cd because cd cannot answer for a deployment that has not happened:
  * {@code qits-spa-home} has tags and not a single deployment row, and without this line its whole
@@ -123,7 +123,7 @@ public class OciImagesGcAdapter implements GcTypeAdapter {
   }
 
   /**
-   * The two coordinate pins: every sha qits-cd holds, and each image's newest build tag.
+   * The two coordinate pins: every sha qits-platform-deployments holds, and each image's newest build tag.
    *
    * <p>The newest build is read off the tag rows rather than off the candidates, for the reason the
    * class javadoc gives — a candidate carries its access time, and a pull of an older sha must not

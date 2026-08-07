@@ -16,7 +16,7 @@ import java.util.List;
  *     for a receipt of work done
  * @param graceWindow how long a blob's file must have sat untouched before it may be unlinked, ISO-8601
  * @param executable whether a sweep run right now could execute this plan. False when a pin source
- *     — qits-cd's deployments, qits-ci's daemon ladder — could not answer: a sweep would abort
+ *     — qits-platform-deployments' deployments, qits-ci's daemon ladder — could not answer: a sweep would abort
  *     whole, so the pin-dependent types below carry a refusal rather than a finding, and their zeros
  *     must not be read as "nothing to collect"
  * @param pinFailures one sentence per pin source that could not answer; empty when the plan is

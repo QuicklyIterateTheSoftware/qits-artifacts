@@ -21,7 +21,7 @@ import org.junit.jupiter.api.Test;
  * indistinguishable from a broken one.
  *
  * <p>Refusing is the deployed behaviour under a broken dependency, not a test artefact: every type
- * on an engine reads live pins, this repository has no qits-cd and no qits-ci, and the suite points
+ * on an engine reads live pins, this repository has no qits-platform-deployments and no qits-ci, and the suite points
  * both base urls at a closed port. Fail-closed on the wire is worth an assertion of its own — a plan
  * that answered with an empty keep-set would condemn every sha tag on the platform.
  *
@@ -181,7 +181,7 @@ class GcPlanControllerTest {
         .statusCode(200)
         .body("summary.executable", is(false))
         .body("summary.headline", org.hamcrest.Matchers.startsWith("NOT EXECUTABLE"))
-        .body("summary.headline", org.hamcrest.Matchers.containsString("qits-cd"))
+        .body("summary.headline", org.hamcrest.Matchers.containsString("qits-platform-deployments"))
         .body("summary.reclaimableBytes", is(0))
         .body("summary.reclaimable", is("0 B"))
         .body("summary.identitiesCondemned", is(0))
@@ -190,9 +190,9 @@ class GcPlanControllerTest {
             "summary.types.find { it.startsWith('ci-videos') }",
             org.hamcrest.Matchers.containsString("excluded by configuration"))
         .body("pins", hasSize(2))
-        .body("pins.source", org.hamcrest.Matchers.containsInAnyOrder("qits-cd", "qits-ci"))
-        .body("pins.find { it.source == 'qits-cd' }.url", is("http://localhost:1/cd/api/pins"))
-        .body("pins.find { it.source == 'qits-cd' }.answered", is(false))
+        .body("pins.source", org.hamcrest.Matchers.containsInAnyOrder("qits-platform-deployments", "qits-ci"))
+        .body("pins.find { it.source == 'qits-platform-deployments' }.url", is("http://localhost:1/platform-deployments/api/pins"))
+        .body("pins.find { it.source == 'qits-platform-deployments' }.answered", is(false))
         .body("pins.find { it.source == 'qits-ci' }.url", is("http://localhost:1/ci/api/daemon"))
         .body("pins.find { it.source == 'qits-ci' }.keeps", hasSize(0));
   }
@@ -206,7 +206,7 @@ class GcPlanControllerTest {
         .statusCode(200)
         .body(
             "types.find { it.type == 'oci-images' }.error",
-            org.hamcrest.Matchers.containsString("qits-cd"))
+            org.hamcrest.Matchers.containsString("qits-platform-deployments"))
         .body("types.find { it.type == 'oci-images' }.dead", hasSize(0))
         .body("types.find { it.type == 'oci-images' }.kept", hasSize(0))
         .body("types.find { it.type == 'oci-images' }.blobsSweepable", is(0));
@@ -217,7 +217,7 @@ class GcPlanControllerTest {
     // The scope, on the wire. npm-proxy shares the npm_version table with the hosted registry, and
     // the two are collected by different ENGINES over that one table: the hosted rows by the
     // own-artifacts rule, the cached ones by eviction. Both refuse here for the same reason every
-    // engine type does — no qits-cd and no qits-ci — which is what makes the two strategy names the
+    // engine type does — no qits-platform-deployments and no qits-ci — which is what makes the two strategy names the
     // thing this case is really pinning.
     given()
         .when()
@@ -234,7 +234,7 @@ class GcPlanControllerTest {
   void bothCacheTypesReadPinsSoBothRefuseWhileTheSourcesAreClosedPorts() {
     // The mirror used to answer "nothing dies, append-only pending access tracking" here. Access
     // tracking shipped, the settlement configured both caches onto the eviction engine, and the
-    // engine checks live pins before the access rule — so with no qits-cd and no qits-ci both types
+    // engine checks live pins before the access rule — so with no qits-platform-deployments and no qits-ci both types
     // now refuse rather than plan against "nothing is pinned". Zeros with a reason, which is the
     // one property every line of this report has to keep.
     given()
@@ -272,7 +272,7 @@ class GcPlanControllerTest {
 
   @Test
   void theSweepRefusesTheWholeRunWhileThePinSourcesCannotAnswer() {
-    // The settlement's abort rule on the wire. This suite has neither qits-cd nor qits-ci, so the
+    // The settlement's abort rule on the wire. This suite has neither qits-platform-deployments nor qits-ci, so the
     // run stops before the census: nothing is deleted, every type carries the same reason, and the
     // row-less pool is reported as UNCOMPUTED rather than empty — an empty list there would be a
     // claim about a store this run never read.
@@ -283,7 +283,7 @@ class GcPlanControllerTest {
         .statusCode(200)
         .body("dryRun", is(false))
         .body("executedAt", notNullValue())
-        .body("aborted", org.hamcrest.Matchers.containsString("qits-cd"))
+        .body("aborted", org.hamcrest.Matchers.containsString("qits-platform-deployments"))
         .body("aborted", org.hamcrest.Matchers.containsString("qits-ci"))
         .body("types", hasSize(8))
         .body("types.deleted.flatten()", hasSize(0))
@@ -355,7 +355,7 @@ class GcPlanControllerTest {
   void aScopedSweepRefusesTheWholeRunTooWhileThePinSourcesCannotAnswer() {
     // The abort rule does not shrink with the scope. One repository is not a smaller blast radius
     // at the blob layer — bytes it releases can be the last local reference to content a pin names
-    // by digest — so a run with an unreadable qits-cd stops before the census here exactly as it
+    // by digest — so a run with an unreadable qits-platform-deployments stops before the census here exactly as it
     // does on the whole-store route, and says which source failed.
     given()
         .when()
@@ -366,7 +366,7 @@ class GcPlanControllerTest {
         .body("type", is("oci-images"))
         .body("dryRun", is(false))
         .body("executedAt", notNullValue())
-        .body("aborted", org.hamcrest.Matchers.containsString("qits-cd"))
+        .body("aborted", org.hamcrest.Matchers.containsString("qits-platform-deployments"))
         .body("aborted", org.hamcrest.Matchers.containsString("qits-ci"))
         .body("pins", hasSize(2))
         .body("deleted", hasSize(0))

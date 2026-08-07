@@ -6,9 +6,9 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 
 /**
- * An in-process stand-in for qits-cd or qits-ci, one path and one canned answer.
+ * An in-process stand-in for qits-platform-deployments or qits-ci, one path and one canned answer.
  *
- * <p>There is no network in this repository's suite and no qits-cd or qits-ci to dial, so the two
+ * <p>There is no network in this repository's suite and no qits-platform-deployments or qits-ci to dial, so the two
  * HTTP adapters would otherwise only ever be tested on their failure path. What they have to get
  * right is the <b>shape</b> — which key holds the array, which field is blank, what a non-200 means
  * — and that can only be proved against something that answers.

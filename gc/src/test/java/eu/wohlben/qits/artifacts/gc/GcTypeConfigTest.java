@@ -247,7 +247,7 @@ class GcTypeConfigTest extends GcFixture {
 
   @Test
   void everyPinReadingTypeRefusesToPlanWhileThePinSourcesCannotAnswer() throws Exception {
-    // The other side of the same wiring, on the report a deployment actually gets when qits-cd or
+    // The other side of the same wiring, on the report a deployment actually gets when qits-platform-deployments or
     // qits-ci is down: every type on an engine reads pins, so every one of them is refused rather
     // than planned against "nothing is pinned". This suite's pin urls are closed ports, which is
     // that state exactly.

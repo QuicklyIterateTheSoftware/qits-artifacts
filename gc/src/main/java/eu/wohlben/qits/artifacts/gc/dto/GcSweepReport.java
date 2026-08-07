@@ -17,7 +17,7 @@ import java.util.List;
  * @param graceWindow how long a blob's file must have sat untouched before it may be unlinked,
  *     ISO-8601 — the window also gates identity deletion, see {@code GcTypeSweepResult}
  * @param aborted why this run deleted nothing at all, or null when it ran. A pin source that could
- *     not answer — qits-cd's deployments, qits-ci's daemon ladder — ends the <b>whole</b> run before
+ *     not answer — qits-platform-deployments's deployments, qits-ci's daemon ladder — ends the <b>whole</b> run before
  *     the census, because a keep-set assembled without a live pin is a keep-set assembled from
  *     "nothing is pinned"
  * @param pins how this run read its live pins — the same section the dry-run carries, and on a

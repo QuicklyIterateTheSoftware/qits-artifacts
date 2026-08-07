@@ -11,7 +11,7 @@ import jakarta.inject.Singleton;
  * its own deletion mechanics. The settlement of 2026-08-05 replaced "one bespoke strategy per type"
  * with "two engines, configured per type", and the rule moved rather than changed shape: the
  * <b>rule</b> is {@link OwnArtifactsStrategy}'s, the wiring is {@link OwnGcStrategy}'s, and the
- * facts — what a coordinate is, what a release is, which of two releases is newer, what qits-cd
+ * facts — what a coordinate is, what a release is, which of two releases is newer, what qits-platform-deployments
  * would pull, how a row goes — are {@link OciImagesGcAdapter}'s. This class is the bean the planner
  * finds and the name a reviewer reads on the report line.
  *
@@ -23,7 +23,7 @@ import jakarta.inject.Singleton;
  * loosens the rule: a sha tag something is still pulling now survives, where the structural rule
  * condemned it.
  *
- * <p><b>What did not change is the belt that closes the IMAGE_MISSING hazard.</b> Every sha qits-cd
+ * <p><b>What did not change is the belt that closes the IMAGE_MISSING hazard.</b> Every sha qits-platform-deployments
  * pins is kept, and so is each image's newest build tag — the pull the next deploy will make, which
  * cd cannot answer for because it has not happened yet. Both live in {@link
  * OciImagesGcAdapter#pinnedBy}, checked before the access rule, and an image with no deployment row

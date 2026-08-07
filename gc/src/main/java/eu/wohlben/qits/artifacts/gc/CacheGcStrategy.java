@@ -25,7 +25,7 @@ import java.util.Locale;
  * in the report.
  *
  * <p><b>Pins are read, so {@link #readsPins()} is true.</b> Nothing pins a mirror tag or a cached
- * npm version <em>by coordinate</em> — qits-cd pins application image shas and qits-ci pins daemon
+ * npm version <em>by coordinate</em> — qits-platform-deployments pins application image shas and qits-ci pins daemon
  * versions, neither of which lives in a cache namespace — but a pin can name a <b>blob</b> by
  * digest, and blobs dedupe globally, so the same bytes can be reachable through a cache row. The
  * check costs one set lookup per identity and the alternative is planning a type against "nothing is

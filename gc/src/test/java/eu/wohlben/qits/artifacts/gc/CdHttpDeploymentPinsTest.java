@@ -13,7 +13,7 @@ import org.junit.jupiter.api.Test;
 /**
  * The cd pin adapter against a stub serving cd's real response shape.
  *
- * <p>{@code GET /cd/api/pins} answers {@code {"pins":[{"applicationName":…,"shas":[…]}]}} — one
+ * <p>{@code GET /platform-deployments/api/pins} answers {@code {"pins":[{"applicationName":…,"shas":[…]}]}} — one
  * entry per application serving somewhere, the shas a set rather than a sequence. This suite exists
  * because the adapter's job is now entirely that shape: the ACTIVE-plus-previous derivation that
  * used to live here is cd's, and a keep-set derived twice is a keep-set waiting to disagree.
@@ -64,7 +64,7 @@ class CdHttpDeploymentPinsTest {
               .contains("'pins' array"));
     }
     try (StubPinService cd =
-        StubPinService.serving("/pins", "{\"pins\":[{\"applicationName\":\"qits-cd\"}]}")) {
+        StubPinService.serving("/pins", "{\"pins\":[{\"applicationName\":\"qits-platform-deployments\"}]}")) {
       assertTrue(
           assertThrows(IllegalStateException.class, () -> adapter(cd.baseUrl()).pins())
               .getMessage()

@@ -62,7 +62,7 @@ public class GcSweepExecutor {
    *
    * <p><b>The pins are read first, and a source that cannot answer ends the run here</b> — before
    * the census, before a single row is touched. That is the settlement's abort rule and it replaces
-   * the per-type fail-closed this method used to rely on: a keep-set assembled while qits-cd or
+   * the per-type fail-closed this method used to rely on: a keep-set assembled while qits-platform-deployments or
    * qits-ci is unreachable is a keep-set assembled from "nothing is pinned", and the types that do
    * not read pins are not safe to run beside it either, because a blob one of them releases may be
    * the last reference to content a pinned identity of another type still needs.

@@ -35,7 +35,7 @@ import java.util.Set;
  * reclaims nothing instead of reclaiming something it cannot vouch for.
  *
  * <p><b>Live pins arrive as an argument, fetched once per run.</b> A strategy does not dial another
- * service itself: {@code GcPinSources} reads qits-cd and qits-ci at the start of every plan and
+ * service itself: {@code GcPinSources} reads qits-platform-deployments and qits-ci at the start of every plan and
  * every sweep, and {@link #plan} is handed the result. Two fetches inside one run can disagree, and
  * a strategy holding its own source is how that happens. A strategy whose keep-set depends on those
  * pins says so with {@link #readsPins()}, and is not planned at all on a run whose pins are

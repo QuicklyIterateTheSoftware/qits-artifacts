@@ -9,7 +9,7 @@ import java.util.regex.Pattern;
 /**
  * Every live pin one run holds, read once at its start and never cached.
  *
- * <p>Two services answer it: qits-cd names the image shas a restart or a rollback would pull,
+ * <p>Two services answer it: qits-platform-deployments names the image shas a restart or a rollback would pull,
  * qits-ci names the daemon versions its ladder would launch. Both are facts no timestamp in this
  * store implies — a container running untouched for months still pulls its sha the moment it
  * restarts — which is why pinned is a keep-class the engines check <b>before</b> the access rule.
@@ -25,7 +25,7 @@ import java.util.regex.Pattern;
  * answers — a dry-run that 500s tells a reviewer nothing — but marks itself non-executable and
  * reports the pin-dependent types as failed.
  *
- * @param deployments application (and therefore image) name to every sha qits-cd pins for it
+ * @param deployments application (and therefore image) name to every sha qits-platform-deployments pins for it
  * @param daemonName the daemon qits-ci's ladder is about, blank when it named none
  * @param daemonVersions the pinned daemon versions — the current rung and its fallback, blanks
  *     dropped, because a blank is qits-ci saying "nothing is pinned" rather than naming a version
@@ -46,7 +46,7 @@ public record GcPins(
     List<GcPinSource> sources) {
 
   /** The rule an image sha is kept under when a deployment holds it. */
-  public static final String BY_CD = "pinned by qits-cd deployment";
+  public static final String BY_CD = "pinned by a qits-platform-deployments deployment";
 
   /** The rule a daemon binary is kept under when qits-ci's ladder holds it. */
   public static final String BY_CI = "pinned by qits-ci daemon ladder";
@@ -93,7 +93,7 @@ public record GcPins(
     return String.join("; ", failures);
   }
 
-  /** Every sha qits-cd pins for an image name. */
+  /** Every sha qits-platform-deployments pins for an image name. */
   public Set<String> deploymentShas(String image) {
     return deployments.getOrDefault(image, Set.of());
   }

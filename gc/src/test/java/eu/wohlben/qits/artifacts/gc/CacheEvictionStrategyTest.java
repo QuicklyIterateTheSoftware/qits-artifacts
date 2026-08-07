@@ -66,12 +66,12 @@ class CacheEvictionStrategyTest {
     // saved it rather than a generic "kept".
     FakeGcTypeAdapter adapter =
         new FakeGcTypeAdapter().add("hub/library/ubi:9", "hub/library/ubi", false, daysAgo(365), "b");
-    GcPinned pinned = candidate -> "pinned by qits-cd deployment";
+    GcPinned pinned = candidate -> "pinned by a qits-platform-deployments deployment";
 
     GcStrategy.Plan plan = engine.plan(adapter, WINDOW, NOW, pinned);
 
     assertEquals(List.of(), plan.dead());
-    assertEquals("pinned by qits-cd deployment", plan.kept().get(0).rule());
+    assertEquals("pinned by a qits-platform-deployments deployment", plan.kept().get(0).rule());
     assertEquals(Set.of("b"), plan.blobsRetained());
   }
 

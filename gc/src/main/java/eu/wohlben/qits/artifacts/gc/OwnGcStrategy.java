@@ -25,7 +25,7 @@ import java.util.Locale;
  * evict. So a mismatch refuses, and the refusal lands on that type's line in the report.
  *
  * <p><b>Pins are read, so {@link #readsPins()} is true — for all four own types.</b> Two of them
- * carry a pin by <em>coordinate</em> (an image sha qits-cd would pull, a daemon version qits-ci's
+ * carry a pin by <em>coordinate</em> (an image sha qits-platform-deployments would pull, a daemon version qits-ci's
  * ladder would launch) and every one of them can carry a pin by <b>blob digest</b>, because blobs
  * dedupe globally and a pinned digest may be the same bytes a published version names. The
  * alternative is planning a type against "nothing is pinned", which is the documented way to condemn

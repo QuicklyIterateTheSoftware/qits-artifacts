@@ -47,7 +47,7 @@ class GcPlanTest extends GcFixture {
     // The report a reviewer sees first. "Nothing to collect", "refused to plan" and a real plan are
     // three different facts, so every type is listed with its own reason rather than omitted. Six
     // types demonstrate the refusal here: every type on an engine reads live pins, this suite has no
-    // qits-cd and no qits-ci, and a keep-set that cannot be established reclaims nothing. The two CI
+    // qits-platform-deployments and no qits-ci, and a keep-set that cannot be established reclaims nothing. The two CI
     // stubs are the second — zero rows, a named intended rule, and a note saying the loop has never
     // produced content.
     Store store = seed();
@@ -72,7 +72,7 @@ class GcPlanTest extends GcFixture {
         case OCI_IMAGES -> {
           assertEquals("OciImageGcStrategy", type.strategy());
           assertNull(type.note());
-          assertNotNull(type.error(), "no qits-cd here, so the type must abort rather than plan");
+          assertNotNull(type.error(), "no qits-platform-deployments here, so the type must abort rather than plan");
         }
         case DAEMON_BINARIES -> {
           assertEquals("DaemonBinariesGcStrategy", type.strategy());
@@ -137,7 +137,7 @@ class GcPlanTest extends GcFixture {
   void theSummaryIsWhatAReviewerReadsFirstAndItSaysWhetherThisCanRunAtAll() throws Exception {
     // The report is eight types deep and a review that has to add them up before it can start is a
     // review nobody performs. So the plan leads with the paragraph: can this be executed, what does
-    // it cost, and which type is doing the work. Here it cannot — no qits-cd, no qits-ci — and that
+    // it cost, and which type is doing the work. Here it cannot — no qits-platform-deployments, no qits-ci — and that
     // has to be the first thing the summary says rather than a flag further down.
     Store store = seed();
     GcStrategy oci =
@@ -176,7 +176,7 @@ class GcPlanTest extends GcFixture {
 
     assertFalse(refused.executable());
     assertTrue(refused.headline().startsWith("NOT EXECUTABLE"), refused.headline());
-    assertTrue(refused.headline().contains("qits-cd"), refused.headline());
+    assertTrue(refused.headline().contains("qits-platform-deployments"), refused.headline());
     assertTrue(
         refused.types().stream()
             .anyMatch(line -> line.endsWith("refused: live pins unavailable")),
@@ -333,7 +333,7 @@ class GcPlanTest extends GcFixture {
   @Test
   void aStrategyThatCannotEstablishItsKeepSetAbortsItsTypeAndFreesNothingOfIt() throws Exception {
     // Fail-closed, which is the whole reason plan() may throw: the OCI rule's keep-set includes the
-    // shas qits-cd pins, fetched live. CD unreachable must reclaim nothing rather than guess — and
+    // shas qits-platform-deployments pins, fetched live. CD unreachable must reclaim nothing rather than guess — and
     // must not let another type's plan free a blob the aborted type still names.
     Store store = seed();
     GcStrategy unreachable =
@@ -345,7 +345,7 @@ class GcPlanTest extends GcFixture {
 
           @Override
           public Plan plan(LiveBlobCensus.Census census, GcPins pins) {
-            throw new IllegalStateException("qits-cd unreachable; refusing to plan on stale pins");
+            throw new IllegalStateException("qits-platform-deployments unreachable; refusing to plan on stale pins");
           }
         };
     GcStrategy npm =
@@ -361,7 +361,7 @@ class GcPlanTest extends GcFixture {
 
     GcTypePlan aborted = typePlan(report, RepositoryType.OCI_IMAGES);
     assertNotNull(aborted.error());
-    assertTrue(aborted.error().contains("qits-cd unreachable"));
+    assertTrue(aborted.error().contains("qits-platform-deployments unreachable"));
     assertEquals(0, aborted.blobsSweepable());
     assertEquals(
         List.of(),
@@ -482,7 +482,7 @@ class GcPlanTest extends GcFixture {
   void aRepositoryOfARefusedOrExcludedTypeCarriesThatTypesReasonRatherThanASilentZero()
       throws Exception {
     // The two reasons a real deployment's rows read zero, on the rows themselves. oci-images
-    // refuses because this suite has no qits-cd; ci-videos is excluded by configuration and its
+    // refuses because this suite has no qits-platform-deployments; ci-videos is excluded by configuration and its
     // stub says so. A column of zeros with nothing beside them would make those two look identical
     // to "clean already", which they are not.
     seed();
@@ -516,7 +516,7 @@ class GcPlanTest extends GcFixture {
     assertEquals("qits", report.repository());
     assertEquals(RepositoryType.OCI_IMAGES, report.type());
     assertTrue(report.dryRun());
-    assertFalse(report.executable(), "no qits-cd and no qits-ci here");
+    assertFalse(report.executable(), "no qits-platform-deployments and no qits-ci here");
     assertEquals(2, report.pinFailures().size());
     assertEquals(2, report.pins().size(), "the provenance of a keep-set is half of what is reviewed");
     assertEquals(RepositoryType.OCI_IMAGES, report.configuration().type());

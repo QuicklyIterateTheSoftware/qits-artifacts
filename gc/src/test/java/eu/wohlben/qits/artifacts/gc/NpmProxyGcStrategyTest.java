@@ -189,7 +189,7 @@ class NpmProxyGcStrategyTest extends GcFixture {
   void aRunWithoutLivePinsRefusesToPlanRatherThanAssumeNothingIsPinned() throws Exception {
     seedProxy();
     GcPins broken =
-        new GcPins(Map.of(), "", Set.of(), Set.of(), List.of("qits-cd deployment pins: closed"));
+        new GcPins(Map.of(), "", Set.of(), Set.of(), List.of("qits-platform-deployments deployment pins: closed"));
 
     IllegalStateException refused =
         assertThrows(IllegalStateException.class, () -> strategy.plan(census.take(), broken));

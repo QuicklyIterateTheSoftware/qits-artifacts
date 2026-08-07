@@ -28,7 +28,7 @@ public class ArtifactsRepositorySeeder {
    * without this row a fresh deployment answers the first {@code docker push} with {@code 404
    * NAME_UNKNOWN} until an operator runs the ensure endpoint by hand. Seeding it is what makes a
    * green pipeline able to publish with zero manual steps; the name matches the default of the
-   * shared {@code qits.artifacts.image-repository} key that qits-ci and qits-cd ship.
+   * shared {@code qits.artifacts.image-repository} key that qits-ci and qits-platform-deployments ship.
    */
   public static final String IMAGES = "qits";
 
