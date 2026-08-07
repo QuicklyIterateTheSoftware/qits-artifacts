@@ -45,7 +45,7 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 public class CdHttpDeploymentPins implements CdDeploymentPins {
 
   /**
-   * An <b>instance</b> field, not a static one, for the reason {@code CiPostReceiveNotifier} spells
+   * An <b>instance</b> field, not a static one, for the reason {@code PostReceiveNotifier} spells
    * out at length: a static {@code HttpClient} is built by the class initialiser, which under
    * GraalVM is image-build time, and native-image refuses an {@code HttpClientFacade} in the image
    * heap. The bean is {@code @ApplicationScoped}, so there is still one client per process.

@@ -269,11 +269,22 @@ Push options need `setAllowPushOptions(true)` on **both** `ReceivePack` instance
 client only sends `-o` if it was offered, so missing the advertisement produces the confusing failure
 where the option is silently never seen and every bypass is refused.
 
-After a successful push, `CiPostReceiveNotifier` POSTs `{repoId, branch, oldSha, newSha}` per
-updated branch ref to `qits.ci.intake-url`. That was already an HTTP call inside the monolith, which
+After a successful push, `PostReceiveNotifier` POSTs `{repoId, branch, oldSha, newSha}` per updated
+branch ref to `qits.ci.intake-url`. That was already an HTTP call inside the monolith, which
 is exactly why the artifacts→ci seam survived the split untouched: only the url moves when
 [qits-ci](https://github.com/QuicklyIterateTheSoftware/qits-ci) becomes its own deployable. It is
 fire-and-forget — a failed delivery is a missed advisory run, never a failed push.
+
+The same event goes to `qits.projects.intake-url` as well, where
+[qits-projects](https://github.com/QuicklyIterateTheSoftware/qits-projects) answers it by pushing the
+repository to its GitHub sync target — so a repository is backed up by being pushed to, with nothing
+scheduling it. Same body, same branches-only filter (tags are covered by projects' own backup
+sweep), same fire-and-forget: an unreachable intake costs a backup, never the push and never the
+other consumer's event.
+
+One difference between the two, and it is deliberate: **`-o qits.no-ci` suppresses the CI event
+only.** The option exists so importing a history does not queue a run per branch; a backup is owed
+for that push exactly as for any other.
 
 qits-ci's intake wants a bearer minted by qits-idp for `aud=qits-ci`, so the notifier attaches one
 when this deployment has client credentials (`quarkus.oidc-client.client-enabled` plus
@@ -1747,6 +1758,7 @@ app's `application.properties` overrides them.
 | `qits.auth.machine.audience` | `qits-artifacts` | this service's own id, and the `aud` its tokens must carry |
 | `qits.artifacts.startup-seed.enabled` | `true` | self-seed `ci-screenshots` + `ci-videos` + the `qits` image repository + the two npm roots (`npm`, `npmjs`) |
 | `qits.ci.intake-url` | `http://localhost:8080/ci/api/events/post-receive` | post-receive delivery |
+| `qits.projects.intake-url` | `http://localhost:8080/projects/api/events/post-receive` | the same event again, where it triggers the repository's backup push to GitHub. No credential, and `-o qits.no-ci` does not suppress it |
 | `qits.ci.token` | blank | `X-CI-Token` on those events |
 | `quarkus.oidc-client.client-enabled` | `false` | whether those events carry a bearer for `aud=qits-ci`. On needs `QITS_ARTIFACTS_CLIENT_SECRET`, or the boot fails |
 | `quarkus.oidc.auth-server-url` | `http://qits-idp:8080/idp` | the idp, reached direct on qits-net. Both the validation above and the token fetch use it |
@@ -1811,14 +1823,17 @@ bytes served with `sendFile`, and re-compressing them would cost CPU to grow the
 `service/src/main/resources/application.properties`. The suite inherits that file rather than
 carrying a copy, so the absolute paths the tests assert are the ones the process serves.
 
-The intake url's **path** is not ours either — `/ci/api/events/post-receive` is qits-ci's segment,
-and only the host part is a deployment decision.
+Neither intake url's **path** is ours either — `/ci/api/events/post-receive` is qits-ci's segment and
+`/projects/api/events/post-receive` is qits-projects', and only the host part of each is a deployment
+decision.
 
 ## What is deliberately *not* here
 
 - **The repositories/projects context.** Cloning, branches, commits, submodules, the alias table
   itself. This repo provisions a repository over the wire and serves its bytes; what a caller does
-  with the history is not modelled here.
+  with the history is not modelled here. **The GitHub backup too**: this host says a branch moved,
+  and [qits-projects](https://github.com/QuicklyIterateTheSoftware/qits-projects) owns the sync
+  target, the credential and the push.
 - **CI.** The post-receive event is delivered *to* ci over HTTP; pipelines, runners and the intake
   live in [qits-ci](https://github.com/QuicklyIterateTheSoftware/qits-ci).
 - **`QitsGitServlet` / `QitsRepositoryResolver`.** The pre-Vert.x servlet implementation, deleted in

@@ -54,7 +54,7 @@ public class NpmUpstream {
 
   /**
    * An <b>instance</b> field, not a static one, for the reason spelled out on {@code
-   * CiPostReceiveNotifier}'s: a static {@code HttpClient} is built by the class initialiser, which
+   * PostReceiveNotifier}'s: a static {@code HttpClient} is built by the class initialiser, which
    * under GraalVM runs at image-build time, and native-image then refuses the image over an
    * {@code HttpClientFacade} in the heap. {@code @ApplicationScoped} still means one client per
    * process — just one created when the process starts rather than when it was compiled.

@@ -48,7 +48,7 @@ Everything that had to be declared, and the symptom each one produces if it is d
 | `application.properties` | `WindowCache` **stays** although no repository is file-backed any more | unmeasured, and the failure mode is a silent 404 on every git route — `UploadPack`/`ReceivePack` pull JGit's file-storage classes in regardless |
 | `githost/JGitReflection` | `values()` on every enum `Config.getEnum` reads | **every** git route 404s — `FileRepositoryBuilder.build` throws `NoSuchMethodException` and `open()` returns null |
 | `dto/UploadResult` | `@RegisterForReflection` | every upload 500s: the type is behind a `Response` return, so nothing registers it |
-| `CiPostReceiveNotifier` | the `HttpClient` is an instance field, not static | build fails: an `HttpClientFacade` in the image heap |
+| `PostReceiveNotifier` | the `HttpClient` is an instance field, not static | build fails: an `HttpClientFacade` in the image heap |
 | `npm/NpmUpstream` | the `HttpClient` is an instance field, not static | same as above — an `HttpClientFacade` frozen into the image heap |
 | `gc/CdHttpDeploymentPins`, `gc/CiHttpDaemonPins` | the `HttpClient` is an instance field, not static | same as above; the third and fifth outbound clients, and the rule has not changed. It moved with the class when GC became its own module — the rule travels with the client, not with the package |
 | `registry/MirrorUpstream` | the `HttpClient` is an instance field, not static — and so is `MirrorBearerTokens`' `ObjectMapper`, which is reachable from one | same as above; the fourth outbound client, and the rule still has not changed |
@@ -149,6 +149,12 @@ Two outbound/inbound addresses are contracts other repos hold:
   swallows delivery failures at debug, so a wrong value here produces no error anywhere and CI
   simply never runs. It carries a bearer for `aud=qits-ci` when this deployment has client
   credentials, and nothing when it does not.
+- `qits.projects.intake-url` → `/projects/api/events/post-receive` — the same event, same body,
+  qits-projects' path. It answers by pushing the repository to its GitHub sync target, so a wrong
+  value here is a backup that silently never happens. It carries no credential, and — the one
+  difference from the ci delivery — `-o qits.no-ci` does **not** suppress it: a backup is owed even
+  for a push CI ignores. Tags are excluded from both; the tag side of a backup is projects' own
+  sweep.
 
 ## Package and module conventions
 
@@ -724,11 +730,14 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   it. `ArtifactBrowseControllerTest` proves the two names in this service that contain a slash (an
   OCI image name, a scoped npm package) resolve in both spellings, encoded and literal, which is a
   property of the path templates and of nothing else. Both must hold; neither implies the other.
-- The suite points `qits.ci.intake-url` at a closed port, so a push test passes without a receiver;
-  the notifier is fire-and-forget and swallows the failure. `CiPostReceiveNotifierTest` and
-  `CiPostReceiveBearerTest` are the two that do assert the delivery, against `StubCiIntake` — which
-  plays qits-ci's intake and qits-idp's token endpoint at once, and passes everything it observed
-  through system properties because a `QuarkusTestProfile` is built in two classloaders.
+- The suite points `qits.ci.intake-url` **and** `qits.projects.intake-url` at closed ports, so a
+  push test passes without a receiver; the notifier is fire-and-forget and swallows the failure.
+  `PostReceiveNotifierTest`, `CiPostReceiveBearerTest`, `GitHostNoCiOptionTest` and
+  `GitHostProjectsIntakeDownTest` are the four that do assert deliveries, against `StubIntake` —
+  which plays qits-ci's intake, qits-projects' intake and qits-idp's token endpoint at once, counts
+  the two intakes separately (the fan-out's whole point is that the counts differ under
+  `-o qits.no-ci`), and passes everything it observed through system properties because a
+  `QuarkusTestProfile` is built in two classloaders.
 
 ## What not to "fix"
 
@@ -859,7 +868,8 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   compiles, passes anything that does not drive a real client, and produces the confusing failure
   where every option is silently never seen — so `ProtectedRefHook`'s two bypasses (`qits.release`,
   `qits.token=`) would all refuse, and the post-receive hook's own option, `-o qits.no-ci` (skips the
-  CI intake POST for the push; it grants no write, unlike the other two, so it needs no gate), would
+  CI intake POST for the push and only that one — the qits-projects backup event fires regardless;
+  it grants no write, unlike the other two, so it needs no gate), would
   silently suppress nothing. The advertisement is asserted directly
   (`theReceivePackAdvertisementOffersPushOptions`, and again in the native IT) precisely because it
   has no other symptom.
@@ -893,5 +903,5 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   going through `promote` would break the summary silently; there is no such path today and there
   should not be one.
 - **`NpmUpstream`'s `HttpClient` is an instance field, not a static one** — the same constraint
-  `CiPostReceiveNotifier` carries, and the reason the table above lists it. It is also this process'
+  `PostReceiveNotifier` carries, and the reason the table above lists it. It is also this process'
   only outbound TLS, which no test can exercise (no network); a deployment smokes it once by hand.

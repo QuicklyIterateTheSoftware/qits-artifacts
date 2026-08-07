@@ -88,9 +88,11 @@ class PackagedProcessIT {
       overrides.put("quarkus.flyway.artifacts.clean-at-start", "true");
       // The git host's packs and refs are blobs in that same store, so it needs no path of its own.
       overrides.put("qits.artifacts.blobs-dir", ROOT.resolve("blobs").toString());
-      // No CI intake in this repo; the notifier is fire-and-forget, so a closed port is the honest
-      // posture here exactly as it is in the unit suite.
+      // No CI intake in this repo, and no qits-projects one either; the notifier is fire-and-forget
+      // for both, so closed ports are the honest posture here exactly as they are in the unit
+      // suite. A push in this IT still drives two real outbound requests from the binary.
       overrides.put("qits.ci.intake-url", "http://localhost:1/post-receive");
+      overrides.put("qits.projects.intake-url", "http://localhost:1/post-receive");
       // No qits-platform-deployments or qits-ci here either, and the shipped defaults name them by their qits-net
       // aliases — which on a build machine resolve to whatever the resolver feels like, or hang.
       // Closed ports make the refusal deterministic while still driving a real HttpClient inside
