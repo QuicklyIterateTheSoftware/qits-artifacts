@@ -155,7 +155,8 @@ one segment to both:
 - `/artifacts/git/:repoId` — the opaque UUID, handed straight to the storage.
 - `/artifacts/git/:projectId/:repoName` — a project's repositories served as siblings, so committed
   relative submodule urls (`../<name>.git`) resolve natively. Needs the `RepositoryNameResolver`
-  port.
+  port, whose shipped adapter asks qits-projects and answers nothing until
+  `qits.projects.name-resolver-url` is set — see "The boundary".
 
 Beside them, the base itself answers `GET /artifacts/git` with
 `{"repositories": ["<repoId>", ...]}` — every repository this host serves, sorted
@@ -1792,17 +1793,32 @@ consuming application implements:
 |---|---|---|
 | `RepositoryNameResolver` | no | `/artifacts/git/:projectId/:repoName` is 404; `/artifacts/git/:repoId` — the older scheme and the daemon's own fallback — still serves |
 
-That is the only one an application implements. In the monorepo `GitHostRoutes` injected
-`domain.repository.persistence.RepositoryNameRepository` directly; that alias table belongs to the
-projects/repositories context, and this repo holds no foreign key into another context's schema.
-The inline `QuarkusTransaction.requiringNew()` around the lookup moved into the port's contract —
-the resolver is called on a Vert.x worker thread with no request context bound.
+That is the only one, and an application may still implement it. In the monorepo `GitHostRoutes`
+injected `domain.repository.persistence.RepositoryNameRepository` directly; that alias table belongs
+to the projects/repositories context, and this repo holds no foreign key into another context's
+schema. The inline `QuarkusTransaction.requiringNew()` around the lookup moved into the port's
+contract — the resolver is called on a Vert.x worker thread with no request context bound.
+
+**It now also ships an adapter of its own, and absent still means the same 404.**
+`HttpRepositoryNameResolver` asks qits-projects, which owns the alias table, over one
+`GET <qits.projects.name-resolver-url>/{projectId}/repositories/by-name/{repoName}` — `200` with
+`{"repositoryId": "<id>"}`, `404` for an unknown project or name. It carries `@DefaultBean`, so an
+application implementing the port itself still wins, and there is never a second bean to disambiguate.
+
+Two properties of it are the port's contract rather than this implementation's detail. **Unset config
+answers nothing**: with no url it returns empty without dialling anything, which is the same 404 an
+absent bean produces — so nothing changes anywhere the key is not set. And **it never throws**: a
+timeout, a refused connection, a non-200 or an unreadable body are logged at WARN and answered empty,
+because `GitHostRoutes` has no exception clause on this port and a throw would be a 500 where a 404
+is owed. That is the opposite of the two GC pin ports below. Nothing is cached, for the pin ports'
+reason turned around: a rename must not serve a stale id.
 
 `CdDeploymentPins` and `CiDaemonPins` are the exceptions that prove the shape, so they are named
 here rather than left to be discovered: both are declared **and** implemented inside this repo, over
-HTTP, and they are the only places this service dials another (`qits-cd` and `qits-ci`, for GC's
-live pins — see "Garbage collection"). Absent is not a supported configuration there, which is the
-other difference: a pin source that cannot answer aborts the whole GC run instead of falling back.
+HTTP, dialling `qits-cd` and `qits-ci` for GC's live pins (see "Garbage collection"). Absent is not a
+supported configuration there, which is the difference that matters and the one the name resolver's
+adapter does *not* share: a pin source that cannot answer aborts the whole GC run instead of falling
+back.
 Both live in `gc/` with the process that needs them — the `artifacts` library dials nothing at all,
 which is the domain-blindness the module split gave back.
 
@@ -1826,6 +1842,7 @@ app's `application.properties` overrides them.
 | `qits.artifacts.startup-seed.enabled` | `true` | self-seed `ci-screenshots` + `ci-videos` + the `qits` image repository + the two npm roots (`npm`, `npmjs`) |
 | `qits.ci.intake-url` | `http://localhost:8080/ci/api/events/post-receive` | post-receive delivery |
 | `qits.projects.intake-url` | `http://localhost:8080/projects/api/events/post-receive` | the same event again, where it triggers the repository's backup push to GitHub. No credential, and `-o qits.no-ci` does not suppress it |
+| `qits.projects.name-resolver-url` | **unset** | where `HttpRepositoryNameResolver` turns `(projectId, repoName)` into a repo id, up to but not including `/{projectId}`. Unset — the shipped state — means the port answers nothing and `/artifacts/git/:projectId/:repoName` 404s, exactly as before the adapter existed. A deployment sets `http://prod-qits-projects:8080/projects/api/projects` |
 | `qits.ci.token` | blank | `X-CI-Token` on those events |
 | `quarkus.oidc-client.client-enabled` | `false` | whether those events carry a bearer for `aud=qits-ci`. On needs `QITS_ARTIFACTS_CLIENT_SECRET`, or the boot fails |
 | `quarkus.oidc.auth-server-url` | `http://qits-platform-idp:8080/idp` | the idp, reached direct on qits-net. Both the validation above and the token fetch use it |
