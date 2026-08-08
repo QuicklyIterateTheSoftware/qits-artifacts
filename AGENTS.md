@@ -53,6 +53,7 @@ Everything that had to be declared, and the symptom each one produces if it is d
 | `maven/MavenUpstream` | the `HttpClient` is an instance field, not static | same as above; the sixth outbound client, and the rule has still not changed. It reads and writes only `String`/`byte[]` and needs nothing else declared — the maven stack, like `registry` and `npm`, still adds zero native-image configuration |
 | `gc/CdHttpDeploymentPins`, `gc/CiHttpDaemonPins` | the `HttpClient` is an instance field, not static | same as above; the third and fifth outbound clients, and the rule has not changed. It moved with the class when GC became its own module — the rule travels with the client, not with the package |
 | `registry/MirrorUpstream` | the `HttpClient` is an instance field, not static — and so is `MirrorBearerTokens`' `ObjectMapper`, which is reachable from one | same as above; the fourth outbound client, and the rule still has not changed |
+| `githost/HttpRepositoryNameResolver` | the `HttpClient` is an instance field, not static | same as above; the seventh outbound client, and the rule has still not changed — it travels with the client, not with the package, so it applies in `githost` exactly as in `gc`. It reads the answer as a `JsonNode` and needs nothing else declared |
 | artifacts' `microprofile-config.properties` | H2 url with no `AUTO_SERVER` | the binary dies at boot on `ClassNotFoundException: org.h2.server.TcpServer` |
 | `registry/MirrorUpstream`'s config | `endpoint-override` injected as `Optional<String>`, not `String` | the binary dies at boot on `Failed to load config value of type java.lang.String` — SmallRye reads a **configured-empty** value as absent, and that key ships blank. `defaultValue = ""` does not help. Invisible to `mvn verify`, where every test sets a real value |
 
@@ -248,6 +249,13 @@ Don't. Declare a port in the package that needs it, inject it as `Instance<T>`, 
 supported configuration with a documented behaviour — see the table in the README.
 `RepositoryNameResolver` is the only one, and it is optional because the id-addressed git scheme
 predates the name-addressed one and remains the daemon's fallback.
+
+It now ships an adapter of its own, `HttpRepositoryNameResolver`, and that does **not** make it a
+third pin-port-style exception: absent is still a supported configuration with the documented
+behaviour. Unset `qits.projects.name-resolver-url` returns empty without a call, which is the same
+404 an absent bean gives; and the adapter **never throws**, because `GitHostRoutes` has no exception
+clause on this port. `@DefaultBean` is what keeps a consuming application — and the test suite's
+`FakeRepositoryNameResolver` — able to implement the port instead.
 
 **The two GC pin ports are the exception, and they break the rule in both halves on purpose.**
 `CdDeploymentPins` (`GET /cd/api/pins`) and `CiDaemonPins` (`GET /ci/api/daemon`) are ports this repo
@@ -613,7 +621,7 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 
 ## Tests
 
-- `mvn verify` runs 611 tests (157 in `artifacts/`, 18 in `git-storage/`, 135 in `gc/`, 301 in
+- `mvn verify` runs 617 tests (157 in `artifacts/`, 18 in `git-storage/`, 135 in `gc/`, 307 in
   `service/`) in about three minutes — counted from the surefire reports, which the previous figure
   here was not. Nothing here
   needs docker — and that is the constraint that shapes the registry suite: `docker`, `podman` and
@@ -749,8 +757,11 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   commit into it over the served endpoint. `PackagedProcessIT.seedOrigin()` does the same against
   the binary through `PUT /artifacts/git/:repoId` — no in-JVM bean there — and both ITs read every
   ref back with `ls-remote` rather than in a directory. Tests that need the name-addressed scheme
-  register the alias on `FakeRepositoryNameResolver`, which is a plain `@ApplicationScoped` bean in
-  test sources — that is exactly the "a resolver is present" configuration production runs in.
+  register the alias on `FakeRepositoryNameResolver`, a plain `@ApplicationScoped` bean in test
+  sources. It **overrides** the shipped `HttpRepositoryNameResolver`, which carries `@DefaultBean`,
+  so the test classpath still holds exactly one bean and no test dials qits-projects. The HTTP
+  adapter is proved on its own by `HttpRepositoryNameResolverTest` — plain JUnit against an
+  in-process `HttpServer`, because under CDI the Fake is what you would get.
 - `ArtifactsTestSupport` (in `artifacts/`) and `ArtifactsTestMedia` (in `service/`) are separate on
   purpose: the modules share no test classpath, the same way they do not in the monorepo. `gc/`'s
   `GcFixture` and `artifacts/`'s `SeededStoreFixture` are the same rule and the same seeding, copied
