@@ -6,3 +6,8 @@
 # branch.
 deployment_target: platform
 deploy_branches: environment/prod
+
+# The convention would derive the health path from the repository name, but the route path
+# deliberately did not move with the rename — the service still serves /artifacts. Without this line
+# the deployer probes a 404 and rolls every deployment back as unhealthy.
+health_path: /artifacts/q/health/ready
