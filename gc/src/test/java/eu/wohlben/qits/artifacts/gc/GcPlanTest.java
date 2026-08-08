@@ -60,6 +60,7 @@ class GcPlanTest extends GcFixture {
             "DaemonBinariesGcStrategy",
             "DocsGcStrategy",
             "MavenPackagesGcStrategy",
+            "MavenProxyGcStrategy",
             "NpmPackagesGcStrategy",
             "NpmProxyGcStrategy",
             "OciImageGcStrategy",
@@ -104,6 +105,11 @@ class GcPlanTest extends GcFixture {
         }
         case NPM_PROXY -> {
           assertEquals("NpmProxyGcStrategy", type.strategy());
+          assertNotNull(type.error(), "the cache engine reads pins, and there are none here");
+          assertEquals(0, type.dead().size(), "a refused type plans nothing");
+        }
+        case MAVEN_PROXY -> {
+          assertEquals("MavenProxyGcStrategy", type.strategy());
           assertNotNull(type.error(), "the cache engine reads pins, and there are none here");
           assertEquals(0, type.dead().size(), "a refused type plans nothing");
         }

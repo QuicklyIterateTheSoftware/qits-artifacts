@@ -50,11 +50,12 @@ import java.util.Set;
  *       own miss.
  *   <li>{@code npm-packages} / {@code npm-proxy} — {@code npm_version.tarball_blob_id}, sized from
  *       disk because there is no size column.
- *   <li>{@code maven-packages} — {@code maven_artifact.blob_id}, sized from the row: that table is
- *       the one protocol table whose size was free at stage time, so no disk read and no null size
- *       like npm's. Attribution runs off the repository row's type, exactly like the CI records
- *       below, so both maven types' live sets fill from this one table and the pull-through
- *       workstream adds no census code when its constant lands.
+ *   <li>{@code maven-packages} / {@code maven-proxy} — {@code maven_artifact.blob_id}, sized from
+ *       the row: that table is the one protocol table whose size was free at stage time, so no disk
+ *       read and no null size like npm's. Attribution runs off the repository row's type, exactly
+ *       like the CI records below, so both maven types' live sets fill from this one table — which
+ *       is why the pull-through cache needed no census code. A cached jar is as live as a deployed
+ *       one; what may be re-fetched is the collector's question, not this one's.
  *   <li>{@code daemon-binaries} — {@code daemon_binary.blob_id}, sized from the row for the same
  *       reason maven's is. This is the set that made {@code orphanBytes} honest: every row-less
  *       blob the store held was a ci-daemon build pushed through the blob-upload session, which
@@ -203,9 +204,9 @@ public class LiveBlobCensus {
         recordBlobs.putIfAbsent((String) blob[0], (Long) blob[1]);
       }
       // The maven half, on the records pattern: attributed by the row's repository type rather than
-      // by a hardcoded constant, so BOTH maven types' live sets fill from maven_artifact and the
-      // pull-through workstream adds no census code when MAVEN_PROXY lands. Sized from the row, the
-      // one protocol table that has the size.
+      // by a hardcoded constant, so BOTH maven types' live sets fill from maven_artifact — which is
+      // why MAVEN_PROXY landed with no census code at all. Sized from the row, the one protocol
+      // table that has the size.
       Map<String, Long> mavenBlobs = live.get(repository.type);
       for (Object[] blob : mavenArtifacts.listDistinctBlobs(repository.name)) {
         mavenBlobs.putIfAbsent((String) blob[0], (Long) blob[1]);

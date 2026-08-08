@@ -50,6 +50,7 @@ Everything that had to be declared, and the symptom each one produces if it is d
 | `dto/UploadResult` | `@RegisterForReflection` | every upload 500s: the type is behind a `Response` return, so nothing registers it |
 | `PostReceiveNotifier` | the `HttpClient` is an instance field, not static | build fails: an `HttpClientFacade` in the image heap |
 | `npm/NpmUpstream` | the `HttpClient` is an instance field, not static | same as above — an `HttpClientFacade` frozen into the image heap |
+| `maven/MavenUpstream` | the `HttpClient` is an instance field, not static | same as above; the sixth outbound client, and the rule has still not changed. It reads and writes only `String`/`byte[]` and needs nothing else declared — the maven stack, like `registry` and `npm`, still adds zero native-image configuration |
 | `gc/CdHttpDeploymentPins`, `gc/CiHttpDaemonPins` | the `HttpClient` is an instance field, not static | same as above; the third and fifth outbound clients, and the rule has not changed. It moved with the class when GC became its own module — the rule travels with the client, not with the package |
 | `registry/MirrorUpstream` | the `HttpClient` is an instance field, not static — and so is `MirrorBearerTokens`' `ObjectMapper`, which is reachable from one | same as above; the fourth outbound client, and the rule still has not changed |
 | artifacts' `microprofile-config.properties` | H2 url with no `AUTO_SERVER` | the binary dies at boot on `ClassNotFoundException: org.h2.server.TcpServer` |
@@ -83,7 +84,7 @@ gateway. Five second-level segments and the segment itself, plus one root-level 
 | `/artifacts/q/**` | Quarkus' non-application root (openapi, swagger-ui, health) | `quarkus.http.non-application-root-path` |
 | `/artifacts/git/**` | raw Vert.x routes in `GitHostRoutes` | **nothing** — the segment is a literal in the code |
 | `/artifacts/npm/**` | raw Vert.x routes in `NpmRoutes` (the npm registry, hosted + proxy) | **nothing** — a literal, and `NpmPaths.BASE` is the only place it is spelled |
-| `/artifacts/maven/**` | raw Vert.x routes in `MavenRoutes` (the maven repository, hosted) | **nothing** — a literal, and `MavenPaths.BASE` is the only place it is spelled |
+| `/artifacts/maven/**` | raw Vert.x routes in `MavenRoutes` (the maven repository, hosted + proxy) | **nothing** — a literal, and `MavenPaths.BASE` is the only place it is spelled |
 | `/artifacts/daemons/**` | raw Vert.x routes in `DaemonRoutes` (the platform's own daemon binaries) | **nothing** — a literal, and `DaemonPaths.BASE` is the only place it is spelled |
 | `/artifacts/docs/**` | raw Vert.x routes in `DocsRoutes` (published documentation bundles) | **nothing** — a literal, and `DocsPaths.BASE` is the only place it is spelled |
 | `/v2/**` | raw Vert.x routes in `RegistryRoutes` (the OCI Distribution API) | **nothing** — a literal, and not under `/artifacts` at all |
@@ -180,7 +181,10 @@ Two top-level packages, deliberately kept apart:
     each javadoc'd as the gc module's alone, plus `DaemonRegistryCollection` and
     `MavenRegistryCollection` (`collect`). The funnels
     stay package-private: widening them to public would hand their constraints to every package on
-    the classpath to serve one module.
+    the classpath to serve one module. `MavenRegistryCollection` opens **three** methods rather than
+    one — `collect` for the hosted type, `evictProxiedArtifact`/`evictProxiedMetadata` for the
+    cache — and the split is the point: one table holds both maven types' rows, so the doors differ
+    by which repository type they refuse.
 - `eu.wohlben.qits.githost` — the git host. Mostly `service/`, plus `eu.wohlben.qits.githost.storage`
   in the `git-storage` module. It is **not** folded into `artifacts`: it shares no code with the blob
   store, and keeping the package separate keeps a future second split cheap. It now shares the
@@ -202,8 +206,8 @@ Two top-level packages, deliberately kept apart:
   by layer rather than by context: every byte and every row goes through `artifacts/control`
   (`OciRegistryService`, `NpmRegistryService`, `MavenRegistryService`, `DaemonRegistryService`,
   `BlobStore`), and the
-  `service/` package holds routes, error envelopes and — for npm — the outbound upstream client. A
-  wire package that touched a Panache repository directly would be the drift to watch for.
+  `service/` package holds routes, error envelopes and — for npm and maven — the outbound upstream
+  client. A wire package that touched a Panache repository directly would be the drift to watch for.
 
 `artifacts` carries its own `error/` package (`ArtifactsException` and the four status-carrying
 subtypes) rather than the monorepo's `domain/error/*`. It always did — this is one of the few
@@ -281,7 +285,12 @@ resolves to, and `oci_mirror_tag_check`, which the miss path writes — one row 
 moved both by a fetch and by a `HEAD` that found the digest unchanged, and deliberately **not**
 moved when the upstream could not be reached (a failed check that touched it would suppress the
 next attempt for a whole TTL). The maven repository owns one (V8): `maven_artifact`, path-keyed
-with its `size_bytes` beside the blob id. The daemon-binaries type owns one (V10): `daemon_binary`,
+with its `size_bytes` beside the blob id — and the pull-through cache (V13) adds **no second
+artifact table**, because a cached file is an ordinary `maven_artifact` row under a `maven-proxy`
+repository and every reader already attributes by the repository row's type. V13's one table is
+`maven_proxy_metadata`, the cached `maven-metadata.xml` with its two validators and `fetched_at`:
+the one maven document that mutates, and the one thing that could not be an immutable path or a
+derivation over the cached rows. The daemon-binaries type owns one (V10): `daemon_binary`,
 keyed `(repository, name, version)` with its `size_bytes` beside the blob id too — those two are the
 protocol tables the census sizes without a disk read. The docs type owns two (V12): `docs_site`, keyed
 `(repository, name, version)`, and `docs_file`, whose key is that plus the path and whose foreign
@@ -429,9 +438,9 @@ collection" section is the contract; these are the rules that get "helpfully" re
 - **Both engines are live over every configured type.** The settlement (`artifacts-gc-plan.md`,
   2026-08-05) replaced the bespoke strategies with `CacheEvictionStrategy` + `OwnArtifactsStrategy`,
   mapped onto types by `qits.artifacts.gc.type.<wire-name>.strategy|window` (`GcTypeConfig`).
-  `oci-mirror` and `npm-proxy` run the cache engine; `oci-images`, `daemon-binaries`,
-  `npm-packages`, `maven-packages` and `docs` run the own engine; only the two CI types are
-  `excluded`, and
+  `oci-mirror`, `npm-proxy` and `maven-proxy` run the cache engine; `oci-images`,
+  `daemon-binaries`, `npm-packages`, `maven-packages` and `docs` run the own engine; only the two CI
+  types are `excluded`, and
   that is a decision rather than a gap. `GcTypeConfigTest` is the guard, and it is edited
   **deliberately, once per workstream**: the moving types' new dead sets are written out there, and
   every other type stays identity-for-identity as it was.
@@ -458,6 +467,13 @@ collection" section is the contract; these are the rules that get "helpfully" re
   its own — the mirror's rule, now `oci-images`' too. The bytes are safe in the meantime because the
   sweep's pre-unlink re-census sees the surviving row; what runs a run ahead of reality is the
   dry-run's per-type figure, not the store.
+- **`maven-proxy`'s identity is a PATH, and that is deliberately NOT `maven-packages`' rule.** The
+  hosted type folds a version's files into one coordinate because half a published version is a
+  broken resolve nothing can repair; a cache repairs itself on the next request, so there is no
+  half-version to prevent and a coordinate unit would only withhold cold files because one sibling
+  is warm. Its second identity is the cached document (`<path> (metadata)`, a public spelling
+  because it is on the wire), whose staleness folds in the access of the files under its directory —
+  the packument rule restated, and wrong without the fold in exactly the same way.
 - **`maven-packages`' identity is a COORDINATE, not a row.** A version is a set of files, and half
   a version is a broken resolve, so `MavenPackagesGcAdapter` folds rows into
   `groupId:artifactId:version` (timestamped snapshots into their own resolvable coordinate) and the
@@ -477,6 +493,8 @@ collection" section is the contract; these are the rules that get "helpfully" re
   `evictProxiedPackument` (proxy) write none, because re-fetching the version from upstream is what
   the cache is for. One table holds both kinds of row, so the eviction doors check the repository's
   **type** and refuse anything but `npm-proxy` — that check is what makes "no tombstone" safe.
+  `MavenRegistryCollection.evictProxiedArtifact` / `evictProxiedMetadata` are the same three
+  sentences over `maven_artifact` and `maven_proxy_metadata`, refusing anything but `maven-proxy`.
 - **A packument's staleness folds in its versions' access.** `fetched_at` alone says when the
   *document* was last revalidated, which a TTL moves on its own; judging on it would evict the
   document of a package something installs weekly. And evicting one frees **no disk** — the
@@ -498,10 +516,11 @@ collection" section is the contract; these are the rules that get "helpfully" re
   `qits.artifacts.gc`: a mapping rooted at the wider prefix would claim `blob-grace-period` and the
   pin urls, which other classes read.
 
-Nine strategy classes exist, one per type, and **seven of them are thin binders rather than rules** —
-`OciMirrorGcStrategy` and `NpmProxyGcStrategy` on the cache engine, `OciImageGcStrategy`,
-`DaemonBinariesGcStrategy`, `NpmPackagesGcStrategy`, `MavenPackagesGcStrategy` and
-`DocsGcStrategy` on the own engine, each naming its `*GcAdapter` and nothing else. A class that is four lines long is doing its
+Ten strategy classes exist, one per type, and **eight of them are thin binders rather than rules** —
+`OciMirrorGcStrategy`, `NpmProxyGcStrategy` and `MavenProxyGcStrategy` on the cache engine,
+`OciImageGcStrategy`, `DaemonBinariesGcStrategy`, `NpmPackagesGcStrategy`,
+`MavenPackagesGcStrategy` and `DocsGcStrategy` on the own engine, each naming its `*GcAdapter` and
+nothing else. A class that is four lines long is doing its
 job; a rule appearing in one is the settlement being unpicked one type at a time. The two CI stubs
 (`CiScreenshotsGcStrategy`, `CiVideosGcStrategy`) are the exception and are deliberately two
 classes, because their intended rules diverge in kind (branch-scoped against byte-budgeted) and one
@@ -566,7 +585,9 @@ settlement priced it with every other own type.
 the scope is filtered by the repository row's **type** and asserted from both sides
 (`NpmPackagesGcStrategyTest`, `NpmProxyGcStrategyTest`) — a leak in either direction is the one
 mistake these two types can make. Its second identity is the cached packument
-(`<package> (packument)`, a public spelling because it is on the wire).
+(`<package> (packument)`, a public spelling because it is on the wire). `maven-proxy` /
+`MavenProxyGcStrategy` is that hazard verbatim over `maven_artifact`, asserted from both sides by
+`MavenPackagesGcAdapterTest` and `MavenProxyGcStrategyTest`.
 
 `BlobStore.delete` is package-private for the same reason `promote` is the one write funnel: the
 constraints (grace window off the file mtime, the pre-unlink guard inside the write lock `promote`
@@ -592,8 +613,8 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 
 ## Tests
 
-- `mvn verify` runs 512 tests (115 in `artifacts/`, 18 in `git-storage/`, 125 in `gc/`, 254 in
-  `service/`) in about two minutes — counted from the surefire reports, which the previous figure
+- `mvn verify` runs 611 tests (157 in `artifacts/`, 18 in `git-storage/`, 135 in `gc/`, 301 in
+  `service/`) in about three minutes — counted from the surefire reports, which the previous figure
   here was not. Nothing here
   needs docker — and that is the constraint that shapes the registry suite: `docker`, `podman` and
   `skopeo` may not be assumed present, so `registry/OciClient` + `registry/TinyImage` synthesise a
@@ -612,6 +633,20 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   than by touching its fields, and the reason is worth knowing before writing another one: Quarkus
   instantiates a `QuarkusTestProfile` in **two** classloaders, so a static singleton exists twice
   and the application ends up talking to a different instance than the test configures.
+- **The maven proxy suite is the npm proxy's shape verbatim**, and for the same two reasons:
+  `maven/StubMavenRepository` is an in-process upstream, because a test that reached repo1.maven.org
+  would fail offline and pass *wrongly* (Central 404s a synthetic artifact exactly as a
+  misconfigured proxy does), and because counting upstream requests is what every caching claim
+  rests on. It carries a `RUN` salt for the mirror suites' reason — nothing wipes
+  `target/artifacts-svc-test-blobs`, so reused bytes make a fetch a blob-store hit and the count
+  comes out one short. Two classes, split by TTL exactly as npm's are: `MavenProxyTest` at the
+  shipped hour (the hit cases, the derived-checksum case, the publish refusal, the census
+  attribution) and `MavenProxyMetadataTest` at `PT0S` (revalidation with either validator,
+  serve-stale, a new upstream version).
+  **The strongest case in the pair is the one where upstream's checksum is deliberately WRONG**: a
+  proxy that derived checksums locally would answer the jar's real hash and pass every other test in
+  the file, so hosting a mismatching `.sha1` is what proves the client's verification is still end
+  to end.
 - The maven suite is the hosted half of that shape again: `maven/TinyArtifact` synthesises a real
   jar in memory and `maven/MavenClient` drives the deploy/resolve round trip over the JDK
   `HttpClient` — no RestAssured, no maven binary, no network, because the path grammar and the
@@ -806,9 +841,9 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 - The blob store's `RepositoryType` enum hardcodes its types. Adding one is a schema check
   constraint change plus a validation profile, not a config knob — since V2 the constraint is named
   (`ck_artifact_repository_type`), so widening it is a one-liner (V3 is that one-liner, twice over).
-- **The seven protocol types' profiles are empty and their `maxBytes()` is `0`, and that is not an
+- **The eight protocol types' profiles are empty and their `maxBytes()` is `0`, and that is not an
   oversight.** `OCI_IMAGES`, `NPM_PACKAGES`, `NPM_PROXY`, `OCI_MIRROR`, `MAVEN_PACKAGES`,
-  `DAEMON_BINARIES` and `DOCS` never
+  `MAVEN_PROXY`, `DAEMON_BINARIES` and `DOCS` never
   flow through
   `BlobService` — their
   bytes arrive on their own wire routes and go straight to `BlobStore` — so there is no media type to

@@ -4,6 +4,7 @@ import eu.wohlben.qits.artifacts.control.BlobStore;
 import eu.wohlben.qits.artifacts.control.MavenChecksums;
 import eu.wohlben.qits.artifacts.control.MavenLayout;
 import eu.wohlben.qits.artifacts.control.MavenRegistryService;
+import eu.wohlben.qits.artifacts.entity.RepositoryType;
 import eu.wohlben.qits.artifacts.error.MavenException;
 import eu.wohlben.qits.registry.OciRequestBody;
 import io.quarkus.runtime.configuration.MemorySize;
@@ -62,6 +63,14 @@ import org.jboss.logging.Logger;
  *       answers 404 there, so the resolver's defined fallback survives.
  * </ul>
  *
+ * <p>A {@code maven-proxy} repository runs on these same routes and inverts two of those three
+ * rules, because nothing it holds is ours. {@code maven-metadata.xml} is <b>cached with a TTL</b>
+ * rather than derived — the rows are what this cache happens to hold, not what exists upstream — and
+ * a file's checksums are <b>upstream's own, cached</b> rather than derived, which is what keeps the
+ * client's verification end to end. The one thing still derived there is the checksum of the cached
+ * metadata document, and that is the point: it is computed from the bytes served beside it, so the
+ * two can never disagree. A {@code PUT} is {@code 405} by type.
+ *
  * <p><b>There is no authentication here, at all</b> — not a token, not a guard, nothing. The OCI
  * registry's threat model verbatim: producers and consumers are internal on qits-net, and from
  * outside {@code /artifacts/maven/**} falls under qits-gateway's ordinary session auth like any
@@ -78,6 +87,7 @@ public class MavenRoutes {
   private static final Duration UPLOAD_IDLE_TIMEOUT = Duration.ofMinutes(1);
 
   @Inject MavenRegistryService registry;
+  @Inject MavenUpstream upstream;
   @Inject BlobStore blobStore;
 
   /**
@@ -134,12 +144,20 @@ public class MavenRoutes {
    * {@code GET|HEAD /artifacts/maven/<repo>/<path…>} — an artifact, a derived document, or a
    * derived checksum. The three are told apart <b>by name</b>, in order: {@code
    * maven-metadata.xml}, its checksum siblings, then any other checksum suffix, then a stored file.
+   *
+   * <p>A {@code maven-proxy} repository takes a shorter route through the same names — see {@link
+   * #serveProxied}. The two are told apart by the repository's type and never by a path.
    */
   private void serve(RoutingContext rc, boolean withBody) {
     String repository = rc.pathParam("repository");
-    registry.requireMavenRepository(repository);
+    RepositoryType type = registry.requireMavenRepository(repository);
     String path = rc.pathParam("path");
     String file = MavenLayout.fileOf(path);
+
+    if (type == RepositoryType.MAVEN_PROXY) {
+      serveProxied(rc, repository, path, file, withBody);
+      return;
+    }
 
     if (MavenLayout.isMetadata(file)) {
       serveDocument(rc, repository, path, null, withBody);
@@ -158,6 +176,53 @@ public class MavenRoutes {
       return;
     }
     serveFile(rc, repository, path, withBody);
+  }
+
+  /**
+   * The pull-through cache's read path: two classes of name, and no derivation of the third.
+   *
+   * <ul>
+   *   <li>{@code maven-metadata.xml} is the one document that mutates upstream, so it is served from
+   *       the TTL'd cache and revalidated on expiry ({@link MavenUpstream#metadata}). It is
+   *       <b>not</b> derived from the cached rows the way the hosted repository derives its own: the
+   *       rows are the versions this cache happens to hold, and a resolver asking what exists
+   *       upstream would be told a subset and stop looking.
+   *   <li>A metadata checksum sibling is <b>derived by hashing the cached document</b>, and that is
+   *       the one place this proxy computes a hash rather than caching upstream's. Upstream's copy
+   *       is a hash of whatever its metadata says <em>now</em>, which is a different document from
+   *       the one inside our TTL the moment a version is released — so proxying it would hand every
+   *       client a checksum that does not match the bytes beside it. A derived one is consistent by
+   *       construction.
+   *   <li>Everything else, <b>upstream's own {@code .sha1}/{@code .md5}/{@code .sha256}/{@code
+   *       .sha512} files included</b>, is an immutable path: cached forever, served from the blob
+   *       store, fetched once on a miss. Caching those rather than deriving them is what keeps the
+   *       client's verification end to end — see {@link MavenUpstream}'s javadoc.
+   * </ul>
+   */
+  private void serveProxied(
+      RoutingContext rc, String repository, String path, String file, boolean withBody) {
+
+    if (MavenLayout.isMetadata(file)) {
+      byte[] document = upstream.metadata(repository, path);
+      respond(rc, 200, "application/xml; charset=utf-8", document, withBody);
+      return;
+    }
+    String metadataAlgorithm = MavenLayout.metadataChecksumAlgorithm(file);
+    if (metadataAlgorithm != null) {
+      byte[] document =
+          upstream.metadata(
+              repository, MavenLayout.directoryOf(path) + "/" + MavenLayout.METADATA);
+      byte[] hex =
+          MavenChecksums.hexDigest(document, metadataAlgorithm).getBytes(StandardCharsets.UTF_8);
+      respond(rc, 200, "text/plain; charset=utf-8", hex, withBody);
+      return;
+    }
+
+    MavenRegistryService.StoredArtifact stored =
+        registry
+            .findArtifact(repository, path)
+            .orElseGet(() -> upstream.fetchArtifact(repository, path));
+    serveStored(rc, repository, path, stored, withBody);
   }
 
   /**
@@ -275,17 +340,33 @@ public class MavenRoutes {
     respond(rc, 200, "text/plain; charset=utf-8", hex.getBytes(StandardCharsets.UTF_8), withBody);
   }
 
-  /**
-   * A stored file, served zero-copy. Immutable paths are content-addressed underneath and immutable
-   * on top, so the bytes behind their URL can never mean something else — the same stance as the
-   * npm tarball route and the OCI blob route. A literal {@code -SNAPSHOT} file is the one moving
-   * target, and says so in its cache header.
-   */
+  /** A stored file of a hosted repository: a miss here is a 404, because there is nowhere to ask. */
   private void serveFile(RoutingContext rc, String repository, String path, boolean withBody) {
     MavenRegistryService.StoredArtifact stored =
         registry
             .findArtifact(repository, path)
             .orElseThrow(() -> new MavenException(404, "no such artifact: " + path));
+    serveStored(rc, repository, path, stored, withBody);
+  }
+
+  /**
+   * A stored file, served zero-copy — <b>one</b> code path for both maven types, which is the whole
+   * reason a proxied file gets an ordinary {@code maven_artifact} row on its first pull. The only
+   * difference the proxy makes is what happens on a miss: a hosted repository has a 404 to give, and
+   * a proxy has an upstream to ask.
+   *
+   * <p>Immutable paths are content-addressed underneath and immutable on top, so the bytes behind
+   * their URL can never mean something else — the same stance as the npm tarball route and the OCI
+   * blob route. A literal {@code -SNAPSHOT} file is the one moving target, and says so in its cache
+   * header; nothing a proxy caches is in that class, because upstream's mutable document never
+   * becomes a row.
+   */
+  private void serveStored(
+      RoutingContext rc,
+      String repository,
+      String path,
+      MavenRegistryService.StoredArtifact stored,
+      boolean withBody) {
     Path blob;
     long size;
     try {
@@ -298,6 +379,11 @@ public class MavenRoutes {
     // Locate first, then touch — a row whose bytes are gone is a 404, not an access. HEAD counts,
     // the stance the OCI manifest route already takes. The derived documents and checksums do not:
     // they are not this row's bytes, and a resolver never fetches a checksum without its file.
+    //
+    // One call for both types. A cached file is an ordinary maven_artifact row, the fetch that
+    // created it counts as its first access, and this is the column the cache eviction window is
+    // measured against — so an untracked read here would be a dependency the collector thinks
+    // nothing resolves.
     registry.touchArtifact(repository, path);
 
     HttpServerResponse response =
@@ -340,7 +426,18 @@ public class MavenRoutes {
    */
   private void deploy(RoutingContext rc) {
     String repository = rc.pathParam("repository");
-    registry.requireMavenRepository(repository);
+    RepositoryType type = registry.requireMavenRepository(repository);
+    if (type != RepositoryType.MAVEN_PACKAGES) {
+      // Refused by TYPE, not by configuration, and before the body is read: a cache that accepted a
+      // deploy would let cached upstream content and published content share a namespace, which is
+      // the one thing the two-type split exists to prevent. The same refusal npm's publish makes.
+      throw new MavenException(
+          405,
+          "'"
+              + repository
+              + "' is a pull-through cache of an upstream maven repository and accepts no deploys; "
+              + "deploy to a maven-packages repository instead");
+    }
     String path = rc.pathParam("path");
     String file = MavenLayout.fileOf(path);
 

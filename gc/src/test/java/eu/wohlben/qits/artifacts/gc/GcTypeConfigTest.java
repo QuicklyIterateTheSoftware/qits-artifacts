@@ -34,8 +34,8 @@ import org.junit.jupiter.api.Test;
  *
  * <p>Moved so far: {@code oci-mirror} and {@code npm-proxy} onto the cache engine, then {@code
  * oci-images} and {@code daemon-binaries} onto the own engine, then {@code npm-packages} and
- * {@code maven-packages}. Only the two CI types are left unmoved, and they are excluded by the
- * settlement rather than pending.
+ * {@code maven-packages}, and {@code maven-proxy} arrived on the cache engine with its type. Only
+ * the two CI types are left unmoved, and they are excluded by the settlement rather than pending.
  */
 @QuarkusTest
 class GcTypeConfigTest extends GcFixture {
@@ -58,6 +58,7 @@ class GcTypeConfigTest extends GcFixture {
 
     assertEquals(GcPolicy.CACHE, strategies.get(RepositoryType.OCI_MIRROR));
     assertEquals(GcPolicy.CACHE, strategies.get(RepositoryType.NPM_PROXY));
+    assertEquals(GcPolicy.CACHE, strategies.get(RepositoryType.MAVEN_PROXY));
     assertEquals(GcPolicy.OWN, strategies.get(RepositoryType.OCI_IMAGES));
     assertEquals(GcPolicy.OWN, strategies.get(RepositoryType.NPM_PACKAGES));
     assertEquals(GcPolicy.OWN, strategies.get(RepositoryType.MAVEN_PACKAGES));
@@ -70,6 +71,10 @@ class GcTypeConfigTest extends GcFixture {
     assertEquals(Duration.ofDays(30), config.requireWindow(RepositoryType.OCI_IMAGES));
     assertEquals(Duration.ofDays(30), config.requireWindow(RepositoryType.NPM_PACKAGES));
     assertEquals(Duration.ofDays(90), config.requireWindow(RepositoryType.MAVEN_PACKAGES));
+    // P90D and not the other two caches' P30D: a library is resolved when something builds against
+    // it, which is maven-packages' sentence and does not stop being true because the jar is
+    // somebody else's.
+    assertEquals(Duration.ofDays(90), config.requireWindow(RepositoryType.MAVEN_PROXY));
     assertEquals(Duration.ofDays(90), config.requireWindow(RepositoryType.DAEMON_BINARIES));
     assertEquals(Optional.empty(), windows.get(RepositoryType.CI_SCREENSHOTS));
     assertEquals(Optional.empty(), windows.get(RepositoryType.CI_VIDEOS));
@@ -121,6 +126,7 @@ class GcTypeConfigTest extends GcFixture {
     MirrorStore mirror = seedMirror();
     seedMaven();
     ProxyStore proxy = seedProxy();
+    MavenProxyStore mavenProxy = seedMavenProxy();
     ageMirrorRows(Duration.ofDays(60));
     // One image, two build shas: the older one is what the access rule condemns, the newer one is
     // the pull target the belt protects for an image cd has never deployed.
@@ -181,6 +187,16 @@ class GcTypeConfigTest extends GcFixture {
         kept.get(RepositoryType.NPM_PROXY),
         "a package installed yesterday keeps its tarball and its document");
 
+    // The cache this workstream added. One file, not a coordinate: a cache repairs itself on the
+    // next request, so a cold jar goes without its warm sibling or the document above them.
+    assertEquals(
+        List.of(MAVEN_PROXY_COLD_PATH),
+        dead.get(RepositoryType.MAVEN_PROXY),
+        "a dependency nothing has resolved in 200 days, past this type's P90D");
+    assertEquals(
+        List.of(MAVEN_PROXY_WARM_PATH, MAVEN_PROXY_METADATA_PATH + MavenProxyGcAdapter.METADATA),
+        kept.get(RepositoryType.MAVEN_PROXY));
+
     // The two that moved in this workstream.
     assertEquals(
         List.of("alpha:" + COLD_SHA),
@@ -235,6 +251,7 @@ class GcTypeConfigTest extends GcFixture {
                 mirror.index(),
                 mirror.layer(),
                 proxy.coldTarball(),
+                mavenProxy.coldJar(),
                 coldDaemon,
                 coldTarball,
                 coldJar)
@@ -262,6 +279,7 @@ class GcTypeConfigTest extends GcFixture {
         List.of(
             RepositoryType.OCI_MIRROR,
             RepositoryType.NPM_PROXY,
+            RepositoryType.MAVEN_PROXY,
             RepositoryType.OCI_IMAGES,
             RepositoryType.DAEMON_BINARIES)) {
       assertTrue(

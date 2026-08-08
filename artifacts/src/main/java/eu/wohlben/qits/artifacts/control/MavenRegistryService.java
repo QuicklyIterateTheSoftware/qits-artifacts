@@ -2,10 +2,12 @@ package eu.wohlben.qits.artifacts.control;
 
 import eu.wohlben.qits.artifacts.entity.ArtifactRepository;
 import eu.wohlben.qits.artifacts.entity.MavenArtifact;
+import eu.wohlben.qits.artifacts.entity.MavenProxyMetadata;
 import eu.wohlben.qits.artifacts.entity.RepositoryType;
 import eu.wohlben.qits.artifacts.error.MavenException;
 import eu.wohlben.qits.artifacts.persistence.ArtifactRepositoryRepository;
 import eu.wohlben.qits.artifacts.persistence.MavenArtifactRepository;
+import eu.wohlben.qits.artifacts.persistence.MavenProxyMetadataRepository;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.context.control.ActivateRequestContext;
 import jakarta.inject.Inject;
@@ -33,6 +35,7 @@ public class MavenRegistryService {
 
   @Inject ArtifactRepositoryRepository repositories;
   @Inject MavenArtifactRepository artifacts;
+  @Inject MavenProxyMetadataRepository metadata;
   @Inject ArtifactAccessTracker accessTracker;
 
   /** A stored file, flattened for the serve path. */
@@ -41,27 +44,36 @@ public class MavenRegistryService {
   /** One row under a metadata prefix: the path and when it landed. */
   public record StoredPath(String path, Instant createdAt) {}
 
+  /** A cached upstream {@code maven-metadata.xml}: the document verbatim, its validators, its age. */
+  public record CachedMetadata(String doc, String etag, String lastModified, Instant fetchedAt) {}
+
   /**
    * Resolves the first path segment after {@code /artifacts/maven/} to a maven-typed repository
    * row.
    *
    * <p>Repositories are not created implicitly, exactly as on {@code /v2} and {@code
    * /artifacts/npm}: an unknown or wrong-typed name is a 404 whose message names the ensure
-   * endpoint and the type to ask for. The seeded {@code maven} row means a fresh deployment needs
-   * no manual step for the platform's own convention; every other name still has to be asked for,
-   * so a typo fails loudly rather than quietly minting a namespace.
+   * endpoint and the type to ask for. The two seeded rows — {@code maven} (hosted) and {@code
+   * central} (a pull-through cache of Maven Central) — mean a fresh deployment needs no manual step
+   * for the platform's own convention; every other name still has to be asked for, so a typo fails
+   * loudly rather than quietly minting a namespace.
+   *
+   * @return which of the two maven types this repository is, since the serve and deploy paths both
+   *     branch on it
    */
   @ActivateRequestContext
   public RepositoryType requireMavenRepository(String name) {
     ArtifactRepository repository = name == null ? null : repositories.findById(name);
-    if (repository == null || repository.type != RepositoryType.MAVEN_PACKAGES) {
+    if (repository == null
+        || (repository.type != RepositoryType.MAVEN_PACKAGES
+            && repository.type != RepositoryType.MAVEN_PROXY)) {
       throw new MavenException(
           404,
           "no such maven repository '"
               + name
               + "'; create it with PUT /artifacts/api/repositories/"
               + name
-              + " {\"type\":\"maven-packages\"}");
+              + " {\"type\":\"maven-packages\"} (or \"maven-proxy\")");
     }
     return repository.type;
   }
@@ -194,6 +206,148 @@ public class MavenRegistryService {
                             + path
                             + " to collect — the store moved since the plan was computed"));
     artifacts.delete(row);
+  }
+
+  // --- the pull-through cache -------------------------------------------------------------------
+
+  /**
+   * Records a file the proxy just pulled through, if it is not already known.
+   *
+   * <p>An ordinary {@code maven_artifact} row: the serve path stays <b>one</b> code path for both
+   * maven types — look the path up, and if it is missing and this is a proxy, go and get it — which
+   * is the npm proxy's shape verbatim.
+   *
+   * <p>Idempotent, because two concurrent builds resolving the same dependency are the normal case
+   * rather than the edge. The hosted immutability rules are deliberately not applied: nothing here
+   * is ours to guarantee, and a path re-fetched after eviction must be able to land again.
+   */
+  @ActivateRequestContext
+  @Transactional
+  public void recordProxiedArtifact(
+      String repository, String path, String blobId, long sizeBytes) {
+    if (artifacts.findOne(repository, path).isPresent()) {
+      return;
+    }
+    MavenArtifact row = new MavenArtifact();
+    row.repository = repository;
+    row.path = path;
+    row.blobId = blobId;
+    row.sizeBytes = sizeBytes;
+    row.createdAt = Instant.now();
+    artifacts.persist(row);
+  }
+
+  @ActivateRequestContext
+  public Optional<CachedMetadata> findProxyMetadata(String repository, String path) {
+    return metadata
+        .findOne(repository, path)
+        .map(row -> new CachedMetadata(row.doc, row.etag, row.lastModified, row.fetchedAt));
+  }
+
+  /** Stores or replaces a cached metadata document. Upstream's document goes in verbatim. */
+  @ActivateRequestContext
+  @Transactional
+  public void storeProxyMetadata(
+      String repository,
+      String path,
+      String doc,
+      String etag,
+      String lastModified,
+      Instant fetchedAt) {
+    MavenProxyMetadata row =
+        metadata.findOne(repository, path).orElseGet(MavenProxyMetadata::new);
+    boolean fresh = row.path == null;
+    row.repository = repository;
+    row.path = path;
+    row.doc = doc;
+    row.etag = etag;
+    row.lastModified = lastModified;
+    row.fetchedAt = fetchedAt;
+    if (fresh) {
+      metadata.persist(row);
+    }
+  }
+
+  /**
+   * Marks a cached document as revalidated without rewriting it — what a {@code 304} from upstream
+   * means.
+   *
+   * <p>A bulk update rather than a load-and-mutate, for the reason {@code
+   * NpmRegistryService.touchProxyMetadata}'s twin gives: loading the row to move one timestamp
+   * drags the whole CLOB through the JVM to write eight bytes.
+   */
+  @ActivateRequestContext
+  @Transactional
+  public void touchProxyMetadata(
+      String repository, String path, String etag, String lastModified, Instant fetchedAt) {
+    metadata.update(
+        "fetchedAt = ?1, etag = ?2, lastModified = ?3 where repository = ?4 and path = ?5",
+        fetchedAt, etag, lastModified, repository, path);
+  }
+
+  /**
+   * Evicts one <b>cached</b> file of a proxy repository.
+   *
+   * <p>The twin of {@link #collect}, and the difference is what it is allowed to mean. A hosted
+   * collection removes a coordinate this platform published; here the file is upstream's, evicting
+   * it is a cache decision, and the very next resolve must be able to pull it through again.
+   *
+   * <p><b>The repository's type is checked, not assumed.</b> {@code maven_artifact} is one table for
+   * both maven types, so a path is all that separates a cached row from a deployed one, and a caller
+   * that got the type wrong would silently delete a published jar through the cache's door.
+   *
+   * <p>Package-private, reached only through {@link MavenRegistryCollection}, and called only by the
+   * {@code gc} module's {@code MavenProxyGcAdapter}. The blob is not touched; what may be unlinked
+   * is the sweep's question.
+   *
+   * @throws MavenException {@code 404} if there is no such row, {@code 409} if the repository is not
+   *     a proxy
+   */
+  @ActivateRequestContext
+  @Transactional
+  void evictProxiedArtifact(String repository, String path) {
+    requireProxy(repository, path);
+    MavenArtifact row =
+        artifacts
+            .findOne(repository, path)
+            .orElseThrow(() -> new MavenException(404, "no such cached path " + path + " to evict"));
+    artifacts.delete(row);
+  }
+
+  /**
+   * Evicts one cached {@code maven-metadata.xml}. Same door, same type check: the next request
+   * revalidates against upstream and caches the answer again.
+   *
+   * @throws MavenException {@code 404} if nothing is cached, {@code 409} if the repository is not a
+   *     proxy
+   */
+  @ActivateRequestContext
+  @Transactional
+  void evictProxiedMetadata(String repository, String path) {
+    requireProxy(repository, path);
+    MavenProxyMetadata row =
+        metadata
+            .findOne(repository, path)
+            .orElseThrow(
+                () -> new MavenException(404, "no cached metadata at " + path + " to evict"));
+    metadata.delete(row);
+  }
+
+  /** Refuses anything but a {@code maven-proxy} repository — see {@link #evictProxiedArtifact}. */
+  private void requireProxy(String repository, String path) {
+    ArtifactRepository row = repository == null ? null : repositories.findById(repository);
+    if (row == null || row.type != RepositoryType.MAVEN_PROXY) {
+      throw new MavenException(
+          409,
+          "refusing to evict "
+              + path
+              + " from '"
+              + repository
+              + "' — eviction is a cache operation, and this repository is "
+              + (row == null ? "not registered" : row.type.wireName())
+              + ". A deployed file leaves only through collect(), whose caller removes a whole"
+              + " coordinate rather than one path");
+    }
   }
 
   /**
