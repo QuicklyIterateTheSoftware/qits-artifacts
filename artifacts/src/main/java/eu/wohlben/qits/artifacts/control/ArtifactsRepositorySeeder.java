@@ -8,7 +8,8 @@ import jakarta.inject.Inject;
 /**
  * Idempotently ensures the default repository rows exist: the two CI types ({@code ci-screenshots},
  * {@code ci-videos}), the platform image repository ({@code qits}, type {@code oci-images}), the
- * two npm roots ({@code npm} hosted, {@code npmjs} proxy), the maven root ({@code maven}, hosted),
+ * two npm roots ({@code npm} hosted, {@code npmjs} proxy), the two maven roots ({@code maven}
+ * hosted, {@code central} proxy),
  * the daemon root ({@code daemons}, type {@code daemon-binaries}), the docs root ({@code docs},
  * type {@code docs})
  * and the three OCI mirror namespaces ({@code hub}, {@code quay}, {@code redhat}, each paired with
@@ -50,10 +51,17 @@ public class ArtifactsRepositorySeeder {
   /**
    * The hosted maven repository, at {@code /artifacts/maven/maven/}. Same argument as {@link #NPM}:
    * a pipeline's {@code mvn deploy} names this root by its {@code distributionManagement} url alone,
-   * so the one namespace nobody chooses must not also be a manual step. The {@code central} proxy
-   * row is deliberately not seeded yet — its type lands with the pull-through workstream.
+   * so the one namespace nobody chooses must not also be a manual step.
    */
   public static final String MAVEN = "maven";
+
+  /**
+   * The pull-through cache of Maven Central, at {@code /artifacts/maven/central/}. Separate row and
+   * separate type from {@link #MAVEN} on purpose — cached upstream content and deployed content
+   * never share a namespace, and a {@code PUT} here is refused by type. Named after what it fronts,
+   * the way {@link #NPM_PROXY} is.
+   */
+  public static final String MAVEN_CENTRAL = "central";
 
   /**
    * The platform's daemon binaries, at {@code /artifacts/daemons/}. Same argument as {@link #NPM}
@@ -83,6 +91,7 @@ public class ArtifactsRepositorySeeder {
     repositoryService.ensure(NPM, RepositoryType.NPM_PACKAGES);
     repositoryService.ensure(NPM_PROXY, RepositoryType.NPM_PROXY);
     repositoryService.ensure(MAVEN, RepositoryType.MAVEN_PACKAGES);
+    repositoryService.ensure(MAVEN_CENTRAL, RepositoryType.MAVEN_PROXY);
     repositoryService.ensure(DAEMONS, RepositoryType.DAEMON_BINARIES);
     repositoryService.ensure(DOCS, RepositoryType.DOCS);
     // The mirror namespaces (hub, quay, redhat) and the upstream row each of them fronts. Written

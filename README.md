@@ -745,11 +745,11 @@ publish-if-absent is the versioning convention, so a tag only ever moves as part
 `MavenRoutes` serves a maven repository at `/artifacts/maven/<repository>/<path…>`, the npm shape
 verbatim: npm lives at `/artifacts/npm/npm/<pkg>`, so the platform's own library deploys to
 `/artifacts/maven/maven/eu/wohlben/qits/qits-eventstream/1.0.0/qits-eventstream-1.0.0.jar`. The
-first segment is the `artifact_repository` row; `maven` (type `maven-packages`, hosted) is seeded
-at startup alongside `npm` and `npmjs`. Maven accepts a repository URL of any depth, so — like npm
-and unlike `/v2` — there is no root-level segment, no gateway change, and no client-side routing
-story beyond declaring the repository. A pull-through cache of Maven Central (`maven-proxy`, row
-`central`) is its own settled workstream; until it lands, consumers reach Central directly.
+first segment is the `artifact_repository` row; `maven` (type `maven-packages`, hosted) and
+`central` (type `maven-proxy`, a pull-through cache of Maven Central) are both seeded at startup,
+alongside `npm` and `npmjs`. Maven accepts a repository URL of any depth, so — like npm and unlike
+`/v2` — there is no root-level segment, no gateway change, and no client-side routing story beyond
+declaring the repository.
 
 ```
 GET|HEAD /artifacts/maven/<repo>/<path…>          an artifact, a pom, metadata, a checksum
@@ -793,6 +793,54 @@ falls under qits-gateway's ordinary session auth like any other non-allowlisted 
 The deploy `PUT` streams rather than buffers, capped by `qits.artifacts.maven.max-artifact-size`
 (default 128M) — the one size answer for both directions a jar can travel, the npm
 `max-publish-size` precedent.
+
+### The pull-through cache
+
+A `maven-proxy` repository fronts `qits.artifacts.maven.proxy.upstream` (default
+`https://repo1.maven.org/maven2`), so Central is hit once per file rather than once per build. It
+runs on the routes above and **inverts two of the three derivations**, because nothing it holds is
+ours:
+
+- **`maven-metadata.xml` is cached, not derived.** It is the one maven document that mutates — it
+  lists the versions upstream has — so it is cached with a TTL
+  (`qits.artifacts.maven.proxy.metadata-ttl`, default `PT1H`) and revalidated on expiry with
+  `If-None-Match`, or `If-Modified-Since` for an upstream too old to answer an etag. Deriving it
+  from the cached rows the way the hosted side does would answer with the versions this cache
+  happens to hold, and a resolver told a subset stops looking. When upstream is unreachable the
+  stale copy is served anyway — a build keeps resolving through a Central outage, which is half of
+  why this exists.
+- **A file's checksums are upstream's own, cached.** `.sha1`/`.md5`/`.sha256`/`.sha512` beside an
+  artifact are immutable paths like any other and are pulled through unchanged, so the maven client
+  verifies the jar end to end against a hash this service never computed. Deriving them here would
+  be worse than useless: a hash computed from bytes this service downloaded agrees with itself
+  whatever arrived, which removes the client's check while looking like it kept it.
+- **The metadata's own checksum siblings ARE derived**, and that is the exception the rule needs.
+  Upstream's `maven-metadata.xml.sha1` is a hash of whatever its document says *now*, which is a
+  different document from the one inside our TTL the moment a version is released — so proxying it
+  would hand every client a checksum that does not match the bytes beside it. Deriving it from the
+  cached document makes the two consistent by construction.
+- **Everything else is an immutable path**: a hit is `sendFile`, a miss streams from upstream
+  through `BlobStore.stage()` (hashing while streaming, for free), promotes, and writes an ordinary
+  `maven_artifact` row. That row is what keeps the serve path **one** code path for both maven
+  types, and what the census, the explorer and the collector all read without a line of new code.
+
+**A `PUT` is `405`, refused by type** — the rule `npm-proxy` and `oci-mirror` settled: cached
+upstream content and deployed content must never share a namespace, and no repository can drift from
+one meaning to the other because a type is immutable.
+
+SNAPSHOT paths need no special handling: Central hosts no snapshots, so they miss upstream and 404
+honestly.
+
+**The upstream client is a plain JDK `HttpClient`**, `NpmUpstream`'s shape verbatim — no extension,
+no reflection registration, no new dependency. Two bounded timeouts (30 s for a document, 10 minutes
+for an artifact) and **no retries**: this sits inside a request on a worker thread, so a hung
+upstream must cost one bounded wait. The suite cannot exercise real TLS by construction
+(clone-alone, no network: `StubMavenRepository` is an in-process upstream), so a deployment gets one
+manual smoke against real Central, once, on the native binary:
+
+```
+curl -sI http://<host>/artifacts/maven/central/org/slf4j/slf4j-api/2.0.13/slf4j-api-2.0.13.jar
+```
 
 ## The daemon binaries
 
@@ -1217,6 +1265,7 @@ a type nobody configured is a decision nobody took.
 | type | strategy | window |
 |---|---|---|
 | `oci-mirror`, `npm-proxy` | `cache` | `P30D` |
+| `maven-proxy` | `cache` | `P90D` (a library is resolved when something builds against it, which is `maven-packages`' sentence and does not stop being true because the jar is somebody else's) |
 | `oci-images`, `npm-packages` | `own` | `P30D` |
 | `maven-packages`, `daemon-binaries` | `own` | `P90D` |
 | `ci-screenshots`, `ci-videos` | `excluded` | — (a window beside a type nobody collects reads as a running rule) |
@@ -1233,6 +1282,7 @@ each — the sections below carry the reasoning:
 | `daemon-binaries` | `own`, `P90D` | a `daemon_binary` row | the last 2 versions; both rungs qits-ci names; a pinned digest's bytes; anything downloaded inside the window | `daemon_binary.blob_id`, sized from the row |
 | `oci-mirror` | `cache`, `P30D` | a cached tag, or a manifest no tag names | anything pulled inside the window; anything a live pin names by digest | manifest closure over survivors |
 | `npm-proxy` | `cache`, `P30D` | a cached version, or a cached packument | anything installed inside the window; anything a live pin names by digest | `npm_version.tarball_blob_id` of survivors |
+| `maven-proxy` | `cache`, `P90D` | a cached **file** — a path, not a coordinate — or a cached `maven-metadata.xml` | anything resolved inside the window; anything a live pin names by digest | `maven_artifact.blob_id`, sized from the row |
 | `ci-screenshots`, `ci-videos` | `excluded` | **nothing** — no engine is configured, so nothing of them is ever deleted | everything | `artifact_record.blob_id`, reported live |
 | git host (not an `artifact_repository` type) | none | superseded pack descriptions after a repack | every ref, current packs | `PackCatalog.list` per repo — its own later workstream |
 
@@ -1449,13 +1499,15 @@ only through the `NpmRegistryCollection` facade, and its one caller is
 was never a step someone had to remember, and both guarantees live in the mechanism where no path
 around them exists.
 
-### The two caches — the first types that ever deleted something
+### The three caches — the first types that ever deleted something
 
-`oci-mirror` and `npm-proxy` run one engine (`CacheEvictionStrategy`) over one rule: **everything
-unaccessed for longer than `P30D` is evicted, and a live pin outranks the window.** Both used to
-condemn nothing — the mirror said `append-only pending access tracking` out loud, npm-proxy was
-unclaimed — and both conditions are discharged: access tracking shipped (V9 for the OCI tables, V11
-for `npm_version`) and the settlement configured both types as `cache`.
+`oci-mirror`, `npm-proxy` and `maven-proxy` run one engine (`CacheEvictionStrategy`) over one rule:
+**everything unaccessed for longer than the configured window is evicted, and a live pin outranks
+the window.** The first two used to condemn nothing — the mirror said `append-only pending access
+tracking` out loud, npm-proxy was unclaimed — and both conditions are discharged: access tracking
+shipped (V9 for the OCI tables, V11 for `npm_version` and `maven_artifact`) and the settlement
+configured them as `cache`. `maven-proxy` arrived with its type already on the engine, which is what
+a settled mapping is for.
 
 What each one calls an identity, and what deleting it costs:
 
@@ -1463,8 +1515,9 @@ What each one calls an identity, and what deleting it costs:
 |---|---|---|---|
 | `oci-mirror` | a cached tag; a manifest **no tag names** (an index's child, or a manifest an upstream tag moved off) | `max(updated_at/created_at, accessed_at)` | one upstream pull, per architecture actually asked for |
 | `npm-proxy` | a cached version (`npm_version` row, proxy repositories only); a cached packument (`npm_proxy_packument` row) | version: `max(created_at, accessed_at)`; packument: `max(fetched_at, the newest access among that package's versions)` | one upstream request per document and per tarball |
+| `maven-proxy` | a cached **file** (`maven_artifact` row, proxy repositories only); a cached document (`maven_proxy_metadata` row) | file: `max(created_at, accessed_at)`; document: `max(fetched_at, the newest access among the files cached under its directory)` | one upstream request per file and per document |
 
-Three things are load-bearing and each one is a way this could have gone wrong:
+Five things are load-bearing and each one is a way this could have gone wrong:
 
 - **A manifest a tag names is never a candidate of its own** — its tag is its identity. A child of a
   *kept* index is, though, and evicting one is not corruption: a mirror pull binds an index first and
@@ -1474,11 +1527,23 @@ Three things are load-bearing and each one is a way this could have gone wrong:
 - **A packument is judged with its versions' access folded in.** `fetched_at` says when the
   *document* was last revalidated upstream, which a TTL moves on its own; a package whose tarballs
   are being installed weekly is in use whatever its document's timestamp says.
-- **Proxy eviction writes no tombstone.** A tombstone records "this version's name is spent
-  forever", which is what a hosted registry owes its consumers and the exact opposite of what a cache
-  owes: the version is upstream's and re-fetching it is the point. So the proxy has its own doors —
-  `NpmRegistryCollection.evictProxiedVersion`/`evictProxiedPackument` — which refuse any repository
-  that is not `npm-proxy`, because one table holds both kinds of row.
+- **A cached `maven-metadata.xml` is judged the same way**, with the access of the files cached
+  under its directory folded in. Same argument, same failure without it: an artifact something
+  builds against weekly is in use whatever its document's timestamp says.
+- **Proxy eviction writes no tombstone, and goes through the cache's own doors.** A tombstone
+  records "this version's name is spent forever", which is what a hosted registry owes its consumers
+  and the exact opposite of what a cache owes: the content is upstream's and re-fetching it is the
+  point. So each proxy has doors of its own —
+  `NpmRegistryCollection.evictProxiedVersion`/`evictProxiedPackument` and
+  `MavenRegistryCollection.evictProxiedArtifact`/`evictProxiedMetadata` — which refuse any
+  repository that is not of the cache's type, because in both cases **one table holds both kinds of
+  row**. That type check is what makes "no tombstone" safe to say out loud, and it is asserted from
+  both sides.
+- **`maven-proxy`'s identity is a PATH, where `maven-packages`' is a coordinate.** The hosted type
+  folds a version's files into one identity because half a published version is a broken resolve
+  nothing can repair. A cache repairs itself on the next request, so there is no half-version to
+  prevent — and making a coordinate the unit here would withhold files nothing has asked for in
+  months because one sibling is warm.
 
 Mirrors stay a **separate type** for the reason they always were: `jdk-25` and `9.6` are neither
 calver releases nor build shas, so under docker's rules every mirrored tag would land on the
@@ -1499,7 +1564,9 @@ line.
 inside the H2 file (660 MB of an 747 MB database, measured 2026-08-01), so a delete returns their
 pages to H2's own free list and the file stays exactly the size it was. `reclaimableBytes` on the
 `npm-proxy` line therefore counts tarball blobs and nothing else, and the type's `note` carries the
-character figure beside that zero — without it a run that condemned a hundred documents reads as a
+character figure beside that zero. `maven-proxy` carries the same note for the same reason over its
+own `maven_proxy_metadata` documents, which are kilobytes rather than the packuments' hundreds of
+megabytes and are in no store-summary figure at all — without it a run that condemned a hundred documents reads as a
 run that did nothing.
 
 The file shrinks only under `SHUTDOWN COMPACT`, which closes the database, so **nothing in this
@@ -1553,8 +1620,8 @@ exactly the half-version the identity model exists to prevent.
 Deletion goes through `MavenRegistryCollection` → `MavenRegistryService.collect`, one file at a time
 with the collector removing a whole coordinate's set. No tombstone: a collected release path is a
 coordinate the repository no longer serves at all, and a re-deploy there is a fresh deploy rather
-than a mutation of a live one. `maven-proxy`, when its constant lands, is a `cache` in the
-settlement's mapping and needs an adapter rather than a rule of its own.
+than a mutation of a live one. `maven-proxy` is the cache beside it — a `cache` in the settlement's
+mapping, with an adapter of its own and no rule of its own; see "The three caches" above.
 
 ### `daemon-binaries`, on the own engine — the type the platform *executes*
 
@@ -1775,6 +1842,8 @@ app's `application.properties` overrides them.
 | `qits.artifacts.daemon.max-binary-size` | `256M` | the largest daemon binary, in either direction. The measured ci-daemon is 43 MB, so this is headroom rather than a snug fit; the publish PUT streams, so the knob is the only bound a chunked upload has |
 | `qits.artifacts.npm.proxy.upstream` | `https://registry.npmjs.org` | what an `npm-proxy` repository caches |
 | `qits.artifacts.npm.proxy.packument-ttl` | `PT5M` | how long a cached packument serves before revalidation |
+| `qits.artifacts.maven.proxy.upstream` | `https://repo1.maven.org/maven2` | what a `maven-proxy` repository caches |
+| `qits.artifacts.maven.proxy.metadata-ttl` | `PT1H` | how long a cached `maven-metadata.xml` serves before revalidation. An hour rather than npm's five minutes because a maven build pins exact versions and reads this document only to resolve a range or `LATEST`; a release nobody sees for an hour costs nothing, a document refetched per resolve costs every build |
 | `qits.repositories.git.max-pack-size` | `64M` | the git host's `BodyHandler` limit |
 | `qits.repositories.git.protect-default-branch` | `false` | refuse a direct update/delete of a repo's default branch — see "The default branch's seatbelt" |
 | `qits.repositories.git.push-token` | **unset** | the value `-o qits.token=<value>` must equal; unset and empty both match nothing |
@@ -1845,11 +1914,7 @@ decision.
   credential, since the registry is tokenless and pushes stay inside the deployment.
 - **Client-facing deletion.** Garbage collection executes now (see "Garbage collection"), but only
   as an operator's `POST /artifacts/api/gc/sweep` — the registries' `DELETE` endpoints stay
-  unimplemented, row-less blobs stay untouchable, and the npm proxy cache still only grows (its
-  eviction is parked for access tracking).
-- **A maven Central pull-through.** The hosted maven repository is above; the `maven-proxy` type,
-  its `central` row and the upstream cache are their own settled workstream (maven-repository-plan.md,
-  ⚖3), landing after the platform's own library publishes.
+  unimplemented and row-less blobs stay untouchable.
 - **Building packages.** The npm registry stores and serves them; nothing here runs `npm pack`. A
   producer is a CI step that runs `npm publish` over plain HTTP to `qits-platform-artifacts:8080` — no docker
   socket, no credential, since the registry is tokenless and publishes stay inside the deployment.

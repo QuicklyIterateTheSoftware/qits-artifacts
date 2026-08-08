@@ -31,9 +31,14 @@ package eu.wohlben.qits.artifacts.dto;
  * @param mavenPublishedBytes jars, poms and everything else deployed to the hosted maven
  *     repositories, deduped and sized from the rows — {@code maven_artifact} is the one protocol
  *     table that carries its size.
- * @param mavenProxyBytes bytes cached from an upstream maven repository. Zero until the
- *     pull-through workstream lands the type: no {@code maven-proxy} repository can exist before
- *     its constraint does, so zero is the honest figure rather than a placeholder.
+ * @param mavenProxyBytes jars, poms and checksum files cached from an upstream maven repository
+ *     (Maven Central by default), deduped and sized from the same rows — one table holds both maven
+ *     types and the census tells them apart by their repository's type. Reported beside the hosted
+ *     figure rather than folded into it, for {@link #ociMirrorBytes}' reason: one is what this
+ *     platform published, the other is what it cached and could re-fetch. The cached {@code
+ *     maven-metadata.xml} documents are H2 CLOBs and are in no figure here, the way {@link
+ *     #npmProxyPackumentBytes} is — they are kilobytes rather than that figure's hundreds of
+ *     megabytes, so the GC report's note carries the character count instead.
  * @param daemonBinaryBytes the platform's own daemon executables, deduped and sized from the rows —
  *     {@code daemon_binary} is the second protocol table that carries its size. Reported as its own
  *     figure rather than folded into any other because it is the one class whose bytes a running

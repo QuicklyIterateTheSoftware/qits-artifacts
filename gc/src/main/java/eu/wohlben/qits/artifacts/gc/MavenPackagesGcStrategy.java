@@ -26,8 +26,10 @@ import jakarta.inject.Singleton;
  * than a path</b> for the same reason: the settlement counts versions, and a jar whose pom was
  * collected out from under it is a broken resolve rather than a smaller version.
  *
- * <p>{@code maven-proxy}, when its constant lands, is a {@code cache} in the settlement's mapping
- * like the other two and needs an adapter rather than a rule of its own.
+ * <p>{@code maven-proxy} is the cache beside it — a {@code cache} in the settlement's mapping like
+ * the other two, with {@link MavenProxyGcAdapter} and no rule of its own. The two share {@code
+ * maven_artifact}, so each enumeration filters by the repository row's type; a leak in either
+ * direction is the one mistake these two types can make.
  *
  * <p>{@code @Singleton} rather than {@code @ApplicationScoped}, for the report's sake: a
  * normal-scoped bean answers {@code getClass().getSimpleName()} through its client proxy.

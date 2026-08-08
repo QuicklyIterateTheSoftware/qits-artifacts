@@ -606,8 +606,8 @@ class PackagedProcessIT {
         .body("npmProxyPackumentBytes", greaterThanOrEqualTo(0))
         .body("ociMirrorBytes", greaterThanOrEqualTo(0))
         .body("mavenPublishedBytes", greaterThanOrEqualTo(0))
-        // Zero, not merely non-negative: no maven-proxy repository can exist before the
-        // pull-through workstream lands the type.
+        // Zero, not merely non-negative: the seeded `central` cache exists here but nothing in
+        // this IT resolves through it, and there is no network to resolve through it with.
         .body("mavenProxyBytes", equalTo(0));
 
     given().when().get("/artifacts/api/repositories/no-such-repo/images").then().statusCode(404);
@@ -621,7 +621,7 @@ class PackagedProcessIT {
     // nothing references. The store here holds blobs pushed by the cases above, so the row-less
     // figures are a real reading rather than a zero that would pass either way.
     //
-    // Every one of the eight types is claimed now. oci-images and daemon-binaries must name their
+    // Every one of the ten types is claimed now. oci-images and daemon-binaries must name their
     // strategy — and, with no qits-platform-deployments and no qits-ci to answer, must report the refusal rather than
     // a plan. That
     // fail-closed path only exists in the binary if the JDK HttpClient survived the compile, so this
@@ -634,7 +634,7 @@ class PackagedProcessIT {
         .statusCode(200)
         .body("dryRun", equalTo(true))
         .body("graceWindow", equalTo("P7D"))
-        .body("types", hasSize(8))
+        .body("types", hasSize(10))
         .body("types.find { it.type == 'oci-images' }.strategy", equalTo("OciImageGcStrategy"))
         .body("types.find { it.type == 'oci-images' }.error", containsString("qits-platform-deployments"))
         .body("types.find { it.type == 'oci-images' }.dead", hasSize(0))
@@ -645,6 +645,8 @@ class PackagedProcessIT {
         .body("types.find { it.type == 'npm-packages' }.reclaimableBytes", equalTo(0))
         .body("types.find { it.type == 'npm-proxy' }.strategy", equalTo("NpmProxyGcStrategy"))
         .body("types.find { it.type == 'npm-proxy' }.error", containsString("live pins"))
+        .body("types.find { it.type == 'maven-proxy' }.strategy", equalTo("MavenProxyGcStrategy"))
+        .body("types.find { it.type == 'maven-proxy' }.error", containsString("live pins"))
         .body(
             "types.find { it.type == 'daemon-binaries' }.strategy",
             equalTo("DaemonBinariesGcStrategy"))
@@ -692,7 +694,7 @@ class PackagedProcessIT {
         .statusCode(200)
         .body("dryRun", equalTo(false))
         .body("graceWindow", equalTo("P7D"))
-        .body("types", hasSize(8))
+        .body("types", hasSize(10))
         .body("aborted", containsString("qits-platform-deployments"))
         .body("types.find { it.type == 'oci-images' }.error", containsString("qits-platform-deployments"))
         .body("types.find { it.type == 'npm-packages' }.deleted", hasSize(0))
