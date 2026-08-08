@@ -22,9 +22,9 @@ import org.junit.jupiter.api.Test;
  * <p>A guard here existed for one commit and was removed as a decision, which is why this suite is
  * worth its lines: the surface reads like the one that ought to be gated (it is the platform's own
  * executables), so "add a token check to the daemon publish" is the change most likely to be
- * proposed again. It must not be proposed piecemeal. Machine auth arrives wholesale with qits-idp,
- * for every publish path at once — gating this one alone reports a posture the other three do not
- * have.
+ * proposed again. It must not be proposed piecemeal. Machine auth arrives wholesale with
+ * qits-platform-idp, for every publish path at once — gating this one alone reports a posture the
+ * other three do not have.
  *
  * <p><b>What stands in for write auth.</b> A version is immutable: republishing {@code
  * (name, version)} is {@code 409} even for identical bytes, so an open publish can add a version and

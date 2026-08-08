@@ -2,29 +2,31 @@
 #
 # One step, two halves, and the split between them is the whole point:
 #
-#   1. build the artifacts client (service/src/main/webui = the qits-spa-artifacts submodule) HERE,
-#      in the step container, which sits on qits-net and can therefore reach the platform's own npm
-#      registry — where @qits/ui-components lives and where nothing else can reach it from;
+#   1. build the artifacts client (service/src/main/webui = the qits-platform-spa-artifacts
+#      submodule) HERE, in the step container, which sits on qits-net and can therefore reach the
+#      platform's own npm registry — where @qits/ui-components lives and where nothing else can
+#      reach it from;
 #   2. build this repo's docker/Dockerfile, whose builder stage packages that already-built bundle
 #      and never runs an install.
 #
-# The Docker build joins qits-net and Maven resolves qits-auth-core directly from qits-artifacts.
-# The frontend also builds in this step container because its npm registry uses that service alias.
-# it needs node, npm and git for half one and the docker CLI for half two. The same split, for the
-# same reason, as qits-gateway's pipeline and every webui-carrying sibling's — they should keep
-# matching.
+# The Docker build joins qits-net and Maven resolves qits-auth-core directly from
+# qits-platform-artifacts. The frontend also builds in this step container because its npm registry
+# uses that service alias. it needs node, npm and git for half one and the docker CLI for half two.
+# The same split, for the same reason, as qits-gateway's pipeline and every webui-carrying sibling's
+# — they should keep matching.
 #
 # --- the one thing no sibling has to think about: this repo IS that registry --------------------
-# $QITS_NPM_PROXY_URL and $QITS_NPM_REGISTRY_URL are http://qits-artifacts:8080/artifacts/npm/… —
-# this service, on qits-net. So half one dials the very container this run is about to replace, and
-# that is fine, because of WHEN: the currently deployed qits-artifacts serves the install while the
-# new image is still being built, and qits-cd does not swap it until the run is green and the image
-# is pushed. Nothing here bootstraps from the artifact it produces.
+# $QITS_NPM_PROXY_URL and $QITS_NPM_REGISTRY_URL are
+# http://qits-platform-artifacts:8080/artifacts/npm/… — this service, on qits-net. So half one dials
+# the very container this run is about to replace, and that is fine, because of WHEN: the currently
+# deployed qits-platform-artifacts serves the install while the new image is still being built, and
+# qits-cd does not swap it until the run is green and the image is pushed. Nothing here bootstraps
+# from the artifact it produces.
 #
 # What it does mean is that this repo's pipeline has a dependency the siblings' do not: a run here
-# cannot be green while qits-artifacts is down, and the deploy at the end of it blinks the git host,
-# the npm registry and the OCI registry at once — every other repo's builds included. Which is why
-# this repo is deployed alone, with nothing else in the queue.
+# cannot be green while qits-platform-artifacts is down, and the deploy at the end of it blinks the
+# git host, the npm registry and the OCI registry at once — every other repo's builds included.
+# Which is why this repo is deployed alone, with nothing else in the queue.
 #
 # Half two publishes under the tag that is the whole contract with qits-cd —
 # <registry>/<repository>/<this repo's name>:<sha>. The step's own container only drives the docker
@@ -43,61 +45,62 @@ steps:
       # exist and never will.
       set -eu
 
-      # The daemon's clone is `--depth 50` and does not recurse, so the qits-spa-artifacts submodule
-      # at service/src/main/webui arrives as an empty directory — and Quinoa fails the image build on
-      # exactly that (`No package.json found in Web UI directory`). Initialising it here rather than
-      # asking the daemon to clone differently keeps the submodule this repo's business: it is a
-      # public GitHub repo needing no credentials, and one shallow fetch.
-      frontend_url="${QITS_CI_REPOSITORY_URL%/*}/qits-spa-artifacts"
-      git -c submodule.qits-spa-artifacts.url="$frontend_url" submodule update --init service/src/main/webui
+      # The daemon's clone is `--depth 50` and does not recurse, so the qits-platform-spa-artifacts
+      # submodule at service/src/main/webui arrives as an empty directory — and Quinoa fails the
+      # image build on exactly that (`No package.json found in Web UI directory`). Initialising it
+      # here rather than asking the daemon to clone differently keeps the submodule this repo's
+      # business: it is a public GitHub repo needing no credentials, and one shallow fetch.
+      frontend_url="${QITS_CI_REPOSITORY_URL%/*}/qits-platform-spa-artifacts"
+      git -c submodule.qits-platform-spa-artifacts.url="$frontend_url" submodule update --init service/src/main/webui
 
       # THE LOCKFILE is the one file this step edits, and npm leaves no alternative. Same problem
       # and same fix as qits-gateway's pipeline; the recipe is maintained in qits-spa-home's own
       # pipeline and every copy of it should keep matching.
       #
-      # npm pins a full resolved URL per package, and qits-spa-artifacts' lockfile is generated on
-      # the deployment host, so all 573 entries name localhost:8081 — an address that does not exist
-      # in this container. `npm ci` fetches tarballs by that URL and never asks the configured
-      # registry for them, so the environment below does not reach them: without this swap the
-      # install dies on a connection that will never be answered. The paths are identical on both
-      # addresses, so replacing the ORIGIN and keeping the path is all it takes, and the integrity
-      # hashes are what make that safe — bytes from the other address must still hash the same. One
-      # sed covers both roots, because the proxy and the hosted repository differ only in their path
-      # (/artifacts/npm/npmjs/ and /artifacts/npm/npm/) and share this origin. The checkout is this
-      # step's own; nothing is edited that anyone will ever read again.
+      # npm pins a full resolved URL per package, and qits-platform-spa-artifacts' lockfile is
+      # generated on the deployment host, so all 573 entries name localhost:8081 — an address that
+      # does not exist in this container. `npm ci` fetches tarballs by that URL and never asks the
+      # configured registry for them, so the environment below does not reach them: without this
+      # swap the install dies on a connection that will never be answered. The paths are identical
+      # on both addresses, so replacing the ORIGIN and keeping the path is all it takes, and the
+      # integrity hashes are what make that safe — bytes from the other address must still hash the
+      # same. One sed covers both roots, because the proxy and the hosted repository differ only in
+      # their path (/artifacts/npm/npmjs/ and /artifacts/npm/npm/) and share this origin. The
+      # checkout is this step's own; nothing is edited that anyone will ever read again.
       #
       # npm's own knob for exactly this, `--replace-registry-host=always`, cannot do it against a
       # registry mounted under a path. @npmcli/arborist glues rather than resolves (reify.js:
       # `registry.slice(0, -1) + resolvedURL.pathname`), so
-      # http://qits-artifacts:8080/artifacts/npm/npmjs/ + /artifacts/npm/npmjs/zone.js/-/…tgz comes
-      # out as …/artifacts/npm/npmjs/artifacts/npm/npmjs/zone.js/-/…tgz and every tarball 404s.
-      # Measured on npm 10.9.4.
+      # http://qits-platform-artifacts:8080/artifacts/npm/npmjs/ +
+      # /artifacts/npm/npmjs/zone.js/-/…tgz comes out as
+      # …/artifacts/npm/npmjs/artifacts/npm/npmjs/zone.js/-/…tgz and every tarball 404s. Measured on
+      # npm 10.9.4.
       #
       # The origin is derived from the injected env rather than spelled here: no repository states a
-      # deployment's addresses, and the one address qits-spa-artifacts does state (localhost:8081, in
-      # its .npmrc, for a developer on the host) is the one being replaced.
+      # deployment's addresses, and the one address qits-platform-spa-artifacts does state
+      # (localhost:8081, in its .npmrc, for a developer on the host) is the one being replaced.
       cd service/src/main/webui
       npm_origin=$(node -p 'new URL(process.env.QITS_NPM_PROXY_URL).origin')
       sed -i -E "s#(\"resolved\": \")https?://[^/\"]+#\1$npm_origin#" package-lock.json
 
-      # ENVIRONMENT, not a file. qits-spa-artifacts COMMITS an .npmrc (localhost:8081, right for a
-      # developer on the host), and npm ranks a project .npmrc ABOVE ~/.npmrc — so a `cat > ~/.npmrc`
-      # preamble would be written and silently ignored. `npm_config_*` environment outranks both
-      # files, so it wins without touching the submodule's tree.
+      # ENVIRONMENT, not a file. qits-platform-spa-artifacts COMMITS an .npmrc (localhost:8081,
+      # right for a developer on the host), and npm ranks a project .npmrc ABOVE ~/.npmrc — so a
+      # `cat > ~/.npmrc` preamble would be written and silently ignored. `npm_config_*` environment
+      # outranks both files, so it wins without touching the submodule's tree.
       env npm_config_registry="$QITS_NPM_PROXY_URL" \
           "npm_config_@qits:registry=$QITS_NPM_REGISTRY_URL" \
           npm ci --no-audit --no-fund
 
-      # dist/qits-spa-artifacts/browser — the bundle the image build consumes (it is
+      # dist/qits-platform-spa-artifacts/browser — the bundle the image build consumes (it is
       # quarkus.quinoa.build-dir in service/src/main/resources/application.properties), and the ONE
-      # artifact this half exists to produce. Lint and test are qits-spa-artifacts' own pipeline's
-      # job; repeating them here would only make this repo red for someone else's commit.
+      # artifact this half exists to produce. Lint and test are qits-platform-spa-artifacts' own
+      # pipeline's job; repeating them here would only make this repo red for someone else's commit.
       npm run build
       cd -
 
-      ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-artifacts:$QITS_CI_SHA"
+      ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-platform-artifacts:$QITS_CI_SHA"
       docker build --network qits-net \
-        --build-arg QITS_MAVEN_REPOSITORY_URL=http://qits-artifacts:8080/artifacts/maven/maven \
+        --build-arg QITS_MAVEN_REPOSITORY_URL=http://qits-platform-artifacts:8080/artifacts/maven/maven \
         -t "$ref" -f docker/Dockerfile .
       docker push "$ref"
       docker rmi "$ref" || true

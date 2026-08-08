@@ -52,8 +52,8 @@ import org.jboss.logging.Logger;
  * <p><b>There is no authentication here, at all</b> — the same stance {@code /v2}, {@code
  * /artifacts/npm}, {@code /artifacts/maven} and {@code /artifacts/daemons} take, and for the same
  * reason: on qits-net producers are trusted, and what a publish cannot do is <em>change</em>
- * anything, because a version is immutable. Machine auth arrives wholesale with qits-idp, for every
- * surface at once; gating this one alone would report a decision nobody took.
+ * anything, because a version is immutable. Machine auth arrives wholesale with qits-platform-idp,
+ * for every surface at once; gating this one alone would report a decision nobody took.
  *
  * <p><b>No {@code BodyHandler}, anywhere in this class.</b> {@code BodyHandler.create()} defaults to
  * 10 MiB — the measured Storybook bundle is 9.7 MB uncompressed and the next one will not be, so it

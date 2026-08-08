@@ -99,8 +99,8 @@ public class RegistryRoutes {
     //
     //    These are also raw Vert.x routes, so the JAX-RS AdminWriteGuard never sees them: turning
     //    the machine-token gate on guards the JSON admin API and leaves /v2 exactly as it is
-    //    (qits-idp phase 1, and RegistryOpenPushTest pins it). A docker client speaks no bearer
-    //    from qits-idp, which is why guarding this surface is its own decision and not this one.
+    //    (qits-platform-idp phase 1, and RegistryOpenPushTest pins it). A docker client speaks no bearer
+    //    from qits-platform-idp, which is why guarding this surface is its own decision and not this one.
     router.route(RegistryPaths.BASE).handler(RegistryRoutes::stampApiVersion);
     router.route(RegistryPaths.BASE + "/*").handler(RegistryRoutes::stampApiVersion);
 

@@ -1,4 +1,4 @@
-# qits-artifacts — working notes
+# qits-platform-artifacts — working notes
 
 Read `README.md` first: it defines what this repo owns (the blob store and the git host, plus the
 three protocol registries built on the blob store — OCI at `/v2`, npm at `/artifacts/npm` and maven
@@ -164,7 +164,7 @@ Two top-level packages, deliberately kept apart:
   `mapper`, `control`, `error`; `service/` holds only `api`. Entities are Panache active-record with
   public fields; mappers are MapStruct `@Mapper(componentModel = "jakarta")`.
   - `eu.wohlben.qits.artifacts.gc` and `.gc.dto` (module `gc`) are **garbage collection** — a
-    process modelled from within qits-artifacts rather than artifacts domain
+    process modelled from within qits-platform-artifacts rather than artifacts domain
     (`artifacts-gc-plan.md`, settlement). A subpackage rather than a sibling top-level name, and
     deliberately **not** `artifacts.control` in a second jar: adapters sharing a package with the
     code they extend is the split package Quarkus' `SplitPackageProcessor` warns about on every
@@ -734,7 +734,7 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   push test passes without a receiver; the notifier is fire-and-forget and swallows the failure.
   `PostReceiveNotifierTest`, `CiPostReceiveBearerTest`, `GitHostNoCiOptionTest` and
   `GitHostProjectsIntakeDownTest` are the four that do assert deliveries, against `StubIntake` —
-  which plays qits-ci's intake, qits-projects' intake and qits-idp's token endpoint at once, counts
+  which plays qits-ci's intake, qits-projects' intake and qits-platform-idp's token endpoint at once, counts
   the two intakes separately (the fan-out's whole point is that the counts differ under
   `-o qits.no-ci`), and passes everything it observed through system properties because a
   `QuarkusTestProfile` is built in two classloaders.
@@ -756,7 +756,7 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   keys existed for one commit and was removed as a decision, not a simplification. What replaces
   write auth is what replaces it on the other three: versions are immutable (`409` on republish), so
   an open publish can add a version and never change one, and consumers pin the digest the route
-  echoes. **No publish surface is gated piecemeal** — machine auth arrives wholesale with qits-idp,
+  echoes. **No publish surface is gated piecemeal** — machine auth arrives wholesale with qits-platform-idp,
   for all of them at once. `RegistryOpenPushTest`, `NpmOpenPublishTest` and `DaemonOpenPublishTest`
   each run the gate on and assert their route stays open.
 - `service` ships `quarkus.http.limits.max-body-size=1088M`, which is a **global** ceiling — every
@@ -875,8 +875,8 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   has no other symptom.
 - **`ProtectedRefHook` ships inert and must stay that way in this repo.** `mvn verify` proves the
   matrix, but the shipped value of `qits.repositories.git.protect-default-branch` is what decides
-  whether this service can still receive its own redeploy — qits-artifacts is the git host that
-  serves the push that updates qits-artifacts. `PackagedProcessIT`'s
+  whether this service can still receive its own redeploy — qits-platform-artifacts is the git host that
+  serves the push that updates qits-platform-artifacts. `PackagedProcessIT`'s
   `theShippedDefaultsLeaveTheDefaultBranchUnprotected` asserts it against the packaged binary with
   no overrides; flipping the default
   here rather than in a deployment's env would be the one change that can strand this repo.

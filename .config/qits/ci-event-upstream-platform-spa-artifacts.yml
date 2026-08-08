@@ -1,19 +1,19 @@
 event: SCMRelease
 when:
-  - repository: { exact: qits-spa-artifacts }
+  - repository: { exact: qits-platform-spa-artifacts }
 steps:
   - image: qits/build-images/node-base:latest
     timeout-seconds: 600
     script: |
       set -eu
       version=$(node -p 'JSON.parse(process.env.QITS_EVENT_PAYLOAD).version')
-      frontend_url="${QITS_CI_REPOSITORY_URL%/*}/qits-spa-artifacts"
-      git -c submodule.qits-spa-artifacts.url="$frontend_url" submodule update --init service/src/main/webui
+      frontend_url="${QITS_CI_REPOSITORY_URL%/*}/qits-platform-spa-artifacts"
+      git -c submodule.qits-platform-spa-artifacts.url="$frontend_url" submodule update --init service/src/main/webui
       git -C service/src/main/webui fetch "$frontend_url" "refs/tags/$version:refs/tags/$version"
       git -C service/src/main/webui checkout --detach "$version"
       target=$(git -C service/src/main/webui rev-parse HEAD)
       current=$(git ls-tree HEAD service/src/main/webui | awk '{print $3}')
       if [ "$current" = "$target" ]; then exit 0; fi
       git update-index --add --cacheinfo 160000,$target,service/src/main/webui
-      git -c user.name="qits release train" -c user.email="release-train@qits.local" commit -q -m "bump(qits-spa-artifacts@$version): follow qits-spa-artifacts"
-      git push --force "$QITS_CI_REPOSITORY_URL" HEAD:refs/heads/maintenance/qits-spa-artifacts
+      git -c user.name="qits release train" -c user.email="release-train@qits.local" commit -q -m "bump(qits-platform-spa-artifacts@$version): follow qits-platform-spa-artifacts"
+      git push --force "$QITS_CI_REPOSITORY_URL" HEAD:refs/heads/maintenance/qits-platform-spa-artifacts

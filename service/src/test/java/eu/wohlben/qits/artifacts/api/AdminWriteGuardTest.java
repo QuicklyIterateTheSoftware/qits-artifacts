@@ -10,9 +10,9 @@ import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 /**
- * The JSON admin API with the machine-token gate ON — the posture a deployment with qits-idp runs.
- * Writes (PUT/POST/DELETE) need a bearer minted for qits-artifacts; reads stay open so a blob is
- * usable directly as an {@code <img>} src.
+ * The JSON admin API with the machine-token gate ON — the posture a deployment with
+ * qits-platform-idp runs. Writes (PUT/POST/DELETE) need a bearer minted for qits-platform-artifacts;
+ * reads stay open so a blob is usable directly as an {@code <img>} src.
  *
  * <p>The gate-OFF posture is what every other suite here runs under, so "unchanged when the gate is
  * off" is asserted by all of them at once rather than by one test.

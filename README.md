@@ -1,4 +1,4 @@
-# qits-artifacts
+# qits-platform-artifacts
 
 qits' **byte plane**: the metadata-rich blob store, the in-process git smart-HTTP host workspace
 containers clone from and push to, the OCI registry they pull images from, the npm registry —
@@ -22,9 +22,9 @@ with `domain.repository` — see `migration-plan.md` §3.4 in the home repo.
 |---|---|
 | `artifacts/` | `eu.wohlben.qits.artifacts.*` — entity, persistence, dto, mapper, control, error. The blob store proper. No web, no JAX-RS. |
 | `git-storage/` | `eu.wohlben.qits.githost.storage` — a JGit `DfsRepository` whose packs, pack indexes and refs are blobs, plus the two ports it declares and does not implement (`PackBlobStore`, `PackCatalog`). One compile dependency: JGit. |
-| `gc/` | `eu.wohlben.qits.artifacts.gc` (+ `.dto`) — garbage collection: the six per-type strategies, the two configured engines that will replace them, the planner, the reconciliation and the sweep, plus the two pin ports (`CdDeploymentPins`, `CiDaemonPins`) and their HTTP adapters. A *process* modelled from within qits-artifacts, not artifacts domain. Depends on `artifacts` and on nothing else here. No web, no JAX-RS — `GcPlanController` is in `service/`. |
+| `gc/` | `eu.wohlben.qits.artifacts.gc` (+ `.dto`) — garbage collection: the six per-type strategies, the two configured engines that will replace them, the planner, the reconciliation and the sweep, plus the two pin ports (`CdDeploymentPins`, `CiDaemonPins`) and their HTTP adapters. A *process* modelled from within qits-platform-artifacts, not artifacts domain. Depends on `artifacts` and on nothing else here. No web, no JAX-RS — `GcPlanController` is in `service/`. |
 | `service/` | `eu.wohlben.qits.artifacts.api` (the JAX-RS boundary), `eu.wohlben.qits.githost` (the Vert.x + JGit smart-HTTP host), `eu.wohlben.qits.githost.persistence` (the DFS storage adapters and the git host's entities), `eu.wohlben.qits.registry` (the Vert.x OCI Distribution API), `eu.wohlben.qits.npm` (the Vert.x npm registry and its upstream proxy) and `eu.wohlben.qits.maven` (the Vert.x maven repository). |
-| `service/src/main/webui/` | The `qits-spa-artifacts` submodule — an Angular SPA, built into the app by Quinoa and served at `/artifacts`. Not Java, and not a Maven module. |
+| `service/src/main/webui/` | The `qits-platform-spa-artifacts` submodule — an Angular SPA, built into the app by Quinoa and served at `/artifacts`. Not Java, and not a Maven module. |
 
 `artifacts/`, `git-storage/` and `gc/` are library jars. `artifacts` and `git-storage` depend on
 nothing of each other's — they are different contexts, which is why `git-storage` declares ports and
@@ -62,7 +62,7 @@ serving in a binary, and the only place the five route stacks are proved to coex
 It was extracted as a library, on the reasoning that packaging it would need an auth variant, a
 webui and a main class. All three have lapsed: authentication terminates at `qits-gateway` and this
 service reads a header, Quarkus supplies the main class, and the webui is now this repo's own —
-`service/src/main/webui` is the `qits-spa-artifacts` submodule, which `quarkus-quinoa` builds during
+`service/src/main/webui` is the `qits-platform-spa-artifacts` submodule, which `quarkus-quinoa` builds during
 augmentation and serves from the packaged artifact at `/artifacts`. A fresh clone therefore wants
 `git submodule update --init` before `./mvnw package`; without it Quinoa finds no `package.json`,
 disables itself with a warning, and the app ships with no client while the build stays green.
@@ -112,9 +112,9 @@ A **repository** here is a named bucket of artifacts — the Maven/npm sense of 
 `domain.repository`. The resource keeps that name; the `artifacts` the path used to repeat is gone,
 because the segment already says it.
 
-Writes require a machine token from qits-idp — a bearer with `aud=qits-artifacts`, checked by
+Writes require a machine token from qits-platform-idp — a bearer with `aud=qits-platform-artifacts`, checked by
 `AdminWriteGuard`. The check sits behind the platform-wide rollout gate `qits.auth.machine.required`,
-which is off by default: off, the write surface is open exactly as it was before qits-idp existed.
+which is off by default: off, the write surface is open exactly as it was before qits-platform-idp existed.
 Reads are never guarded — a blob must be usable directly as an `<img>`/`<video>` src.
 
 ## The git host
@@ -286,7 +286,7 @@ One difference between the two, and it is deliberate: **`-o qits.no-ci` suppress
 only.** The option exists so importing a history does not queue a run per branch; a backup is owed
 for that push exactly as for any other.
 
-qits-ci's intake wants a bearer minted by qits-idp for `aud=qits-ci`, so the notifier attaches one
+qits-ci's intake wants a bearer minted by qits-platform-idp for `aud=qits-ci`, so the notifier attaches one
 when this deployment has client credentials (`quarkus.oidc-client.client-enabled` plus
 `QITS_ARTIFACTS_CLIENT_SECRET`). Without them nothing is fetched and the POST goes out as it always
 has, which is what lets the two services cut over one at a time. This service hosts every project's
@@ -624,8 +624,8 @@ type is immutable once chosen, so a mirror cannot become a publish target by edi
 Consumers need no merged "group" view because npm does the routing client-side — one `.npmrc`:
 
 ```ini
-registry=http://qits-artifacts:8080/artifacts/npm/npmjs/     # everything, through the cache
-@qits:registry=http://qits-artifacts:8080/artifacts/npm/npm/  # ours, from the hosted repo
+registry=http://qits-platform-artifacts:8080/artifacts/npm/npmjs/     # everything, through the cache
+@qits:registry=http://qits-platform-artifacts:8080/artifacts/npm/npm/  # ours, from the hosted repo
 ```
 
 Both rows are seeded at startup alongside `qits`, so a fresh deployment needs no manual step.
@@ -678,7 +678,7 @@ immutability one does.
 path-form-`Location` trick does not transfer. It is built from `X-Forwarded-Host`/`X-Forwarded-Proto`
 when present and from the request's own authority otherwise, and **no config key names it**: the
 gateway emits the `X-Forwarded-*` set on every proxied request by default, and a qits-net client
-dialling `qits-artifacts:8080` has no forwarding hop, so the request always carries the right answer
+dialling `qits-platform-artifacts:8080` has no forwarding hop, so the request always carries the right answer
 while a configured value would be right for one caller and quietly wrong for the other.
 
 ### The proxy
@@ -720,7 +720,7 @@ curl -s http://<host>/artifacts/npm/npmjs/left-pad | head -c 200
 
 **None. Not a token, not a guard, nothing** — the OCI registry's threat model verbatim (see "No
 login, in either direction" above). Producers and consumers are internal, dialling
-`qits-artifacts:8080` on qits-net, and from outside `/artifacts/npm/**` falls under qits-gateway's
+`qits-platform-artifacts:8080` on qits-net, and from outside `/artifacts/npm/**` falls under qits-gateway's
 usual session auth like any other non-allowlisted artifacts path. No `PublicPaths` entry, no method
 split, nothing npm-specific; whether an npm client can operate *through* that auth from outside is
 deliberately out of scope.
@@ -836,7 +836,7 @@ and `/artifacts/maven` hold, and deliberately not a weaker one. On qits-net prod
 which is what lets a release pipeline publish with no credential store. Integrity does not come from
 write auth: a version is immutable, so an open publish can add a version and can never change one,
 and a consumer pins the digest this route echoes, so what a launcher runs is decided by content
-addressing. Machine auth arrives wholesale with qits-idp, for every publish path at once — gating
+addressing. Machine auth arrives wholesale with qits-platform-idp, for every publish path at once — gating
 this one alone would report a posture the other three do not have. `DaemonOpenPublishTest` pins it
 with the machine-token gate turned on, beside the npm and registry twins.
 
@@ -1104,7 +1104,7 @@ deletes nothing, and that no-op receipt is the mechanism's own safety proof.
 
 The `POST` is a write under the `gc` prefix, so it inherits `ArtifactsTokenFilter`'s
 `X-Artifacts-Token` check — stated honestly: the live deployment ships `qits.artifacts.token`
-blank, which makes that guard inert until the platform's auth posture lands (the standing qits-idp
+blank, which makes that guard inert until the platform's auth posture lands (the standing qits-platform-idp
 direction; per the recorded decision, no interim token scheme is invented meanwhile). The
 registries' `405` on client deletes (`/v2` manifests, npm unpublish) is untouched: no client gains
 deletion semantics from any of this.
@@ -1507,12 +1507,12 @@ service runs it** — a GC route may not take the platform's store offline. It i
 restart, in this order:
 
 1. Run the sweep and read the receipt. Compacting before the rows are gone compacts nothing.
-2. Stop qits-artifacts (the H2 file is embedded; a live process holds it open).
+2. Stop qits-platform-artifacts (the H2 file is embedded; a live process holds it open).
 3. Open the file with the H2 shell — the same JDBC url the service uses, from the same jar:
    `java -cp h2.jar org.h2.tools.Shell -url "jdbc:h2:file:<data-dir>/artifacts" -user … -sql "SHUTDOWN COMPACT"`.
    It rewrites the file and exits; the runtime is roughly linear in *live* data, and on the measured
    747 MB file it is a matter of minutes, not seconds.
-4. Start qits-artifacts and check `GET /artifacts/api/store/summary` — the blob figures are unchanged
+4. Start qits-platform-artifacts and check `GET /artifacts/api/store/summary` — the blob figures are unchanged
    (this touches no blob), and the database file on the volume is the number that moved.
 
 Take a copy of the file first, as with any offline database operation. A compaction that is
@@ -1619,7 +1619,7 @@ answer to them is an ops action, once, by hand.
       "answered": true, "readAt": "2026-08-01T12:00:00Z", "tookMillis": 34,
       "outcome": "9 application pins over 14 image shas — what is serving, and what a rollback would restore",
       "pinCount": 9,
-      "keeps": ["qits-artifacts:3ff84c05…", "qits-ci:ab854a19…"] },
+      "keeps": ["qits-platform-artifacts:3ff84c05…", "qits-ci:ab854a19…"] },
     { "source": "qits-ci", "url": "http://qits-ci:8080/ci/api/daemon",
       "answered": true, "readAt": "2026-08-01T12:00:00Z", "tookMillis": 11,
       "outcome": "daemon qits-ci-daemon, 2 ladder rungs pinned (source: adopted)",
@@ -1754,14 +1754,14 @@ app's `application.properties` overrides them.
 | `qits.artifacts.gc.pins.ci-timeout` | `PT10S` | per-request timeout on that fetch |
 | `qits.artifacts.gc.type.<wire-name>.strategy` | per type, see "The settlement" | which engine collects a repository type: `cache`, `own` or `excluded`. Every type must have one — a missing entry is refused, not defaulted |
 | `qits.artifacts.gc.type.<wire-name>.window` | `P30D` / `P90D` per type | how long an identity may sit unaccessed before it is eligible, ISO-8601. Absent for an `excluded` type |
-| `qits.auth.machine.required` | `false` | the machine-token rollout gate. Off, the JSON admin write surface is open — network trust. On, its writes need a bearer with `aud=qits-artifacts` |
-| `qits.auth.machine.audience` | `qits-artifacts` | this service's own id, and the `aud` its tokens must carry |
+| `qits.auth.machine.required` | `false` | the machine-token rollout gate. Off, the JSON admin write surface is open — network trust. On, its writes need a bearer with `aud=qits-platform-artifacts` |
+| `qits.auth.machine.audience` | `qits-platform-artifacts` | this service's own id, and the `aud` its tokens must carry |
 | `qits.artifacts.startup-seed.enabled` | `true` | self-seed `ci-screenshots` + `ci-videos` + the `qits` image repository + the two npm roots (`npm`, `npmjs`) |
 | `qits.ci.intake-url` | `http://localhost:8080/ci/api/events/post-receive` | post-receive delivery |
 | `qits.projects.intake-url` | `http://localhost:8080/projects/api/events/post-receive` | the same event again, where it triggers the repository's backup push to GitHub. No credential, and `-o qits.no-ci` does not suppress it |
 | `qits.ci.token` | blank | `X-CI-Token` on those events |
 | `quarkus.oidc-client.client-enabled` | `false` | whether those events carry a bearer for `aud=qits-ci`. On needs `QITS_ARTIFACTS_CLIENT_SECRET`, or the boot fails |
-| `quarkus.oidc.auth-server-url` | `http://qits-idp:8080/idp` | the idp, reached direct on qits-net. Both the validation above and the token fetch use it |
+| `quarkus.oidc.auth-server-url` | `http://qits-platform-idp:8080/idp` | the idp, reached direct on qits-net. Both the validation above and the token fetch use it |
 | `qits.artifacts.oci.max-layer-size` | `1G` | the registry's per-layer cap, enforced while streaming |
 | `qits.artifacts.oci.max-manifest-size` | `4M` | manifests are buffered whole to be digested and parsed |
 | `qits.artifacts.oci.upload-session-ttl` | `PT30M` | in-memory upload sessions; lost on restart, by design |
@@ -1851,6 +1851,6 @@ decision.
   its `central` row and the upstream cache are their own settled workstream (maven-repository-plan.md,
   ⚖3), landing after the platform's own library publishes.
 - **Building packages.** The npm registry stores and serves them; nothing here runs `npm pack`. A
-  producer is a CI step that runs `npm publish` over plain HTTP to `qits-artifacts:8080` — no docker
+  producer is a CI step that runs `npm publish` over plain HTTP to `qits-platform-artifacts:8080` — no docker
   socket, no credential, since the registry is tokenless and publishes stay inside the deployment.
 - **A deployable.** See "Layout" above.

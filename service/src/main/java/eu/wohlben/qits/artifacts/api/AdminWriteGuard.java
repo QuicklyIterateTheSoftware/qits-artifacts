@@ -9,20 +9,20 @@ import java.util.Set;
 
 /**
  * Guards the artifacts <b>write</b> surface — the JSON admin API under {@code /artifacts/api} — with
- * a machine token from qits-idp. This is a pure system API (docs/epics/qits-artifacts/); its callers
- * are CI processes and platform services, never a browser session.
+ * a machine token from qits-platform-idp. This is a pure system API (docs/epics/qits-artifacts/);
+ * its callers are CI processes and platform services, never a browser session.
  *
  * <p>{@link MachineAuth#require()} is the whole check, and {@code qits.auth.machine.audience} is
- * {@code qits-artifacts}, so it reads as "a validated bearer minted for this service". No claim is
- * inspected: nothing under this API belongs to one project, and a token that reaches here at all was
- * issued to a client qits-idp trusts with the blob store.
+ * {@code qits-platform-artifacts}, so it reads as "a validated bearer minted for this service". No
+ * claim is inspected: nothing under this API belongs to one project, and a token that reaches here
+ * at all was issued to a client qits-platform-idp trusts with the blob store.
  *
  * <p><b>The rollout gate decides whether it does anything.</b> With {@code
  * qits.auth.machine.required} off — the shipped default — every call returns at once and the write
- * surface is open exactly as it was before qits-idp existed. That is the same posture the retired
- * {@code X-Artifacts-Token} filter had with a blank secret, and it is why this can ship before the
- * idp is deployed. Reads (GET) are never guarded either way — a blob must stay usable directly as an
- * {@code <img>}/{@code <video>} src.
+ * surface is open exactly as it was before qits-platform-idp existed. That is the same posture the
+ * retired {@code X-Artifacts-Token} filter had with a blank secret, and it is why this can ship
+ * before the idp is deployed. Reads (GET) are never guarded either way — a blob must stay usable
+ * directly as an {@code <img>}/{@code <video>} src.
  *
  * <p>This filter is JAX-RS, so it sees only what RESTEasy dispatches. It does <b>not</b> run on the
  * raw Vert.x routes — neither {@code /artifacts/git/*} nor the registry's {@code /v2/*} nor the npm

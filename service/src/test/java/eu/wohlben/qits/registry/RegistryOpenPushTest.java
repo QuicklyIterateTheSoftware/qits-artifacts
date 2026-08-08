@@ -23,8 +23,8 @@ import org.junit.jupiter.api.Test;
  * catch is precisely "someone turned enforcement on and every producer's push started failing".
  *
  * <p>It cannot come back by accident either: {@code AdminWriteGuard} is a JAX-RS filter and these
- * are raw Vert.x routes, and no docker client can present a bearer from qits-idp anyway. Guarding
- * {@code /v2} would be its own decision, with its own credential.
+ * are raw Vert.x routes, and no docker client can present a bearer from qits-platform-idp anyway.
+ * Guarding {@code /v2} would be its own decision, with its own credential.
  *
  * <p>Why the registry is open: on qits-net, producers are trusted (the platform posture — and what
  * lets an automated publisher push with no credential store), and from outside, qits-gateway keeps

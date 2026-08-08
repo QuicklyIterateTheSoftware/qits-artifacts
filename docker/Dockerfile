@@ -15,9 +15,9 @@
 #     docker build -t qits/artifacts:latest -f docker/Dockerfile .
 #
 # The first two lines are not optional and are not a convenience: this image carries the artifacts
-# client (service/src/main/webui = the qits-spa-artifacts submodule), and the builder stage below
-# packages a bundle that was ALREADY BUILT rather than building one. See the Quinoa flags on the
-# mvnw line for why the build cannot happen inside that stage.
+# client (service/src/main/webui = the qits-platform-spa-artifacts submodule), and the builder stage
+# below packages a bundle that was ALREADY BUILT rather than building one. See the Quinoa flags on
+# the mvnw line for why the build cannot happen inside that stage.
 #
 # --- this image does NOT run with an empty environment, and that is not a packaging bug ------------
 # `docker run --rm qits/artifacts:latest` dies before the HTTP listener with
@@ -119,16 +119,16 @@ COPY . .
 # platform's Quinoa recipe (docs/project-setup-quinoa-angular.md in the qits monorepo, which has the
 # builder run the client's real install and build):
 #
-#   service/src/main/webui is qits-spa-artifacts, and it depends on @qits/ui-components. That package
-#   exists ONLY on the platform's own npm registry — which is THIS SERVICE, and that changes nothing
-#   about the problem: a RUN step in a docker build reaches the public internet (Maven Central,
-#   npmjs.org, nodejs.org) and can reach the platform registry by NO address, not the qits-net alias,
-#   not localhost:8081, not host.docker.internal. Being the registry does not give the build a route
-#   to it; the running container is on qits-net and this stage is not. So the install cannot happen
-#   here — it hangs on the localhost:8081 the submodule's own .npmrc names and then dies on npm's
-#   `Exit handler never called!`, which says nothing about why — and an install that "worked" here
-#   would have resolved the @qits scope against npmjs.org, where that name does not exist and never
-#   will.
+#   service/src/main/webui is qits-platform-spa-artifacts, and it depends on @qits/ui-components.
+#   That package exists ONLY on the platform's own npm registry — which is THIS SERVICE, and that
+#   changes nothing about the problem: a RUN step in a docker build reaches the public internet
+#   (Maven Central, npmjs.org, nodejs.org) and can reach the platform registry by NO address, not
+#   the qits-net alias, not localhost:8081, not host.docker.internal. Being the registry does not
+#   give the build a route to it; the running container is on qits-net and this stage is not. So the
+#   install cannot happen here — it hangs on the localhost:8081 the submodule's own .npmrc names and
+#   then dies on npm's `Exit handler never called!`, which says nothing about why — and an install
+#   that "worked" here would have resolved the @qits scope against npmjs.org, where that name does
+#   not exist and never will.
 #
 # The bundle is therefore built BEFORE this image, by the pipeline step in
 # .config/qits/ci-post-receive.yml, which runs on qits-net where the registry answers, and arrives in
@@ -147,15 +147,15 @@ COPY . .
 # Quinoa does not copy build-dir into target/quinoa/build, it MOVES it, and overlayfs cannot rename a
 # directory that still lives in a LOWER image layer. It answers EXDEV, the JDK falls back to its
 # cross-file-store path, and that path refuses a non-empty directory — the build dies seconds in with
-# `DirectoryNotEmptyException: …/dist/qits-spa-artifacts/browser`, which names the source and
-# explains nothing. A builder stage that *creates* dist itself is immune by accident; ours arrives by
-# COPY.
+# `DirectoryNotEmptyException: …/dist/qits-platform-spa-artifacts/browser`, which names the source
+# and explains nothing. A builder stage that *creates* dist itself is immune by accident; ours
+# arrives by COPY.
 #
 # One `cp` re-materialises it in the layer that is about to move it. It has to be in THIS `RUN` and
 # not a tidier one of its own — a layer boundary is exactly what it is undoing.
 ARG QITS_MAVEN_REPOSITORY_URL=http://localhost:8081/artifacts/maven/maven
 ENV QITS_MAVEN_REPOSITORY_URL=$QITS_MAVEN_REPOSITORY_URL
-RUN d=service/src/main/webui/dist/qits-spa-artifacts/browser; \
+RUN d=service/src/main/webui/dist/qits-platform-spa-artifacts/browser; \
     test -f "$d/index.html" || { \
       echo "No built client at $d." >&2; \
       echo "The build context must carry one: run 'npm ci && npm run build'" >&2; \

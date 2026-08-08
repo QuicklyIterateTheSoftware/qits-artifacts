@@ -10,13 +10,14 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * A test issuer for the machine tokens qits-idp mints, and the profile that turns enforcement on.
+ * A test issuer for the machine tokens qits-platform-idp mints, and the profile that turns
+ * enforcement on.
  *
- * <p>The suite needs no qits-idp and no HTTP stub: quarkus-oidc verifies a bearer against {@code
- * quarkus.oidc.public-key} when one is configured, so this fixture signs with a keypair whose public
- * half it hands to Quarkus. Everything the deployed path does still happens — real RS256 signature,
- * real issuer, real expiry, and the real {@code quarkus.oidc.token.audience} check — only the key
- * distribution is local.
+ * <p>The suite needs no qits-platform-idp and no HTTP stub: quarkus-oidc verifies a bearer against
+ * {@code quarkus.oidc.public-key} when one is configured, so this fixture signs with a keypair
+ * whose public half it hands to Quarkus. Everything the deployed path does still happens — real
+ * RS256 signature, real issuer, real expiry, and the real {@code quarkus.oidc.token.audience} check
+ * — only the key distribution is local.
  *
  * <p>The keypair is a FIXED one in {@code src/test/resources}, not a generated one, and that is not
  * a shortcut. A {@code @QuarkusTest} loads this class twice — once in the test classloader that
@@ -30,11 +31,14 @@ import java.util.Map;
  */
 public final class MachineTokens {
 
-  /** What a deployed qits-idp would put in {@code iss}. Any URL works; it just has to match. */
-  public static final String ISSUER = "https://qits-idp.test/idp";
+  /**
+   * What a deployed qits-platform-idp would put in {@code iss}. Any URL works; it just has to
+   * match.
+   */
+  public static final String ISSUER = "https://qits-platform-idp.test/idp";
 
   /** This service's id — its {@code aud}, and {@code qits.auth.machine.audience}. */
-  public static final String AUDIENCE = "qits-artifacts";
+  public static final String AUDIENCE = "qits-platform-artifacts";
 
   private static final String SIGNING_KEY = "/machine-token-signing-key.pem";
 
@@ -51,7 +55,7 @@ public final class MachineTokens {
    *
    * <p>{@code auth-server-url} and {@code jwks-path} are blanked because a configured public key is
    * the alternative to an OIDC server connection, not an addition to one — left set, the tenant
-   * would try to reach a host named qits-idp that no test has.
+   * would try to reach a host named qits-platform-idp that no test has.
    */
   public static class Enforced implements QuarkusTestProfile {
     @Override
@@ -65,7 +69,7 @@ public final class MachineTokens {
     }
   }
 
-  /** A valid bearer for qits-artifacts — what a client granted this audience presents. */
+  /** A valid bearer for qits-platform-artifacts — what a client granted this audience presents. */
   public static String forThisService() {
     return token(AUDIENCE);
   }
@@ -77,8 +81,8 @@ public final class MachineTokens {
 
   /**
    * A signed token for the given audiences. {@code aud} is spelled as a JSON array explicitly,
-   * because that is what qits-idp emits even for one audience — and a builder left to itself
-   * collapses a single value to a bare string, which would test a shape no token ever has.
+   * because that is what qits-platform-idp emits even for one audience — and a builder left to
+   * itself collapses a single value to a bare string, which would test a shape no token ever has.
    */
   public static String token(String... audiences) {
     return Jwt.claims()

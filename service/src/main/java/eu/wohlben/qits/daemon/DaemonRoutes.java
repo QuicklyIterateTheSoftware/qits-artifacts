@@ -51,7 +51,8 @@ import org.jboss.logging.Logger;
  * platform can build anything. What a publish cannot do is <em>change</em> anything — a version is
  * immutable ({@code 409} on republish) and a consumer pins the digest this route echoes, so
  * integrity comes from addressing rather than from write auth. Machine auth arrives wholesale with
- * qits-idp, for every surface at once; gating this one alone would report a decision nobody took.
+ * qits-platform-idp, for every surface at once; gating this one alone would report a decision
+ * nobody took.
  *
  * <p>Reads are anonymous for the extra reason that the cold-start path is a bootstrap script with no
  * token: a fresh platform has to be able to fetch a daemon before it has any CI to mint a credential

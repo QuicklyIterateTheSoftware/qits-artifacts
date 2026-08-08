@@ -19,8 +19,8 @@
 # packageName}` on the strength of these two lines. Keep them true.
 #
 # THE NAME IS UNQUALIFIED ON PURPOSE. No registry-qualified docker reference is portable here — the
-# registry is `qits-artifacts:8080` inside a step container and `localhost:8081` to qits-ci and
-# qits-cd — and an OCI reference cannot carry a path prefix. So the declaration carries
+# registry is `qits-platform-artifacts:8080` inside a step container and `localhost:8081` to qits-ci
+# and qits-cd — and an OCI reference cannot carry a path prefix. So the declaration carries
 # `qits/<application>` and the reader supplies its own host, exactly as the push below composes one
 # from environment.
 #
@@ -31,11 +31,11 @@
 # there rather than keeping a second copy of the reasoning to drift.
 #
 # ONE THING NO SIBLING'S RELEASE PIPELINE HAS TO THINK ABOUT: this repo IS the registry it publishes
-# to. Half one installs from the currently deployed qits-artifacts while the new image is still
-# being built, and half two pushes to it. Nothing bootstraps from the artifact it produces — but a
-# run here cannot be green while qits-artifacts is down, and this repository's deploys blink the git
-# host and both registries. It is deployed alone, with nothing else in the queue, and a release of
-# it deserves the same quiet.
+# to. Half one installs from the currently deployed qits-platform-artifacts while the new image is
+# still being built, and half two pushes to it. Nothing bootstraps from the artifact it produces —
+# but a run here cannot be green while qits-platform-artifacts is down, and this repository's
+# deploys blink the git host and both registries. It is deployed alone, with nothing else in the
+# queue, and a release of it deserves the same quiet.
 #
 # THIS FILE IS INERT UNTIL qits-workspaces PUBLISHES SCMRelease, and it lands first on purpose: the
 # bus is at-most-once with no catch-up and no replay, so a trigger file must be in place before the
@@ -43,9 +43,9 @@
 # not roll.
 event: SCMRelease
 when:
-  - repository: { exact: qits-artifacts }
+  - repository: { exact: qits-platform-artifacts }
 artifacts:
-  - { type: docker, name: qits/qits-artifacts }
+  - { type: docker, name: qits/qits-platform-artifacts }
 steps:
     # node-docker-base, the image ci-post-receive.yml already uses: node, npm and git for half one,
     # the docker CLI for half two — and node is also what reads the event payload, which is JSON.
@@ -70,7 +70,7 @@ steps:
       case "$version" in
         ''|*[!0-9A-Za-z._+-]*) echo "refusing an implausible version: $version" >&2; exit 1 ;;
       esac
-      echo "releasing qits/qits-artifacts:$version"
+      echo "releasing qits/qits-platform-artifacts:$version"
 
       # THE TAG IS THE CHECKOUT TARGET, and it is the only reason this run needs one. An
       # event-triggered run is cloned at the head of main, which is where the release commit is
@@ -84,12 +84,12 @@ steps:
       git checkout --detach "$version"
 
       # --- half one: the bundle -----------------------------------------------------------------
-      # The daemon's clone is shallow and does not recurse, so qits-spa-artifacts arrives as an
-      # empty directory and Quinoa fails the image build on it. See ci-post-receive.yml for why the
-      # lockfile origins are rewritten and why the registry is passed as environment rather than as
-      # a file — that repo's committed .npmrc outranks any ~/.npmrc this step could write.
-      frontend_url="${QITS_CI_REPOSITORY_URL%/*}/qits-spa-artifacts"
-      git -c submodule.qits-spa-artifacts.url="$frontend_url" submodule update --init service/src/main/webui
+      # The daemon's clone is shallow and does not recurse, so qits-platform-spa-artifacts arrives
+      # as an empty directory and Quinoa fails the image build on it. See ci-post-receive.yml for
+      # why the lockfile origins are rewritten and why the registry is passed as environment rather
+      # than as a file — that repo's committed .npmrc outranks any ~/.npmrc this step could write.
+      frontend_url="${QITS_CI_REPOSITORY_URL%/*}/qits-platform-spa-artifacts"
+      git -c submodule.qits-platform-spa-artifacts.url="$frontend_url" submodule update --init service/src/main/webui
 
       cd service/src/main/webui
       npm_origin=$(node -p 'new URL(process.env.QITS_NPM_PROXY_URL).origin')
@@ -103,9 +103,9 @@ steps:
       cd -
 
       # --- half two: the image ------------------------------------------------------------------
-      ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-artifacts:$QITS_CI_SHA"
+      ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-platform-artifacts:$QITS_CI_SHA"
       docker build --network qits-net \
-        --build-arg QITS_MAVEN_REPOSITORY_URL=http://qits-artifacts:8080/artifacts/maven/maven \
+        --build-arg QITS_MAVEN_REPOSITORY_URL=http://qits-platform-artifacts:8080/artifacts/maven/maven \
         -t "$ref" -f docker/Dockerfile .
       docker push "$ref"
       docker rmi "$ref" || true

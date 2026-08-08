@@ -40,7 +40,7 @@ import org.eclipse.microprofile.openapi.annotations.Operation;
  * ArtifactsTokenFilter}'s guarded prefix set, so the {@code POST} inherits the {@code
  * X-Artifacts-Token} check by construction. But the live deployment ships {@code
  * qits.artifacts.token} <b>blank</b>, which makes that filter a no-op — the guard is inert until
- * the platform's auth posture lands (the standing qits-idp direction; per the recorded
+ * the platform's auth posture lands (the standing qits-platform-idp direction; per the recorded
  * no-interim-token-schemes decision, nothing here invents one meanwhile). Until then the real
  * front door is the gateway's session policy, and the sweep's own safety is its content: on a
  * store younger than the grace window it deletes nothing, provably.
