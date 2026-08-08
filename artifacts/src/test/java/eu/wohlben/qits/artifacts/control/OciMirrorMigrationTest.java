@@ -174,6 +174,47 @@ class OciMirrorMigrationTest {
   }
 
   @Test
+  void theMavenCacheGetsOneTableAndReusesTheArtifactTableForItsFiles() throws SQLException {
+    // V13's shape, and the half of it that is a decision rather than a table: a cached file is an
+    // ordinary maven_artifact row under a maven-proxy repository, so the same insert works under
+    // both types and every reader tells them apart by the repository's type. Only the one document
+    // that mutates needed a table.
+    insertRepository("central", "MAVEN_PROXY");
+    try (Connection connection = dataSource.getConnection();
+        Statement statement = connection.createStatement()) {
+      statement.executeUpdate(
+          "insert into maven_artifact (repository, path, blob_id, size_bytes, created_at) values"
+              + " ('central', 'org/slf4j/slf4j-api/2.0.13/slf4j-api-2.0.13.jar',"
+              + " '" + "e".repeat(64) + "', 68000, current_timestamp)");
+      statement.executeUpdate(
+          "insert into maven_proxy_metadata (repository, path, doc, fetched_at) values"
+              + " ('central', 'org/slf4j/slf4j-api/maven-metadata.xml', '<metadata/>',"
+              + " current_timestamp)");
+    }
+    assertEquals(1, count("select count(*) from maven_artifact where repository = 'central'"));
+    assertEquals(1, count("select count(*) from maven_proxy_metadata"));
+
+    SQLException refused =
+        assertThrows(
+            SQLException.class,
+            () -> {
+              try (Connection connection = dataSource.getConnection();
+                  Statement statement = connection.createStatement()) {
+                statement.executeUpdate(
+                    "insert into maven_proxy_metadata (repository, path, doc, fetched_at) values"
+                        + " ('no-such-repo', 'x/maven-metadata.xml', '<metadata/>',"
+                        + " current_timestamp)");
+              }
+            });
+    assertTrue(
+        refused
+            .getMessage()
+            .toUpperCase(java.util.Locale.ROOT)
+            .contains("FK_MAVEN_PROXY_METADATA_REPOSITORY"),
+        refused.getMessage());
+  }
+
+  @Test
   void theDaemonTableIsThereKeyedByRepositoryNameAndVersion() throws SQLException {
     // V10's one table. The plan that asked for it said "V6" — written when the lineage ended at V5,
     // with four migrations landing behind it. No plan reserves a number; this took the next free V

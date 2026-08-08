@@ -62,7 +62,7 @@ class GcPlanControllerTest {
         .body("dryRun", is(true))
         .body("generatedAt", notNullValue())
         .body("graceWindow", is("P7D"))
-        .body("types", hasSize(9))
+        .body("types", hasSize(10))
         .body(
             "types.type",
             org.hamcrest.Matchers.containsInAnyOrder(
@@ -73,6 +73,7 @@ class GcPlanControllerTest {
                 "npm-proxy",
                 "oci-mirror",
                 "maven-packages",
+                "maven-proxy",
                 "daemon-binaries",
                 "docs"))
         .body("types.find { it.type == 'oci-images' }.strategy", is("OciImageGcStrategy"))
@@ -92,6 +93,7 @@ class GcPlanControllerTest {
             "types.find { it.type == 'npm-packages' }.error",
             org.hamcrest.Matchers.containsString("live pins unavailable"))
         .body("types.find { it.type == 'npm-proxy' }.strategy", is("NpmProxyGcStrategy"))
+        .body("types.find { it.type == 'maven-proxy' }.strategy", is("MavenProxyGcStrategy"))
         // daemon-binaries is claimed now, and it refuses here for the reason it was unclaimed
         // before: its keep-set is qits-ci's ladder, this suite has no qits-ci, and the one blob
         // class a running service EXECUTES must never be planned against "nothing is pinned".
@@ -116,7 +118,7 @@ class GcPlanControllerTest {
         .get("/artifacts/api/gc/plan")
         .then()
         .statusCode(200)
-        .body("configuration", hasSize(9))
+        .body("configuration", hasSize(10))
         .body("configuration.find { it.type == 'oci-mirror' }.strategy", is("cache"))
         .body("configuration.find { it.type == 'oci-mirror' }.window", is("P30D"))
         .body("configuration.find { it.type == 'maven-packages' }.strategy", is("own"))
@@ -187,7 +189,7 @@ class GcPlanControllerTest {
         .body("summary.reclaimableBytes", is(0))
         .body("summary.reclaimable", is("0 B"))
         .body("summary.identitiesCondemned", is(0))
-        .body("summary.types", hasSize(9))
+        .body("summary.types", hasSize(10))
         .body(
             "summary.types.find { it.startsWith('ci-videos') }",
             org.hamcrest.Matchers.containsString("excluded by configuration"))
@@ -229,7 +231,8 @@ class GcPlanControllerTest {
         .body("types.find { it.type == 'npm-packages' }.strategy", is("NpmPackagesGcStrategy"))
         .body("types.find { it.type == 'npm-packages' }.note", nullValue())
         .body("types.find { it.type == 'npm-packages' }.dead", hasSize(0))
-        .body("types.find { it.type == 'npm-proxy' }.strategy", is("NpmProxyGcStrategy"));
+        .body("types.find { it.type == 'npm-proxy' }.strategy", is("NpmProxyGcStrategy"))
+        .body("types.find { it.type == 'maven-proxy' }.strategy", is("MavenProxyGcStrategy"));
   }
 
   @Test
@@ -287,7 +290,7 @@ class GcPlanControllerTest {
         .body("executedAt", notNullValue())
         .body("aborted", org.hamcrest.Matchers.containsString("qits-platform-deployments"))
         .body("aborted", org.hamcrest.Matchers.containsString("qits-ci"))
-        .body("types", hasSize(9))
+        .body("types", hasSize(10))
         .body("types.deleted.flatten()", hasSize(0))
         .body("sweep.blobsUnlinked", is(0))
         .body("sweep.bytesReclaimed", is(0))

@@ -162,7 +162,7 @@ class ArtifactExplorerServiceTest extends ArtifactsTestSupport {
     assertEquals(
         0L,
         summary.mavenProxyBytes(),
-        "no maven-proxy repository can exist before the pull-through workstream lands the type");
+        "nothing has been pulled through the maven cache here, and zero is the honest figure");
     assertTrue(fixture.ma1() > 0);
   }
 

@@ -37,4 +37,21 @@ public class MavenRegistryCollection {
   public void collect(String repository, String path) {
     maven.collect(repository, path);
   }
+
+  /**
+   * Evicts one <b>cached</b> file of a {@code maven-proxy} repository — the npm proxy's
+   * {@code evictProxiedVersion} twin, and the reason it is a second door rather than the same one:
+   * one table holds both maven types' rows, so the type check behind this is what keeps a cache
+   * eviction from reaching a published jar.
+   *
+   * <p>Owned by the {@code gc} module's {@code MavenProxyGcAdapter} and by nothing else.
+   */
+  public void evictProxiedArtifact(String repository, String path) {
+    maven.evictProxiedArtifact(repository, path);
+  }
+
+  /** Evicts one cached {@code maven-metadata.xml}. Same door, same type check. */
+  public void evictProxiedMetadata(String repository, String path) {
+    maven.evictProxiedMetadata(repository, path);
+  }
 }

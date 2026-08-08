@@ -7,6 +7,7 @@ import eu.wohlben.qits.artifacts.control.LiveBlobCensus;
 import eu.wohlben.qits.artifacts.control.OciMediaTypes;
 import eu.wohlben.qits.artifacts.entity.DaemonBinary;
 import eu.wohlben.qits.artifacts.entity.MavenArtifact;
+import eu.wohlben.qits.artifacts.entity.MavenProxyMetadata;
 import eu.wohlben.qits.artifacts.entity.NpmProxyPackument;
 import eu.wohlben.qits.artifacts.entity.NpmVersion;
 import eu.wohlben.qits.artifacts.entity.OciManifest;
@@ -17,6 +18,7 @@ import eu.wohlben.qits.artifacts.persistence.ArtifactRecordRepository;
 import eu.wohlben.qits.artifacts.persistence.ArtifactRepositoryRepository;
 import eu.wohlben.qits.artifacts.persistence.DaemonBinaryRepository;
 import eu.wohlben.qits.artifacts.persistence.MavenArtifactRepository;
+import eu.wohlben.qits.artifacts.persistence.MavenProxyMetadataRepository;
 import eu.wohlben.qits.artifacts.persistence.NpmDistTagRepository;
 import eu.wohlben.qits.artifacts.persistence.NpmProxyPackumentRepository;
 import eu.wohlben.qits.artifacts.persistence.NpmVersionRepository;
@@ -76,6 +78,7 @@ abstract class GcFixture {
   @Inject NpmVersionTombstoneRepository npmVersionTombstones;
   @Inject NpmProxyPackumentRepository npmProxyPackuments;
   @Inject MavenArtifactRepository mavenArtifacts;
+  @Inject MavenProxyMetadataRepository mavenProxyMetadata;
   @Inject DaemonBinaryRepository daemonBinaries;
   @Inject OciMirrorUpstreamRepository mirrorUpstreams;
   @Inject OciMirrorTagCheckRepository mirrorTagChecks;
@@ -100,6 +103,7 @@ abstract class GcFixture {
               npmVersionTombstones.deleteAll();
               npmProxyPackuments.deleteAll();
               mavenArtifacts.deleteAll();
+              mavenProxyMetadata.deleteAll();
               daemonBinaries.deleteAll();
               records.deleteAll();
               // The mirror upstreams too: their slug is a foreign key into artifact_repository, so
@@ -420,6 +424,74 @@ abstract class GcFixture {
       backdate(blobId, Duration.ofDays(30));
     }
     return new MavenStore(jar, pom);
+  }
+
+  static final String MAVEN_PROXY_REPO = "central";
+  static final String MAVEN_PROXY_ARTIFACT = "org/slf4j/slf4j-api";
+  static final String MAVEN_PROXY_COLD_PATH = MAVEN_PROXY_ARTIFACT + "/1.7.36/slf4j-api-1.7.36.jar";
+  static final String MAVEN_PROXY_WARM_PATH = MAVEN_PROXY_ARTIFACT + "/2.0.13/slf4j-api-2.0.13.jar";
+  static final String MAVEN_PROXY_METADATA_PATH = MAVEN_PROXY_ARTIFACT + "/maven-metadata.xml";
+  static final int MAVEN_PROXY_COLD = 90;
+  static final int MAVEN_PROXY_WARM = 95;
+
+  /** What {@link #seedMavenProxy()} built. */
+  record MavenProxyStore(String coldJar, String warmJar) {}
+
+  /**
+   * Two cached files of one upstream artifact — one cold, one warm — and the cached {@code
+   * maven-metadata.xml} beside them.
+   *
+   * <p>The warm one is the case the document's staleness rule exists for: the <b>document</b> was
+   * last revalidated upstream long ago, while a jar under it was resolved yesterday. A document
+   * judged on {@code fetched_at} alone would be evicted out from under an artifact something is
+   * actively building against, and the next resolve would pay upstream for it again.
+   *
+   * <p>Both files sit under {@link #MAVEN_PROXY_ARTIFACT}, which is also the document's directory —
+   * that prefix relationship is what the adapter folds, so a fixture where they did not share one
+   * could not ask the question.
+   */
+  MavenProxyStore seedMavenProxy() throws IOException {
+    repositoryService.ensure(MAVEN_PROXY_REPO, RepositoryType.MAVEN_PROXY);
+    String cold = store(filled(MAVEN_PROXY_COLD, (byte) 13));
+    String warm = store(filled(MAVEN_PROXY_WARM, (byte) 14));
+    Instant longAgo = Instant.now().minus(Duration.ofDays(200));
+    Instant yesterday = Instant.now().minus(Duration.ofDays(1));
+    QuarkusTransaction.requiringNew()
+        .run(
+            () -> {
+              mavenProxyMetadata.persist(cachedMetadata(MAVEN_PROXY_METADATA_PATH, longAgo));
+              mavenArtifacts.persist(
+                  cachedArtifact(MAVEN_PROXY_COLD_PATH, cold, MAVEN_PROXY_COLD, longAgo, longAgo));
+              mavenArtifacts.persist(
+                  cachedArtifact(
+                      MAVEN_PROXY_WARM_PATH, warm, MAVEN_PROXY_WARM, longAgo, yesterday));
+            });
+    for (String blobId : List.of(cold, warm)) {
+      backdate(blobId, Duration.ofDays(30));
+    }
+    return new MavenProxyStore(cold, warm);
+  }
+
+  private static MavenArtifact cachedArtifact(
+      String path, String blobId, long size, Instant createdAt, Instant accessedAt) {
+    MavenArtifact row = new MavenArtifact();
+    row.repository = MAVEN_PROXY_REPO;
+    row.path = path;
+    row.blobId = blobId;
+    row.sizeBytes = size;
+    row.createdAt = createdAt;
+    row.accessedAt = accessedAt;
+    return row;
+  }
+
+  private static MavenProxyMetadata cachedMetadata(String path, Instant fetchedAt) {
+    MavenProxyMetadata row = new MavenProxyMetadata();
+    row.repository = MAVEN_PROXY_REPO;
+    row.path = path;
+    row.doc = "<metadata><artifactId>slf4j-api</artifactId></metadata>";
+    row.etag = "\"seed\"";
+    row.fetchedAt = fetchedAt;
+    return row;
   }
 
   static final String DAEMON_REPO = "daemons";

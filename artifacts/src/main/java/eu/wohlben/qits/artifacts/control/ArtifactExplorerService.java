@@ -232,11 +232,9 @@ public class ArtifactExplorerService {
         taken.liveBytes(RepositoryType.NPM_PROXY),
         taken.npmProxyPackumentBytes(),
         taken.liveBytes(RepositoryType.MAVEN_PACKAGES),
-        // Zero until the pull-through workstream lands MAVEN_PROXY: no repository of that type can
-        // exist before its constraint does, so zero is the honest figure rather than a placeholder.
-        // The census already attributes maven_artifact rows by their repository's type, so CQ
-        // changes this one line and no census code.
-        0L,
+        // What the pull-through cache holds. The census attributes maven_artifact rows by their
+        // repository's type, so landing MAVEN_PROXY changed this one line and no census code.
+        taken.liveBytes(RepositoryType.MAVEN_PROXY),
         taken.liveBytes(RepositoryType.DAEMON_BINARIES),
         taken.diskTotalBytes());
   }
@@ -288,8 +286,9 @@ public class ArtifactExplorerService {
     return switch (repository.type) {
       case OCI_IMAGES, OCI_MIRROR -> manifests.countImages(repository.name);
       case NPM_PACKAGES, NPM_PROXY -> versions.countPackages(repository.name);
-      // Deployed files — one number with a type-dependent meaning, the standing convention.
-      case MAVEN_PACKAGES -> mavenArtifacts.countByRepository(repository.name);
+      // Deployed or cached files — one number with a type-dependent meaning, the standing
+      // convention. One table holds both maven types, so one arm answers for both.
+      case MAVEN_PACKAGES, MAVEN_PROXY -> mavenArtifacts.countByRepository(repository.name);
       // Published versions across every daemon this repository holds — one number, the same
       // type-dependent meaning the line above has.
       case DAEMON_BINARIES -> daemonBinaries.countByRepository(repository.name);
@@ -307,7 +306,7 @@ public class ArtifactExplorerService {
       case NPM_PACKAGES, NPM_PROXY ->
           tarballBytes(List.of(repository.name), diskIndex.sizes(), new HashSet<>());
       // The union over distinct blob ids, sized from the rows — the one protocol table that has it.
-      case MAVEN_PACKAGES -> mavenBytes(repository.name);
+      case MAVEN_PACKAGES, MAVEN_PROXY -> mavenBytes(repository.name);
       case DAEMON_BINARIES -> daemonBytes(repository.name);
       case DOCS -> docsBytes(repository.name);
       case CI_SCREENSHOTS, CI_VIDEOS -> recordBytes(repository.name);

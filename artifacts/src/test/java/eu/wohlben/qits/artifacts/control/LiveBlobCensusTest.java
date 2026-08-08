@@ -61,8 +61,8 @@ class LiveBlobCensusTest extends SeededStoreFixture {
   void whatMavenDeployedIsLiveUnderItsOwnTypeRatherThanOrphaned() throws Exception {
     // The pin the maven type's first landing asks for: a deployed jar unknown to the census would
     // be misreported as an ORPHAN — servable, row-less-looking, untouchable. Attribution runs off
-    // the repository row's type, so both maven types' sets fill from maven_artifact and the
-    // pull-through workstream adds no census code when its constant lands.
+    // the repository row's type, so both maven types' sets fill from maven_artifact — which is why
+    // the pull-through cache needed no census code at all.
     MavenStore maven = seedMaven();
 
     LiveBlobCensus.Census taken = census.take();
