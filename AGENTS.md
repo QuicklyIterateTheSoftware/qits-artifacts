@@ -48,7 +48,7 @@ Everything that had to be declared, and the symptom each one produces if it is d
 | `application.properties` | `WindowCache` **stays** although no repository is file-backed any more | unmeasured, and the failure mode is a silent 404 on every git route — `UploadPack`/`ReceivePack` pull JGit's file-storage classes in regardless |
 | `githost/JGitReflection` | `values()` on every enum `Config.getEnum` reads | **every** git route 404s — `FileRepositoryBuilder.build` throws `NoSuchMethodException` and `open()` returns null |
 | `dto/UploadResult` | `@RegisterForReflection` | every upload 500s: the type is behind a `Response` return, so nothing registers it |
-| `PostReceiveNotifier` | the `HttpClient` is an instance field, not static | build fails: an `HttpClientFacade` in the image heap |
+| `PostReceiveNotifier` | the `HttpClient` **and** the retry `ScheduledExecutorService` are instance fields, not static | build fails: an `HttpClientFacade` in the image heap, and a started thread pool beside it |
 | `npm/NpmUpstream` | the `HttpClient` is an instance field, not static | same as above — an `HttpClientFacade` frozen into the image heap |
 | `maven/MavenUpstream` | the `HttpClient` is an instance field, not static | same as above; the sixth outbound client, and the rule has still not changed. It reads and writes only `String`/`byte[]` and needs nothing else declared — the maven stack, like `registry` and `npm`, still adds zero native-image configuration |
 | `gc/CdHttpDeploymentPins`, `gc/CiHttpDaemonPins` | the `HttpClient` is an instance field, not static | same as above; the third and fifth outbound clients, and the rule has not changed. It moved with the class when GC became its own module — the rule travels with the client, not with the package |
@@ -148,15 +148,26 @@ Two outbound/inbound addresses are contracts other repos hold:
   registered ahead of the name-addressed scheme; a clone of a repository *called* blob or tree is
   the one overlap, and the handler `next()`s it back to the router rather than answering it.
 - `qits.ci.intake-url` → `/ci/api/events/post-receive` — qits-ci's path, not ours. The notifier
-  swallows delivery failures at debug, so a wrong value here produces no error anywhere and CI
-  simply never runs. It carries a bearer for `aud=qits-ci` when this deployment has client
-  credentials, and nothing when it does not.
+  retries a failed delivery on the `qits.post-receive.retry-delays` schedule and then logs the loss
+  at **WARN**, so a wrong value here says so in the log after about three minutes and CI never runs.
+  It carries a bearer for `aud=qits-ci` when this deployment has client credentials, and nothing
+  when it does not — re-fetched per attempt, so a retry never presents a token an idp cutover has
+  invalidated.
 - `qits.projects.intake-url` → `/projects/api/events/post-receive` — the same event, same body,
   qits-projects' path. It answers by pushing the repository to its GitHub sync target, so a wrong
-  value here is a backup that silently never happens. It carries no credential, and — the one
-  difference from the ci delivery — `-o qits.no-ci` does **not** suppress it: a backup is owed even
-  for a push CI ignores. Tags are excluded from both; the tag side of a backup is projects' own
-  sweep.
+  value here is a backup that never happens, announced by the same WARN. It carries no credential,
+  and — the one difference from the ci delivery — `-o qits.no-ci` does **not** suppress it: a backup
+  is owed even for a push CI ignores. Tags are excluded from both; the tag side of a backup is
+  projects' own sweep.
+- **The delivery is retried, and that was paid for.** Both consumers get up to five attempts, at
+  roughly 5s/15s/45s/2m (`qits.post-receive.retry-delays`, one entry per retry). Any 2xx is success;
+  a refused connection and any non-2xx are both retried, because during a bootstrap they are the
+  same outage a second apart. Measured twice on two consecutive from-scratch bootstraps: the
+  database container is redeployed one phase before the next push, qits-ci's pool is severed
+  (`FATAL: terminating connection due to administrator command`), the intake 500s, and with one
+  fire-and-forget attempt swallowed at debug the bootstrap then hung an hour on a build nothing had
+  queued. Every attempt is off-thread — the hook fires inside `ReceivePack.receive()` before the push
+  response is written, so nothing here may block or throw, and that constraint outranks the retry.
 
 ## Package and module conventions
 
@@ -621,9 +632,10 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 
 ## Tests
 
-- `mvn verify` runs 617 tests (157 in `artifacts/`, 18 in `git-storage/`, 135 in `gc/`, 307 in
+- `mvn verify` runs 580 tests (116 in `artifacts/`, 18 in `git-storage/`, 135 in `gc/`, 311 in
   `service/`) in about three minutes — counted from the surefire reports, which the previous figure
-  here was not. Nothing here
+  here was not: it claimed 617 with 157 in `artifacts/`, and that module has counted 116 for a while.
+  Nothing here
   needs docker — and that is the constraint that shapes the registry suite: `docker`, `podman` and
   `skopeo` may not be assumed present, so `registry/OciClient` + `registry/TinyImage` synthesise a
   real image in memory and drive a full push/pull over the JDK `HttpClient`. It uses that rather than
@@ -777,13 +789,21 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   OCI image name, a scoped npm package) resolve in both spellings, encoded and literal, which is a
   property of the path templates and of nothing else. Both must hold; neither implies the other.
 - The suite points `qits.ci.intake-url` **and** `qits.projects.intake-url` at closed ports, so a
-  push test passes without a receiver; the notifier is fire-and-forget and swallows the failure.
-  `PostReceiveNotifierTest`, `CiPostReceiveBearerTest`, `GitHostNoCiOptionTest` and
-  `GitHostProjectsIntakeDownTest` are the four that do assert deliveries, against `StubIntake` —
+  push test passes without a receiver; the notifier never blocks the push and the delivery is simply
+  lost. It also shortens `qits.post-receive.retry-delays` to a single 50 ms retry, and that is a
+  genuine test-only need rather than a drifting copy: the shipped schedule would leave three minutes
+  of pending timers per push in a suite that runs in three. Each lost delivery logs one WARN in a
+  green run — the change working, not a failure.
+  `PostReceiveNotifierTest`, `CiPostReceiveBearerTest`, `PostReceiveRetryTest`,
+  `GitHostNoCiOptionTest` and
+  `GitHostProjectsIntakeDownTest` are the five that do assert deliveries, against `StubIntake` —
   which plays qits-ci's intake, qits-projects' intake and qits-platform-idp's token endpoint at once, counts
   the two intakes separately (the fan-out's whole point is that the counts differ under
   `-o qits.no-ci`), and passes everything it observed through system properties because a
-  `QuarkusTestProfile` is built in two classloaders.
+  `QuarkusTestProfile` is built in two classloaders. Either intake can be told to **refuse** its next
+  few requests, which is how `PostReceiveRetryTest` plays the outage: it counts attempts as well as
+  deliveries, because the claim is that an event survives an outage *exactly once* rather than
+  arriving twice.
 
 ## What not to "fix"
 
