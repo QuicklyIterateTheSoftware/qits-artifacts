@@ -3,7 +3,7 @@ package eu.wohlben.qits.artifacts.gc;
 import eu.wohlben.qits.artifacts.control.DaemonRegistryCollection;
 import eu.wohlben.qits.artifacts.entity.ArtifactRepository;
 import eu.wohlben.qits.artifacts.entity.DaemonBinary;
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
+import eu.wohlben.qits.artifacts.control.DaemonBinariesProfile;
 import eu.wohlben.qits.artifacts.gc.dto.GcIdentity;
 import eu.wohlben.qits.artifacts.persistence.ArtifactRepositoryRepository;
 import eu.wohlben.qits.artifacts.persistence.DaemonBinaryRepository;
@@ -71,15 +71,15 @@ public class DaemonBinariesGcAdapter implements GcTypeAdapter {
   @Inject DaemonRegistryCollection daemons;
 
   @Override
-  public RepositoryType type() {
-    return RepositoryType.DAEMON_BINARIES;
+  public String type() {
+    return DaemonBinariesProfile.KEY;
   }
 
   @Override
   public List<GcCandidate> enumerate() {
     List<GcCandidate> candidates = new ArrayList<>();
     for (ArtifactRepository repository : repositories.listAll()) {
-      if (repository.type != RepositoryType.DAEMON_BINARIES) {
+      if (!DaemonBinariesProfile.KEY.equals(repository.type)) {
         continue;
       }
       for (DaemonBinary row : binaries.<DaemonBinary>list("repository = ?1", repository.name)) {

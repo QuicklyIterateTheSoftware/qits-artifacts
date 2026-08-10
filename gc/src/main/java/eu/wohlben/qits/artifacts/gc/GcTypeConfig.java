@@ -1,6 +1,6 @@
 package eu.wohlben.qits.artifacts.gc;
 
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
+import eu.wohlben.qits.artifacts.entity.RepositoryTypeProfile;
 import io.smallrye.config.ConfigMapping;
 import io.smallrye.config.WithParentName;
 import java.time.Duration;
@@ -25,9 +25,9 @@ import java.util.Optional;
  *
  * <p><b>A type with no entry is an error, not a default.</b> {@link #of} throws rather than assuming
  * {@code excluded}: a repository type nobody configured is a decision nobody took, and defaulting it
- * silently is how a new type ships uncollected with nothing in the report to say so. Adding a
- * {@link RepositoryType} constant therefore means adding two lines of configuration, which
- * {@code GcTypeConfigTest} holds by looping over {@code values()}.
+ * silently is how a new type ships uncollected with nothing in the report to say so. Contributing a
+ * {@link RepositoryTypeProfile} therefore means adding two lines of configuration, which {@code
+ * GcTypeConfigTest} holds by looping over the registered keys.
  */
 @ConfigMapping(prefix = "qits.artifacts.gc.type")
 public interface GcTypeConfig {
@@ -57,15 +57,16 @@ public interface GcTypeConfig {
    *
    * @throws IllegalStateException the type has no configuration at all
    */
-  default TypeEntry of(RepositoryType type) {
-    TypeEntry entry = types().get(type.wireName());
+  default TypeEntry of(String type) {
+    String wireName = RepositoryTypeProfile.wireNameOf(type);
+    TypeEntry entry = types().get(wireName);
     if (entry == null) {
       throw new IllegalStateException(
           "no garbage collection policy configured for "
-              + type.wireName()
+              + wireName
               + "; set qits.artifacts.gc.type."
-              + type.wireName()
-              + ".strategy (cache, own or excluded)");
+              + wireName
+              + ".strategy (own or excluded)");
     }
     return entry;
   }
@@ -73,19 +74,20 @@ public interface GcTypeConfig {
   /**
    * The window a collected type is configured with.
    *
-   * @throws IllegalStateException a cache or own type has no window — both engines need one, and
+   * @throws IllegalStateException a collected type has no window — the engine needs one, and
    *     guessing a window is guessing what may be deleted
    */
-  default Duration requireWindow(RepositoryType type) {
+  default Duration requireWindow(String type) {
+    String wireName = RepositoryTypeProfile.wireNameOf(type);
     return of(type)
         .window()
         .orElseThrow(
             () ->
                 new IllegalStateException(
                     "no window configured for "
-                        + type.wireName()
+                        + wireName
                         + "; set qits.artifacts.gc.type."
-                        + type.wireName()
+                        + wireName
                         + ".window to an ISO-8601 duration such as P30D"));
   }
 }

@@ -5,7 +5,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.artifacts.control.LiveBlobCensus;
 import eu.wohlben.qits.artifacts.entity.MavenArtifact;
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
+import eu.wohlben.qits.artifacts.control.MavenPackagesProfile;
+import eu.wohlben.qits.artifacts.entity.RepositoryTypeProfile;
 import eu.wohlben.qits.artifacts.gc.dto.GcIdentity;
 import io.quarkus.narayana.jta.QuarkusTransaction;
 import io.quarkus.test.junit.QuarkusTest;
@@ -238,7 +239,7 @@ class MavenPackagesGcAdapterTest extends GcFixture {
 
     GcStrategy.Plan plan = strategy.plan(census.take(), GcPins.none());
 
-    assertEquals(RepositoryType.MAVEN_PACKAGES, strategy.type());
+    assertEquals(MavenPackagesProfile.KEY, strategy.type());
     assertEquals(List.of(), plan.dead());
     assertEquals(List.of(), plan.kept());
     assertEquals(Set.of(), plan.blobsRetained());
@@ -258,7 +259,7 @@ class MavenPackagesGcAdapterTest extends GcFixture {
     assertEquals(List.of(), plan.dead());
     assertEquals(List.of(COORDINATE + "1.0.0"), identities(plan.kept()));
     assertTrue(plan.kept().stream().allMatch(kept -> MAVEN_REPO.equals(kept.repository())));
-    assertEquals(taken.live(RepositoryType.MAVEN_PACKAGES).keySet(), plan.blobsRetained());
+    assertEquals(taken.live(MavenPackagesProfile.KEY).keySet(), plan.blobsRetained());
     assertEquals(2, plan.blobsRetained().size(), "the jar and the pom");
     assertEquals(List.of(), planner.plan(taken, List.of(strategy), GcPins.none()).sweep().blobIds());
   }
@@ -266,7 +267,7 @@ class MavenPackagesGcAdapterTest extends GcFixture {
   // --- fixture ---------------------------------------------------------------------------------
 
   private void maven() {
-    repositoryService.ensure(MAVEN_REPO, RepositoryType.MAVEN_PACKAGES);
+    repositoryService.ensure(MAVEN_REPO, MavenPackagesProfile.KEY);
   }
 
   private static String releasePath(String version, String extension) {

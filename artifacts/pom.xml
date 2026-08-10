@@ -9,13 +9,19 @@
         <relativePath>../pom.xml</relativePath>
     </parent>
 
-    <!-- The metadata-rich blob store, split-deployment-ready (docs/epics/qits-artifacts/). A plain
-         library jar like `domain`: entities, persistence, control, mapper, dto — NO web/JAX-RS and,
-         deliberately, NO dependency on `domain` or any `auth/*` module. Blobs reference qits branches
-         and flows by *string metadata*, never by foreign key, so artifacts never breaks when qits'
-         schema moves. Its REST boundary is hosted (for now) by `service`. It owns its OWN named
-         datasource + Flyway lineage (see src/main/resources/META-INF/microprofile-config.properties)
-         so the likely future standalone deployable moves files, not data.
+    <!-- What did NOT move out to qits-blobstore or qits-registries: this service's own domain over
+         the shared store. The docs and daemon registries (entities, persistence, services), the
+         store explorer, the live blob census, the repository seeder, and the two repository-type
+         PROFILE BEANS this service contributes — DAEMON_BINARIES and DOCS, formats nobody else
+         serves.
+
+         It also owns the SCHEMA. The Flyway lineage under src/main/resources/db/artifacts/migration
+         is carried unchanged through the split: the libraries ship no migrations, each consuming
+         service owns its own, and this one's is the original chain. Orphaned tables (the git host's
+         V4/V5, the proxy tables) are a cutover data concern, not a reason to rewrite history.
+
+         A plain library jar: entities, persistence, control, dto — NO web/JAX-RS, and no dependency
+         on `domain` or any `auth/*` module. Its REST boundary is hosted by `service`.
 
          The directory stays `artifacts/` (the filtered history is anchored to that path); only the
          coordinates are namespaced, hence the doubled name. -->
@@ -23,6 +29,28 @@
     <name>qits-artifacts :: artifacts</name>
 
     <dependencies>
+        <dependency>
+            <!-- The store itself: ArtifactRepository/ArtifactRecord, the disk index, the blob
+                 service, and RepositoryTypeProfiles — the open registration the two profile beans
+                 in this module plug into. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-blobstore</artifactId>
+        </dependency>
+        <dependency>
+            <!-- The three formats, for the READ side only: the census and the explorer count npm
+                 tarballs, maven artifacts and OCI manifests, so they need those modules' entities
+                 and repositories. Nothing here serves their wire routes — `service` does. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-registries-npm</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-registries-maven</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-registries-oci</artifactId>
+        </dependency>
         <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-arc</artifactId>

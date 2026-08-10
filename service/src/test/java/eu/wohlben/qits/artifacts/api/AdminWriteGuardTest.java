@@ -102,36 +102,29 @@ class AdminWriteGuardTest {
   @Test
   void everyGuardedPrefixIsCoveredAndItsReadsAreNot() {
     // The prefix set is extended by hand, never inherited — a resource served outside it ships
-    // unguarded. mirror-upstreams decides which public registry this service dials on a miss, so an
-    // unguarded PUT here would be handing out an outbound fetch.
+    // unguarded. The mirror-upstreams cases that used to lead this method went to
+    // qits-platform-mirror with the controller; what stays is the shape of the rule: writes under a
+    // guarded prefix are 401 without a token, and reads under the same prefix are not guarded at all.
+    given().when().get("/artifacts/api/store/summary").then().statusCode(200);
+    given().when().get("/artifacts/api/gc/plan").then().statusCode(200);
+    given().when().get("/artifacts/api/repositories").then().statusCode(200);
+
     given()
         .contentType(ContentType.JSON)
-        .body(Map.of("slug", "quay"))
+        .body(Map.of("type", "oci-images"))
         .when()
-        .put("/artifacts/api/mirror-upstreams/quay.io")
+        .put("/artifacts/api/repositories/guard-probe")
         .then()
         .statusCode(401);
 
     given()
         .header("Authorization", bearer(MachineTokens.forThisService()))
         .contentType(ContentType.JSON)
-        .body(Map.of("slug", "quay"))
+        .body(Map.of("type", "oci-images"))
         .when()
-        .put("/artifacts/api/mirror-upstreams/quay.io")
+        .put("/artifacts/api/repositories/guard-probe")
         .then()
         .statusCode(200);
-
-    given().when().get("/artifacts/api/mirror-upstreams").then().statusCode(200);
-    given().when().get("/artifacts/api/store/summary").then().statusCode(200);
-    given().when().get("/artifacts/api/gc/plan").then().statusCode(200);
-
-    given().when().delete("/artifacts/api/mirror-upstreams/quay.io").then().statusCode(401);
-    given()
-        .header("Authorization", bearer(MachineTokens.forThisService()))
-        .when()
-        .delete("/artifacts/api/mirror-upstreams/quay.io")
-        .then()
-        .statusCode(204);
   }
 
   @Test

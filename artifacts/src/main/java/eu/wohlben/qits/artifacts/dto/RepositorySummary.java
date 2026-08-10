@@ -1,6 +1,5 @@
 package eu.wohlben.qits.artifacts.dto;
 
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
 import java.time.Instant;
 
 /**
@@ -11,11 +10,14 @@ import java.time.Instant;
  * write response has no business counting anything, and a count that is always zero there would read
  * as a fact.
  *
+ * @param type the <b>kebab wire form</b> ({@code oci-images}), not the stored key — the entity
+ *     carries the stored one and the caller converts, the same split {@link ArtifactRepositoryDto}
+ *     makes.
  * @param itemCount what "one thing" means for this type: images for {@code oci-images}, packages for
- *     either npm type, records for the two CI types. Deliberately one number with a
+ *     {@code npm-packages}, records for the two CI types. Deliberately one number with a
  *     type-dependent meaning rather than four always-null ones.
  * @param sizeBytes the repository's referenced-blob <b>union</b>, never a sum over its rows. Null
  *     only if it cannot be established at all.
  */
 public record RepositorySummary(
-    String name, RepositoryType type, Instant createdAt, long itemCount, Long sizeBytes) {}
+    String name, String type, Instant createdAt, long itemCount, Long sizeBytes) {}

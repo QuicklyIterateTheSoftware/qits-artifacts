@@ -49,7 +49,7 @@ class GcPlanControllerTest {
 
   @org.junit.jupiter.api.BeforeEach
   void seedRepository() {
-    repositories.ensure(REPO, eu.wohlben.qits.artifacts.entity.RepositoryType.OCI_IMAGES);
+    repositories.ensure(REPO, eu.wohlben.qits.artifacts.control.OciImagesProfile.KEY);
   }
 
   @Test
@@ -62,7 +62,7 @@ class GcPlanControllerTest {
         .body("dryRun", is(true))
         .body("generatedAt", notNullValue())
         .body("graceWindow", is("P7D"))
-        .body("types", hasSize(10))
+        .body("types", hasSize(7))
         .body(
             "types.type",
             org.hamcrest.Matchers.containsInAnyOrder(
@@ -70,15 +70,11 @@ class GcPlanControllerTest {
                 "ci-videos",
                 "oci-images",
                 "npm-packages",
-                "npm-proxy",
-                "oci-mirror",
                 "maven-packages",
-                "maven-proxy",
                 "daemon-binaries",
                 "docs"))
         .body("types.find { it.type == 'oci-images' }.strategy", is("OciImageGcStrategy"))
         .body("types.find { it.type == 'npm-packages' }.strategy", is("NpmPackagesGcStrategy"))
-        .body("types.find { it.type == 'oci-mirror' }.strategy", is("OciMirrorGcStrategy"))
         .body(
             "types.find { it.type == 'ci-screenshots' }.strategy", is("CiScreenshotsGcStrategy"))
         .body("types.find { it.type == 'ci-videos' }.strategy", is("CiVideosGcStrategy"))
@@ -92,8 +88,6 @@ class GcPlanControllerTest {
         .body(
             "types.find { it.type == 'npm-packages' }.error",
             org.hamcrest.Matchers.containsString("live pins unavailable"))
-        .body("types.find { it.type == 'npm-proxy' }.strategy", is("NpmProxyGcStrategy"))
-        .body("types.find { it.type == 'maven-proxy' }.strategy", is("MavenProxyGcStrategy"))
         // daemon-binaries is claimed now, and it refuses here for the reason it was unclaimed
         // before: its keep-set is qits-ci's ladder, this suite has no qits-ci, and the one blob
         // class a running service EXECUTES must never be planned against "nothing is pinned".
@@ -118,9 +112,9 @@ class GcPlanControllerTest {
         .get("/artifacts/api/gc/plan")
         .then()
         .statusCode(200)
-        .body("configuration", hasSize(10))
-        .body("configuration.find { it.type == 'oci-mirror' }.strategy", is("cache"))
-        .body("configuration.find { it.type == 'oci-mirror' }.window", is("P30D"))
+        .body("configuration", hasSize(7))
+        .body("configuration.find { it.type == 'oci-images' }.strategy", is("own"))
+        .body("configuration.find { it.type == 'oci-images' }.window", is("P30D"))
         .body("configuration.find { it.type == 'maven-packages' }.strategy", is("own"))
         .body("configuration.find { it.type == 'maven-packages' }.window", is("P90D"))
         .body(
@@ -189,7 +183,7 @@ class GcPlanControllerTest {
         .body("summary.reclaimableBytes", is(0))
         .body("summary.reclaimable", is("0 B"))
         .body("summary.identitiesCondemned", is(0))
-        .body("summary.types", hasSize(10))
+        .body("summary.types", hasSize(7))
         .body(
             "summary.types.find { it.startsWith('ci-videos') }",
             org.hamcrest.Matchers.containsString("excluded by configuration"))
@@ -214,50 +208,6 @@ class GcPlanControllerTest {
         .body("types.find { it.type == 'oci-images' }.dead", hasSize(0))
         .body("types.find { it.type == 'oci-images' }.kept", hasSize(0))
         .body("types.find { it.type == 'oci-images' }.blobsSweepable", is(0));
-  }
-
-  @Test
-  void theTwoNpmTypesAreClaimedByDifferentEnginesOverOneTable() {
-    // The scope, on the wire. npm-proxy shares the npm_version table with the hosted registry, and
-    // the two are collected by different ENGINES over that one table: the hosted rows by the
-    // own-artifacts rule, the cached ones by eviction. Both refuse here for the same reason every
-    // engine type does — no qits-platform-deployments and no qits-ci — which is what makes the two strategy names the
-    // thing this case is really pinning.
-    given()
-        .when()
-        .get("/artifacts/api/gc/plan")
-        .then()
-        .statusCode(200)
-        .body("types.find { it.type == 'npm-packages' }.strategy", is("NpmPackagesGcStrategy"))
-        .body("types.find { it.type == 'npm-packages' }.note", nullValue())
-        .body("types.find { it.type == 'npm-packages' }.dead", hasSize(0))
-        .body("types.find { it.type == 'npm-proxy' }.strategy", is("NpmProxyGcStrategy"))
-        .body("types.find { it.type == 'maven-proxy' }.strategy", is("MavenProxyGcStrategy"));
-  }
-
-  @Test
-  void bothCacheTypesReadPinsSoBothRefuseWhileTheSourcesAreClosedPorts() {
-    // The mirror used to answer "nothing dies, append-only pending access tracking" here. Access
-    // tracking shipped, the settlement configured both caches onto the eviction engine, and the
-    // engine checks live pins before the access rule — so with no qits-platform-deployments and no qits-ci both types
-    // now refuse rather than plan against "nothing is pinned". Zeros with a reason, which is the
-    // one property every line of this report has to keep.
-    given()
-        .when()
-        .get("/artifacts/api/gc/plan")
-        .then()
-        .statusCode(200)
-        .body("types.find { it.type == 'oci-mirror' }.strategy", is("OciMirrorGcStrategy"))
-        .body(
-            "types.find { it.type == 'oci-mirror' }.error",
-            org.hamcrest.Matchers.containsString("live pins unavailable"))
-        .body("types.find { it.type == 'oci-mirror' }.dead", hasSize(0))
-        .body("types.find { it.type == 'oci-mirror' }.blobsSweepable", is(0))
-        .body(
-            "types.find { it.type == 'npm-proxy' }.error",
-            org.hamcrest.Matchers.containsString("live pins unavailable"))
-        .body("types.find { it.type == 'npm-proxy' }.dead", hasSize(0))
-        .body("types.find { it.type == 'npm-proxy' }.blobsSweepable", is(0));
   }
 
   @Test
@@ -290,7 +240,7 @@ class GcPlanControllerTest {
         .body("executedAt", notNullValue())
         .body("aborted", org.hamcrest.Matchers.containsString("qits-platform-deployments"))
         .body("aborted", org.hamcrest.Matchers.containsString("qits-ci"))
-        .body("types", hasSize(10))
+        .body("types", hasSize(7))
         .body("types.deleted.flatten()", hasSize(0))
         .body("sweep.blobsUnlinked", is(0))
         .body("sweep.bytesReclaimed", is(0))

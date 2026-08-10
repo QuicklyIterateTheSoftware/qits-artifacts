@@ -1,7 +1,7 @@
 package eu.wohlben.qits.artifacts.gc;
 
 import eu.wohlben.qits.artifacts.control.LiveBlobCensus;
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
+import eu.wohlben.qits.artifacts.entity.RepositoryTypeProfile;
 import jakarta.inject.Inject;
 import java.time.Instant;
 import java.util.List;
@@ -9,7 +9,8 @@ import java.util.Locale;
 
 /**
  * What binds an own type's {@link GcTypeAdapter} to {@link OwnArtifactsStrategy} — wiring, and
- * deliberately nothing else. The twin of {@link CacheGcStrategy}, one engine over.
+ * deliberately nothing else. The only binder left here: its twin bound the cache engine, and both
+ * went to qits-platform-mirror with the types they collected.
  *
  * <p>The settlement's shape has three parts and this is the third: the <b>rule</b> is the engine's,
  * written once; the <b>facts</b> are the adapter's, one per type; and something has to read the
@@ -48,7 +49,7 @@ abstract class OwnGcStrategy implements GcStrategy {
   abstract GcTypeAdapter adapter();
 
   @Override
-  public RepositoryType type() {
+  public String type() {
     return adapter().type();
   }
 
@@ -69,17 +70,17 @@ abstract class OwnGcStrategy implements GcStrategy {
   public Plan plan(LiveBlobCensus.Census census, GcPins pins) {
     if (!pins.complete()) {
       throw new IllegalStateException(
-          "refusing to plan " + type().wireName() + " without live pins: " + pins.whyIncomplete());
+          "refusing to plan " + RepositoryTypeProfile.wireNameOf(type()) + " without live pins: " + pins.whyIncomplete());
     }
     GcPolicy policy = config.of(type()).strategy();
     if (policy != GcPolicy.OWN) {
       throw new IllegalStateException(
-          type().wireName()
+          RepositoryTypeProfile.wireNameOf(type())
               + " is configured as '"
               + policy.name().toLowerCase(Locale.ROOT)
               + "' but this strategy only runs the own engine; set"
               + " qits.artifacts.gc.type."
-              + type().wireName()
+              + RepositoryTypeProfile.wireNameOf(type())
               + ".strategy=own or retire this bean");
     }
     GcTypeAdapter adapter = adapter();

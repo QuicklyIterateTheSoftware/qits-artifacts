@@ -6,7 +6,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import eu.wohlben.qits.artifacts.control.LiveBlobCensus;
 import eu.wohlben.qits.artifacts.entity.NpmDistTag;
 import eu.wohlben.qits.artifacts.entity.NpmVersion;
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
+import eu.wohlben.qits.artifacts.control.NpmPackagesProfile;
+import eu.wohlben.qits.artifacts.entity.RepositoryTypeProfile;
 import eu.wohlben.qits.artifacts.gc.dto.GcIdentity;
 import io.quarkus.narayana.jta.QuarkusTransaction;
 import io.quarkus.test.junit.QuarkusTest;
@@ -183,25 +184,6 @@ class NpmPackagesGcAdapterTest extends GcFixture {
   }
 
   @Test
-  void theProxysVersionsAreNotThisTypesToCollect() throws Exception {
-    // npm-proxy shares the npm_version table with the hosted registry and runs the OTHER engine, so
-    // the scope has to be asserted rather than assumed: putting upstream's cached content under the
-    // platform's release protection, or the platform's own packages under a cache's eviction, is the
-    // one mistake these two types can make.
-    hosted();
-    repositoryService.ensure("npmjs", RepositoryType.NPM_PROXY);
-    versionRow("npmjs", "left-pad", "1.0.0", store(filled(71, (byte) 71)), daysAgo(400), null);
-    versionRow("npmjs", "left-pad", "1.0.1", store(filled(72, (byte) 72)), daysAgo(400), null);
-
-    GcStrategy.Plan plan = strategy.plan(census.take(), GcPins.none());
-
-    assertEquals(RepositoryType.NPM_PACKAGES, strategy.type());
-    assertEquals(List.of(), plan.dead());
-    assertEquals(List.of(), plan.kept(), "not one proxied version appears in a hosted plan");
-    assertEquals(Set.of(), plan.blobsRetained(), "and none of their tarballs is claimed as live");
-  }
-
-  @Test
   void aCondemnedVersionLosesItsRowAndGainsItsTombstoneInTheSameTransaction() throws Exception {
     // The tombstone is npm's alone and it STAYS: deleting a version row re-opens that version's
     // name for a publish with different bytes, which is one coordinate resolving to two tarballs
@@ -254,7 +236,7 @@ class NpmPackagesGcAdapterTest extends GcFixture {
     assertEquals(List.of(), plan.dead());
     assertEquals(List.of(), plan.kept());
     assertEquals(Set.of(), plan.blobsReleased());
-    assertEquals(taken.live(RepositoryType.NPM_PACKAGES).keySet(), plan.blobsRetained());
+    assertEquals(taken.live(NpmPackagesProfile.KEY).keySet(), plan.blobsRetained());
   }
 
   @Test
@@ -270,14 +252,14 @@ class NpmPackagesGcAdapterTest extends GcFixture {
 
     assertEquals(List.of(), plan.dead());
     assertEquals(List.of("@qits/thing@1.0.0", "@qits/thing@1.1.0"), identities(plan.kept()));
-    assertEquals(taken.live(RepositoryType.NPM_PACKAGES).keySet(), plan.blobsRetained());
+    assertEquals(taken.live(NpmPackagesProfile.KEY).keySet(), plan.blobsRetained());
     assertEquals(List.of(), planner.plan(taken, List.of(strategy), GcPins.none()).sweep().blobIds());
   }
 
   // --- fixture ---------------------------------------------------------------------------------
 
   private void hosted() {
-    repositoryService.ensure("npm", RepositoryType.NPM_PACKAGES);
+    repositoryService.ensure("npm", NpmPackagesProfile.KEY);
   }
 
   private String version(String packageName, String version, int size, Instant createdAt)

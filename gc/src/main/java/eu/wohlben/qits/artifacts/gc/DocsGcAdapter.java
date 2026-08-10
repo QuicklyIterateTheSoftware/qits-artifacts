@@ -3,7 +3,7 @@ package eu.wohlben.qits.artifacts.gc;
 import eu.wohlben.qits.artifacts.control.DocsRegistryCollection;
 import eu.wohlben.qits.artifacts.entity.ArtifactRepository;
 import eu.wohlben.qits.artifacts.entity.DocsSite;
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
+import eu.wohlben.qits.artifacts.control.DocsProfile;
 import eu.wohlben.qits.artifacts.gc.dto.GcIdentity;
 import eu.wohlben.qits.artifacts.persistence.ArtifactRepositoryRepository;
 import eu.wohlben.qits.artifacts.persistence.DocsFileRepository;
@@ -79,15 +79,15 @@ public class DocsGcAdapter implements GcTypeAdapter {
   @Inject DocsRegistryCollection docs;
 
   @Override
-  public RepositoryType type() {
-    return RepositoryType.DOCS;
+  public String type() {
+    return DocsProfile.KEY;
   }
 
   @Override
   public List<GcCandidate> enumerate() {
     List<GcCandidate> candidates = new ArrayList<>();
     for (ArtifactRepository repository : repositories.listAll()) {
-      if (repository.type != RepositoryType.DOCS) {
+      if (!DocsProfile.KEY.equals(repository.type)) {
         continue;
       }
       for (DocsSite row : sites.<DocsSite>list("repository = ?1", repository.name)) {

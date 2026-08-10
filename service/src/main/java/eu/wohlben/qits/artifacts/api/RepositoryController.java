@@ -3,8 +3,8 @@ package eu.wohlben.qits.artifacts.api;
 import eu.wohlben.qits.artifacts.control.ArtifactExplorerService;
 import eu.wohlben.qits.artifacts.control.ArtifactRepositoryService;
 import eu.wohlben.qits.artifacts.dto.ArtifactRepositoryDto;
+import eu.wohlben.qits.artifacts.control.RepositoryTypeProfiles;
 import eu.wohlben.qits.artifacts.dto.RepositorySummary;
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
 import eu.wohlben.qits.artifacts.mapper.ArtifactRepositoryMapper;
 import jakarta.inject.Inject;
 import jakarta.validation.Valid;
@@ -39,7 +39,20 @@ public class RepositoryController {
 
   @Inject ArtifactRepositoryMapper mapper;
 
-  public record EnsureRepositoryRequest(@NotNull RepositoryType type) {
+  @Inject RepositoryTypeProfiles repositoryTypes;
+
+  /**
+   * The request body, and the reason it carries a plain {@code String}.
+   *
+   * <p>The type used to deserialize straight into an enum through a {@code @JsonCreator}, so an
+   * unknown value failed inside Jackson with a message about a Java type nobody outside this
+   * codebase has heard of. Types are registered openly now — there is no enum to bind to — so the
+   * wire form arrives as text and {@link RepositoryTypeProfiles#requireWireName} resolves it,
+   * answering an unregistered value with a 400 that names what IS registered. Which is the answer a
+   * caller can act on, and the one that stays correct when a deployment ships a different set of
+   * format modules.
+   */
+  public record EnsureRepositoryRequest(@NotNull String type) {
     public record Response(ArtifactRepositoryDto repository) {}
   }
 
@@ -51,7 +64,8 @@ public class RepositoryController {
   @Operation(hidden = true)
   public EnsureRepositoryRequest.Response ensure(
       @PathParam("repo") String repo, @Valid EnsureRepositoryRequest request) {
-    var entity = repositoryService.ensure(repo, request.type());
+    var profile = repositoryTypes.requireWireName(request.type());
+    var entity = repositoryService.ensure(repo, profile.key());
     return new EnsureRepositoryRequest.Response(mapper.toDto(entity));
   }
 

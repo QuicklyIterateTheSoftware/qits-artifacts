@@ -4,7 +4,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
@@ -13,6 +12,7 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import org.flywaydb.core.Flyway;
@@ -30,13 +30,11 @@ import org.junit.jupiter.api.Test;
  * This test owns a private database, runs Flyway over the real migration directory, and reads what
  * is there.
  *
- * <p>It also pins the rule the three in-flight plans share (proxy-pulling-normal-images.md §4): the
- * type check constraint is maintained by full re-enumeration, and the {@link RepositoryType} enum is
- * the source of truth it copies. Looping over {@code values()} is what makes that a property rather
- * than a list somebody has to remember to extend — a constant added without a migration fails here
- * on the constant's own name.
+ * <p>It also pins the rule the constraint is maintained by: full re-enumeration. Every migration
+ * that touches {@code ck_artifact_repository_type} re-declares it naming every key, so whichever
+ * migration lands second necessarily includes the first one's.
  */
-class OciMirrorMigrationTest {
+class MigrationLineageTest {
 
   private Path directory;
   private JdbcDataSource dataSource;
@@ -70,7 +68,7 @@ class OciMirrorMigrationTest {
     }
     if (Files.exists(directory)) {
       try (var walk = Files.walk(directory)) {
-        walk.sorted(Comparator.reverseOrder()).forEach(OciMirrorMigrationTest::deleteQuietly);
+        walk.sorted(Comparator.reverseOrder()).forEach(MigrationLineageTest::deleteQuietly);
       }
     }
   }
@@ -83,21 +81,42 @@ class OciMirrorMigrationTest {
     }
   }
 
+  /**
+   * The ten keys the lineage's last re-enumeration (V13) declares, spelled out.
+   *
+   * <p>It used to be {@code RepositoryType.values()}, which made "the constraint lists every type"
+   * a property rather than a list. There is no enum any more — types are registered as profile
+   * beans — and a list read from the CLASSPATH would prove the wrong thing: the constraint is a
+   * fact about the DATABASE, and this service registers seven of these while a mirror on its own
+   * schema registers three. The three cache keys stay listed because the chain is byte-untouched by
+   * the split and still accepts them; rows of those types are a cutover data question, not a schema
+   * one.
+   */
+  private static final List<String> DECLARED_TYPES =
+      List.of(
+          "CI_SCREENSHOTS",
+          "CI_VIDEOS",
+          "OCI_IMAGES",
+          "NPM_PACKAGES",
+          "NPM_PROXY",
+          "OCI_MIRROR",
+          "MAVEN_PACKAGES",
+          "MAVEN_PROXY",
+          "DAEMON_BINARIES",
+          "DOCS");
+
   @Test
-  void theTypeCheckEnumeratesEveryConstantTheEnumHas() throws SQLException {
-    // The widening rule, as a property. Each migration that touches this constraint re-declares it
-    // naming EVERY value, so whichever plan lands second necessarily includes the first one's — and
-    // the enum in the tree at land time is what it copies.
-    for (RepositoryType type : RepositoryType.values()) {
-      insertRepository("probe-" + type.wireName(), type.name());
+  void theTypeCheckAcceptsEveryKeyTheLineageDeclares() throws SQLException {
+    for (String type : DECLARED_TYPES) {
+      insertRepository("probe-" + type.toLowerCase(java.util.Locale.ROOT), type);
     }
     assertEquals(
-        RepositoryType.values().length,
+        DECLARED_TYPES.size(),
         count("select count(*) from artifact_repository where name like 'probe-%'"));
   }
 
   @Test
-  void aTypeTheEnumDoesNotHaveIsRefusedByTheConstraint() {
+  void aTypeTheLineageDoesNotDeclareIsRefusedByTheConstraint() {
     // The other half: the constraint is a constraint, not documentation. Without it a typo in a
     // deployment's provisioning script would mint a repository of a type no code can read.
     SQLException refused =

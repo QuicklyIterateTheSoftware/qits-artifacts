@@ -4,6 +4,7 @@ import eu.wohlben.qits.artifacts.gc.dto.GcIdentity;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -118,8 +119,8 @@ public final class OwnArtifactsStrategy {
       }
     }
 
-    dead.sort(CacheEvictionStrategy.BY_IDENTITY);
-    kept.sort(CacheEvictionStrategy.BY_IDENTITY);
+    dead.sort(BY_IDENTITY);
+    kept.sort(BY_IDENTITY);
     return dead.isEmpty()
         ? GcStrategy.Plan.nothingDies(kept, retained)
         : new GcStrategy.Plan(dead, kept, released, retained, releasedByRepository);
@@ -153,4 +154,12 @@ public final class OwnArtifactsStrategy {
     kept.add(new GcIdentity(candidate.repository(), candidate.identity(), rule));
     retained.addAll(candidate.blobs());
   }
+
+  /**
+   * A stable report order, so two runs over an unchanged store produce the same lists. It used to
+   * live on the cache engine and be borrowed from here; the cache engine went to
+   * qits-platform-mirror, so it lives here now.
+   */
+  static final Comparator<GcIdentity> BY_IDENTITY =
+      Comparator.comparing(GcIdentity::repository).thenComparing(GcIdentity::identity);
 }

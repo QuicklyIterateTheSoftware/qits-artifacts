@@ -14,11 +14,9 @@ import eu.wohlben.qits.artifacts.dto.RepositorySummary;
 import eu.wohlben.qits.artifacts.dto.StoreSummary;
 import eu.wohlben.qits.artifacts.entity.MavenArtifact;
 import eu.wohlben.qits.artifacts.entity.NpmDistTag;
-import eu.wohlben.qits.artifacts.entity.NpmProxyPackument;
 import eu.wohlben.qits.artifacts.entity.NpmVersion;
 import eu.wohlben.qits.artifacts.entity.OciManifest;
 import eu.wohlben.qits.artifacts.entity.OciTag;
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
 import eu.wohlben.qits.artifacts.error.BadRequestException;
 import eu.wohlben.qits.artifacts.error.NotFoundException;
 import io.quarkus.narayana.jta.QuarkusTransaction;
@@ -151,23 +149,19 @@ class ArtifactExplorerServiceTest extends ArtifactsTestSupport {
             + summary.mavenPublishedBytes()
             + summary.mavenProxyBytes()
             + summary.orphanBytes());
-    assertEquals(
-        0L,
-        summary.ociMirrorBytes(),
-        "nothing has been pulled through a mirror here, and zero is the honest figure for that");
     assertEquals(40 + 60, summary.npmPublishedBytes());
-    assertEquals(70, summary.npmProxyTarballBytes());
-    assertEquals(PACKUMENT_DOC.length(), summary.npmProxyPackumentBytes());
     assertEquals(80 + 25, summary.mavenPublishedBytes(), "the jar and the pom, sized from the rows");
-    assertEquals(
-        0L,
-        summary.mavenProxyBytes(),
-        "nothing has been pulled through the maven cache here, and zero is the honest figure");
+    // The four cache figures are structurally zero: this service registers no cache type, so no row
+    // can carry one. They keep their places in the panel because "nothing cached" is an answer.
+    assertEquals(0L, summary.ociMirrorBytes());
+    assertEquals(0L, summary.npmProxyTarballBytes());
+    assertEquals(0L, summary.npmProxyPackumentBytes());
+    assertEquals(0L, summary.mavenProxyBytes());
     assertTrue(fixture.ma1() > 0);
   }
 
   @Test
-  void packagesAndVersionsAreEnumeratedForBothNpmTypes() {
+  void packagesAndVersionsAreEnumeratedForTheHostedNpmRegistry() {
     seedNpm();
 
     List<PackageSummary> hosted = explorer.listPackages("npm");
@@ -181,13 +175,6 @@ class ArtifactExplorerServiceTest extends ArtifactsTestSupport {
     assertEquals(40L, published.get(0).tarballSizeBytes());
     assertEquals(List.of("main"), published.get(0).distTags());
     assertEquals(List.of("latest"), published.get(1).distTags());
-
-    // A proxy caches tarballs and documents and stores no dist-tag rows, so it has no latest and no
-    // tags on any version. That is a property of the type, not missing data.
-    List<PackageSummary> proxied = explorer.listPackages("npmjs");
-    assertEquals(List.of("left-pad"), proxied.stream().map(PackageSummary::name).toList());
-    assertNull(proxied.get(0).latest());
-    assertEquals(List.of(), explorer.listVersions("npmjs", "left-pad").get(0).distTags());
   }
 
   @Test
@@ -213,7 +200,7 @@ class ArtifactExplorerServiceTest extends ArtifactsTestSupport {
     seedMaven();
 
     Map<String, RepositorySummary> byName = byName(explorer.listRepositories());
-    assertEquals(RepositoryType.OCI_IMAGES, byName.get("qits").type());
+    assertEquals("oci-images", byName.get("qits").type(), "the kebab wire form, not the stored key");
     assertEquals(2, byName.get("qits").itemCount(), "images, for an oci repository");
     assertEquals(
         fixture.ma1() + fixture.ma2() + fixture.mb1() + C1 + L1 + L2 + L3 + C2,
@@ -221,8 +208,7 @@ class ArtifactExplorerServiceTest extends ArtifactsTestSupport {
         "the repository's union, which dedupes L2 across its two images");
     assertEquals(1, byName.get("npm").itemCount(), "packages, for an npm repository");
     assertEquals(100L, byName.get("npm").sizeBytes());
-    assertEquals(1, byName.get("npmjs").itemCount());
-    assertEquals(RepositoryType.MAVEN_PACKAGES, byName.get("maven").type());
+    assertEquals("maven-packages", byName.get("maven").type());
     assertEquals(2, byName.get("maven").itemCount(), "deployed files, for a maven repository");
     assertEquals(80L + 25L, byName.get("maven").sizeBytes(), "the union over distinct blob ids");
   }
@@ -235,7 +221,7 @@ class ArtifactExplorerServiceTest extends ArtifactsTestSupport {
     assertThrows(NotFoundException.class, () -> explorer.listPackages("no-such-repo"));
     // The distinction a client needs: an npm repository has no images and never will, so an empty
     // list would read as an image registry that lost its images.
-    repositoryService.ensure("qits", RepositoryType.OCI_IMAGES);
+    repositoryService.ensure("qits", OciImagesProfile.KEY);
     assertThrows(BadRequestException.class, () -> explorer.listImages("npm"));
     assertThrows(BadRequestException.class, () -> explorer.listPackages("qits"));
   }
@@ -255,7 +241,7 @@ class ArtifactExplorerServiceTest extends ArtifactsTestSupport {
    * with {@code beta}.
    */
   private Fixture seedImages() {
-    repositoryService.ensure("qits", RepositoryType.OCI_IMAGES);
+    repositoryService.ensure("qits", OciImagesProfile.KEY);
     String config1 = store(filled(C1, (byte) 1));
     String config2 = store(filled(C2, (byte) 2));
     String layer1 = store(filled(L1, (byte) 3));
@@ -282,11 +268,10 @@ class ArtifactExplorerServiceTest extends ArtifactsTestSupport {
     return new Fixture(alphaV1.length, alphaV2.length, betaLatest.length);
   }
 
-  private static final String PACKUMENT_DOC = "{\"name\":\"left-pad\",\"versions\":{}}";
 
   /** One deployed release under the hosted maven repository: an 80-byte jar and a 25-byte pom. */
   private void seedMaven() {
-    repositoryService.ensure("maven", RepositoryType.MAVEN_PACKAGES);
+    repositoryService.ensure("maven", MavenPackagesProfile.KEY);
     String jar = store(filled(80, (byte) 21));
     String pom = store(filled(25, (byte) 22));
 
@@ -312,28 +297,19 @@ class ArtifactExplorerServiceTest extends ArtifactsTestSupport {
     return row;
   }
 
-  /** One hosted package with two versions and two dist-tags, and one proxied package with neither. */
+  /** One hosted package with two versions and two dist-tags. */
   private void seedNpm() {
-    repositoryService.ensure("npm", RepositoryType.NPM_PACKAGES);
-    repositoryService.ensure("npmjs", RepositoryType.NPM_PROXY);
+    repositoryService.ensure("npm", NpmPackagesProfile.KEY);
     String t1 = store(filled(40, (byte) 11));
     String t2 = store(filled(60, (byte) 12));
-    String t3 = store(filled(70, (byte) 13));
 
     QuarkusTransaction.requiringNew()
         .run(
             () -> {
               npmVersions.persist(version("npm", "@qits/thing", "1.0.0", t1));
               npmVersions.persist(version("npm", "@qits/thing", "1.1.0", t2));
-              npmVersions.persist(version("npmjs", "left-pad", "1.3.0", t3));
               npmDistTags.persist(distTag("npm", "@qits/thing", "latest", "1.1.0"));
               npmDistTags.persist(distTag("npm", "@qits/thing", "main", "1.0.0"));
-              NpmProxyPackument cached = new NpmProxyPackument();
-              cached.repository = "npmjs";
-              cached.packageName = "left-pad";
-              cached.doc = PACKUMENT_DOC;
-              cached.fetchedAt = Instant.now();
-              npmProxyPackuments.persist(cached);
             });
   }
 

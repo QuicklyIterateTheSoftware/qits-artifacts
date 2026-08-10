@@ -1,6 +1,5 @@
 package eu.wohlben.qits.artifacts.gc.dto;
 
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
 
 /**
  * One line of the report's configuration echo: what this deployment has told the collector to do
@@ -17,4 +16,4 @@ import eu.wohlben.qits.artifacts.entity.RepositoryType;
  * @param rule the effective rule, spelled out with this type's own window in it
  */
 public record GcTypeConfiguration(
-    RepositoryType type, String strategy, String window, String rule) {}
+    String type, String strategy, String window, String rule) {}

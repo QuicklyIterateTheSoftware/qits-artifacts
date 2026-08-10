@@ -44,9 +44,9 @@ import org.junit.jupiter.api.Test;
  * <p>Deliberately <b>one</b> class spanning both packages rather than one per context, because the
  * thing under test is the single process: {@code /artifacts/} is Quinoa's static SPA, {@code
  * /artifacts/api/**} is JAX-RS, {@code /artifacts/q/**} is Quarkus' non-application root, and
- * {@code /artifacts/git/**}, {@code /artifacts/npm/**}, {@code /artifacts/maven/**} and {@code
- * /v2/**} are four independent raw-Vert.x route stacks — and what needs proving is that all of
- * them resolve in the same binary.
+ * {@code /artifacts/npm/**}, {@code /artifacts/maven/**}, {@code /artifacts/docs/**}, {@code
+ * /artifacts/daemons/**} and {@code /v2/**} are independent raw-Vert.x route stacks — and what
+ * needs proving is that all of them resolve in the same binary.
  * Splitting it by package would split the subject.
  *
  * <p>The SPA is here rather than in the {@code @QuarkusTest} suite because it <b>cannot</b> be
@@ -54,10 +54,9 @@ import org.junit.jupiter.api.Test;
  * resources nor the SPA re-route, so a unit test asserting any of this would pass against a process
  * that has no web UI in it at all. This is the only suite that sees the real thing.
  *
- * <p>JGit is the reason this exists. It is not a Quarkus extension, so nothing registers its
- * {@code ServiceLoader} providers or its {@code JGitText} resource bundle for native-image on its
- * behalf; a clone/push round trip through {@code UploadPack}/{@code ReceivePack} is the only check
- * that the registrations in {@code application.properties} are actually sufficient.
+ * <p>The git smart-HTTP cases that used to live here went to qits-githost with the host, and JGit
+ * — the reason this suite was written — went with them. What is left is still the only place the
+ * binary is exercised at all.
  */
 @QuarkusIntegrationTest
 @TestProfile(PackagedProcessIT.TargetDirState.class)
@@ -86,30 +85,20 @@ class PackagedProcessIT {
       overrides.put(
           "quarkus.datasource.artifacts.jdbc.url", "jdbc:h2:file:" + ROOT.resolve("h2/artifacts"));
       overrides.put("quarkus.flyway.artifacts.clean-at-start", "true");
-      // The git host's packs and refs are blobs in that same store, so it needs no path of its own.
       overrides.put("qits.artifacts.blobs-dir", ROOT.resolve("blobs").toString());
-      // No CI intake in this repo, and no qits-projects one either; the notifier is fire-and-forget
-      // for both, so closed ports are the honest posture here exactly as they are in the unit
-      // suite. A push in this IT still drives two real outbound requests from the binary.
-      overrides.put("qits.ci.intake-url", "http://localhost:1/post-receive");
-      overrides.put("qits.projects.intake-url", "http://localhost:1/post-receive");
       // No qits-platform-deployments or qits-ci here either, and the shipped defaults name them by their qits-net
       // aliases — which on a build machine resolve to whatever the resolver feels like, or hang.
       // Closed ports make the refusal deterministic while still driving a real HttpClient inside
       // the binary.
       overrides.put("qits.artifacts.gc.pins.cd-base-url", "http://localhost:1/platform-deployments/api");
       overrides.put("qits.artifacts.gc.pins.ci-base-url", "http://localhost:1/ci/api");
-      // And the same for the mirror's three upstreams, where the shipped defaults name real public
-      // registries: this key redirects every one of them, so a closed port is what keeps an IT from
-      // dialling quay.io or Docker Hub. It still drives the binary's outbound HttpClient for real,
-      // which is the only reason the miss path can be observed here at all.
+      // The mirror upstream override stays although nothing here mirrors: the oci jar carries both
+      // halves of its format, the shipped upstream defaults name real public registries, and a
+      // closed port is what keeps a stray miss from dialling quay.io or Docker Hub.
       overrides.put("qits.artifacts.oci.mirror.endpoint-override", "http://localhost:1");
       return overrides;
     }
   }
-
-  @TestHTTPResource("/artifacts/git")
-  URL gitBase;
 
   @TestHTTPResource("/")
   URL root;
@@ -145,22 +134,9 @@ class PackagedProcessIT {
     // The other half, and the reason quarkus.quinoa.ignored-path-prefixes is spelled out rather
     // than left to Quinoa's derivation. That derivation reads quarkus.rest.path and
     // quarkus.http.non-application-root-path — so /api and /q would be covered — but NOTHING names
-    // /artifacts/git, which GitHostRoutes carries as a literal. The git host's six routes match
-    // ahead of the catch-all on their own; what does not is the base BETWEEN them, which is
-    // precisely the url qits-ci and qits-workspace-daemon hold as a contract. Un-ignored it answers
-    // 200 text/html, and a git client told 200 HTML reports anything but "no such repository".
-    given().when().get("/artifacts/git/" + UUID.randomUUID()).then().statusCode(404);
-
-    // The repository listing is the base itself, and the one route here a machine cannot tell from
-    // the SPA by status code alone: index.html answers 200 exactly as a listing does. So this
-    // asserts the body's shape, which is the only difference a caller could act on.
-    given()
-        .when()
-        .get("/artifacts/git")
-        .then()
-        .statusCode(200)
-        .contentType(containsString("json"))
-        .body("repositories", notNullValue());
+    // /artifacts/npm, which NpmRoutes carries as a literal in the qits-registries-npm jar. Un-ignored
+    // it answers 200 text/html, and an npm client handed a web page parses it as JSON.
+    given().when().get("/artifacts/npm/npm/@qits%2fnothing").then().statusCode(404);
 
     // The npm case verbatim, one segment over: no config key names /maven either (MavenRoutes
     // spells it as a literal), so without the ignore a mistyped artifact path would answer 200
@@ -234,7 +210,7 @@ class PackagedProcessIT {
 
   @Test
   void theRegistryIsMountedAtTheHostRootNotUnderTheArtifactsSegment() {
-    // /v2 is a literal in the route code, like /artifacts/git — no config key moves it, and docker
+    // /v2 is a literal in the route code — no config key moves it, and docker
     // and podman hardcode the prefix at the ROOT, so a drift to /artifacts/v2 would be invisible
     // everywhere except here.
     given()
@@ -291,7 +267,7 @@ class PackagedProcessIT {
 
   @Test
   void anNpmPackageRoundTripsThroughTheBinary() {
-    // The third raw-Vert.x route stack, proved to coexist with /v2 and /artifacts/git in one
+    // The second raw-Vert.x route stack, proved to coexist with /v2 in one
     // binary — and the parts of it only a binary can falsify: a scoped name arrives percent-encoded
     // and is matched by a regex route, the packument is built as a Jackson tree with no bound type
     // anywhere (the dto/UploadResult lesson), and the tarball comes back through
@@ -339,7 +315,7 @@ class PackagedProcessIT {
   @Test
   void aMavenReleaseDeploysAndResolvesThroughTheBinary() {
     // The fourth raw-Vert.x route stack, proved to coexist with /v2, /artifacts/npm and
-    // /artifacts/git in one binary — and the parts of it only a binary can falsify: the deploy PUT
+    // /v2 and /artifacts/npm in one binary — and the parts only a binary can falsify: the deploy PUT
     // streams through VertxInputStream, the metadata document and the checksums are derived per
     // request, and the jar comes back through HttpServerResponse.sendFile, which behaves
     // differently under native-image than on the JVM.
@@ -414,115 +390,6 @@ class PackagedProcessIT {
           metadata.body().contains("<value>1.0.1-20260802.123456-1</value>"), metadata.body());
       assertTrue(metadata.body().contains("<buildNumber>1</buildNumber>"), metadata.body());
     }
-  }
-
-  @Test
-  void gitSmartHttpAdvertisesRefsFromTheBinary() throws Exception {
-    // JGit's UploadPack running inside the compiled binary. A 404 here would mean the route is
-    // missing; a 500 would mean JGit itself did not survive the compile.
-    String repoId = seedOrigin(gitBase);
-    given()
-        .when()
-        .get("/artifacts/git/" + repoId + "/info/refs?service=git-upload-pack")
-        .then()
-        .statusCode(200)
-        .contentType(containsString("git-upload-pack-advertisement"));
-  }
-
-  @Test
-  void unknownRepoIdIs404FromTheGitHostRatherThanTheRouter() {
-    // The distinction that matters when reading this result: an unroutable path would 404 from
-    // Vert.x with no body handling at all, whereas the git host answers 404 for a well-formed id
-    // it cannot open — and 403 for a well-formed id asked over dumb HTTP. Asserting the 403 is
-    // what proves the handler, not the router, produced the 404 above it.
-    given()
-        .when()
-        .get("/artifacts/git/" + UUID.randomUUID() + "/info/refs?service=git-upload-pack")
-        .then()
-        .statusCode(404);
-  }
-
-  @Test
-  void dumbHttpIsRefusedByTheHandler() throws Exception {
-    String repoId = seedOrigin(gitBase);
-    given().when().get("/artifacts/git/" + repoId + "/info/refs").then().statusCode(403);
-  }
-
-  @Test
-  void cloneAndPushRoundTripAgainstTheBinary() throws Exception {
-    // The whole wire protocol, both directions, driven by the real git CLI: UploadPack builds a
-    // packfile and ReceivePack applies one. Nothing short of this exercises JGit's pack machinery.
-    String repoId = seedOrigin(gitBase);
-    Path clone = Files.createTempDirectory("qits-artifacts-it-clone");
-    Files.delete(clone);
-
-    runGit(null, "git", "clone", gitBase + "/" + repoId, clone.toString());
-    assertTrue(Files.exists(clone.resolve(".git")), "clone should have produced a working copy");
-
-    String branch = runGit(clone, "git", "rev-parse", "--abbrev-ref", "HEAD").trim();
-    Files.writeString(clone.resolve("pushed.txt"), "from the packaged binary\n");
-    runGit(clone, "git", "add", "pushed.txt");
-    runGit(clone, "git", "-c", "user.email=qits@local", "-c", "user.name=qits", "commit", "-m", "p");
-    String pushedSha = runGit(clone, "git", "rev-parse", "HEAD").trim();
-    runGit(clone, "git", "push", "origin", branch);
-
-    String originSha = remoteRefSha(gitBase, repoId, "refs/heads/" + branch);
-    assertEquals(pushedSha, originSha, "push should have advanced the origin's branch ref");
-  }
-
-  @Test
-  void contentReadsSurviveTheCompile() throws Exception {
-    // TreeWalk and RevWalk reach parts of JGit no other route here touches — object inflation and
-    // tree parsing rather than the pack machinery — and a native-image gap in any of them is a
-    // green `mvn verify` and a 500, or a silent 404, in the binary. The seeded repository holds
-    // README.md at the root, which both routes are asked about at a branch name and at a sha.
-    String repoId = seedOrigin(gitBase);
-    String head = remoteRefSha(gitBase, repoId, "refs/heads/main");
-
-    byte[] blob =
-        given()
-            .when()
-            .get("/artifacts/git/" + repoId + "/blob/main/README.md")
-            .then()
-            .statusCode(200)
-            .contentType(containsString("application/octet-stream"))
-            .header("Git-Commit-Sha", equalTo(head))
-            .extract()
-            .asByteArray();
-    assertEquals("seed\n", new String(blob));
-
-    given()
-        .when()
-        .get("/artifacts/git/" + repoId + "/tree/" + head)
-        .then()
-        .statusCode(200)
-        .contentType(containsString("application/json"))
-        .header("Git-Commit-Sha", equalTo(head))
-        .body("entries.name", hasItems("README.md"))
-        .body("entries.find { it.name == 'README.md' }.type", equalTo("blob"));
-  }
-
-  @Test
-  void theShippedDefaultsLeaveTheDefaultBranchUnprotected() throws Exception {
-    // The trap this feature is shaped around, asserted against the artifact that actually ships:
-    // qits-artifacts is the git host that serves its own redeploy, so a protection default of TRUE
-    // in the packaged binary could refuse the very push that fixes it. Nothing here overrides
-    // qits.repositories.git.protect-default-branch — this is the shipped value, and the roughest
-    // push there is must still go through untouched.
-    String repoId = seedOrigin(gitBase);
-    Path clone = Files.createTempDirectory("qits-artifacts-it-inert");
-    Files.delete(clone);
-    runGit(null, "git", "clone", "-q", gitBase + "/" + repoId, clone.toString());
-
-    runGit(clone, "git", "-c", "user.email=q@l", "-c", "user.name=q", "commit", "-q", "--amend",
-        "-m", "rewritten");
-    String rewritten = runGit(clone, "git", "rev-parse", "HEAD").trim();
-    runGit(clone, "git", "push", "--force", "origin", "main");
-
-    assertEquals(
-        rewritten,
-        remoteRefSha(gitBase, repoId, "refs/heads/main"),
-        "the shipped default must leave a force push to the default branch exactly as it was");
   }
 
   @Test
@@ -602,12 +469,12 @@ class PackagedProcessIT {
         .body("npmPublishedBytes", greaterThan(0))
         .body("ociPerImageSumBytes", greaterThanOrEqualTo(0))
         .body("orphanBytes", greaterThanOrEqualTo(0))
-        .body("npmProxyTarballBytes", greaterThanOrEqualTo(0))
-        .body("npmProxyPackumentBytes", greaterThanOrEqualTo(0))
-        .body("ociMirrorBytes", greaterThanOrEqualTo(0))
         .body("mavenPublishedBytes", greaterThanOrEqualTo(0))
-        // Zero, not merely non-negative: the seeded `central` cache exists here but nothing in
-        // this IT resolves through it, and there is no network to resolve through it with.
+        // Zero, not merely non-negative: this service registers no cache type at all, so the four
+        // cache figures are structurally zero rather than merely empty.
+        .body("npmProxyTarballBytes", equalTo(0))
+        .body("npmProxyPackumentBytes", equalTo(0))
+        .body("ociMirrorBytes", equalTo(0))
         .body("mavenProxyBytes", equalTo(0));
 
     given().when().get("/artifacts/api/repositories/no-such-repo/images").then().statusCode(404);
@@ -643,10 +510,6 @@ class PackagedProcessIT {
         .body("types.find { it.type == 'npm-packages' }.error", containsString("live pins"))
         .body("types.find { it.type == 'npm-packages' }.dead", hasSize(0))
         .body("types.find { it.type == 'npm-packages' }.reclaimableBytes", equalTo(0))
-        .body("types.find { it.type == 'npm-proxy' }.strategy", equalTo("NpmProxyGcStrategy"))
-        .body("types.find { it.type == 'npm-proxy' }.error", containsString("live pins"))
-        .body("types.find { it.type == 'maven-proxy' }.strategy", equalTo("MavenProxyGcStrategy"))
-        .body("types.find { it.type == 'maven-proxy' }.error", containsString("live pins"))
         .body(
             "types.find { it.type == 'daemon-binaries' }.strategy",
             equalTo("DaemonBinariesGcStrategy"))
@@ -657,9 +520,6 @@ class PackagedProcessIT {
             equalTo("MavenPackagesGcStrategy"))
         .body("types.find { it.type == 'maven-packages' }.error", containsString("live pins"))
         .body("types.find { it.type == 'maven-packages' }.dead", hasSize(0))
-        .body("types.find { it.type == 'oci-mirror' }.strategy", equalTo("OciMirrorGcStrategy"))
-        .body("types.find { it.type == 'oci-mirror' }.note", nullValue())
-        .body("types.find { it.type == 'oci-mirror' }.dead", hasSize(0))
         .body(
             "types.find { it.type == 'ci-screenshots' }.strategy",
             equalTo("CiScreenshotsGcStrategy"))
@@ -706,49 +566,6 @@ class PackagedProcessIT {
         .body("untouchable.reason", containsString("not computed"));
   }
 
-  @Test
-  void theMirrorNamespacesAreSeededByARealBootAndTheMissPathSurvivesTheCompile() {
-    // The startup seed only ever fires in a packaged or dev process — never under TEST — so this is
-    // the one place the three prefilled upstreams are observed arriving on their own, from a
-    // migration and a boot rather than from a test's setup.
-    given()
-        .when()
-        .get("/artifacts/api/mirror-upstreams")
-        .then()
-        .statusCode(200)
-        .body("upstreams.domain", hasItems("docker.io", "quay.io", "registry.access.redhat.com"))
-        .body("upstreams.find { it.domain == 'quay.io' }.slug", equalTo("quay"))
-        .body("upstreams.find { it.domain == 'quay.io' }.cachedImages", equalTo(0));
-
-    // And what a pull through one does: it FETCHES. The upstream is pointed at a closed port here,
-    // so what is observable is the miss path running to its honest end — a 502 naming the upstream
-    // it could not reach, rather than a 500 or a hang. That is a small assertion carrying a large
-    // one: the mirror's outbound HttpClient is the fourth in this process, it is built inside the
-    // binary rather than frozen into the image at build time, and nothing on the path from a /v2
-    // route to an upstream request needed reflection the builder was not told about. A green
-    // `mvn verify` proves none of that — every unit test configures a reachable stub, and this key
-    // ships BLANK, which is the shape that once failed the boot outright.
-    given()
-        .when()
-        .get("/v2/hub/library/alpine/manifests/latest")
-        .then()
-        .statusCode(502)
-        .body("errors[0].message", containsString("docker.io is unreachable"))
-        .body("errors[0].detail.namespace", equalTo("hub"));
-
-    given()
-        .when()
-        .post("/v2/quay/anything/blobs/uploads/")
-        .then()
-        .statusCode(405)
-        .body("errors[0].detail.type", equalTo("oci-mirror"));
-  }
-
-  /**
-   * Idempotent, like the endpoint itself — the registry never creates a repository implicitly. The
-   * startup seed has already written this exact row in a packaged process; the call stays so the
-   * registry cases state their own precondition instead of resting on another test's subject.
-   */
   private void ensureOciRepository() {
     given()
         .contentType("application/json")
@@ -760,105 +577,7 @@ class PackagedProcessIT {
   }
 
   /**
-   * A repository with one commit on {@code main}, provisioned and seeded <b>through the running
-   * binary</b>: {@code PUT /artifacts/git/:repoId} creates it and a real push puts the commit in.
-   * There is no directory to build one in — packs and refs are blobs — and receive-pack is the only
-   * door this storage has, which makes this both the only seeding available and the honest one.
-   *
-   * <p>Static and package-private because {@link ProtectedGitHostIT} launches the same binary under
-   * a different configuration and seeds the same way. A create is a create even with protection on,
-   * so the same helper serves both.
-   */
-  static String seedOrigin(URL gitBase) throws Exception {
-    String repoId = UUID.randomUUID().toString();
-    // The branch is pinned rather than left to the host's init.defaultBranch: the protected ref is
-    // the repository's own HEAD, and the protection cases have to know its name.
-    given()
-        .contentType("application/json")
-        .body("{\"defaultBranch\":\"main\"}")
-        .when()
-        .put("/artifacts/git/" + repoId)
-        .then()
-        .statusCode(201);
-
-    Path seed = Files.createTempDirectory("qits-artifacts-it-seed");
-    runGit(null, "git", "init", "-q", "-b", "main", seed.toString());
-    Files.writeString(seed.resolve("README.md"), "seed\n");
-    runGit(seed, "git", "add", "README.md");
-    runGit(seed, "git", "-c", "user.email=qits@local", "-c", "user.name=qits", "commit", "-q", "-m",
-        "seed");
-    runGit(seed, "git", "push", "-q", gitBase + "/" + repoId, "main");
-    return repoId;
-  }
-
-  /**
-   * What the served repository says a ref is, or {@code null} if it has none — {@code git ls-remote}
-   * rather than a {@code rev-parse} in a served bare, because there is no bare. It also asks the
-   * question the clients actually ask.
-   */
-  static String remoteRefSha(URL gitBase, String repoId, String ref) throws Exception {
-    return lsRemote(gitBase, repoId, ref, ref);
-  }
-
-  /**
-   * The sha a tag ref <b>peels to</b>, or {@code null} if it peels to nothing. An advertisement
-   * carries {@code <ref>^{}} only for a ref that names a tag OBJECT, so a non-null answer is how
-   * "annotated rather than the commit" is proved over the wire — the question {@code cat-file -t}
-   * used to answer in a directory this host does not have.
-   *
-   * <p>The pattern is globbed rather than the exact ref: {@code ls-remote} matches its patterns
-   * against ref names and {@code <ref>^{}} is not one.
-   */
-  static String peeledRemoteRef(URL gitBase, String repoId, String ref) throws Exception {
-    return lsRemote(gitBase, repoId, ref + "*", ref + "^{}");
-  }
-
-  private static String lsRemote(URL gitBase, String repoId, String pattern, String wanted)
-      throws Exception {
-    String out = runGit(null, "git", "ls-remote", gitBase + "/" + repoId, pattern);
-    for (String line : out.split("\n")) {
-      String[] parts = line.trim().split("\\s+");
-      if (parts.length == 2 && parts[1].equals(wanted)) {
-        return parts[0];
-      }
-    }
-    return null;
-  }
-
-  static String runGit(Path cwd, String... command) throws Exception {
-    ProcessBuilder pb = new ProcessBuilder(command);
-    if (cwd != null) {
-      pb.directory(cwd.toFile());
-    }
-    pb.redirectErrorStream(true);
-    Process p = pb.start();
-    String out = new String(p.getInputStream().readAllBytes());
-    if (p.waitFor() != 0) {
-      throw new RuntimeException("git " + String.join(" ", command) + " failed:\n" + out);
-    }
-    return out;
-  }
-
-  /**
-   * A refused push is the subject of the protection cases, so its output is a value rather than an
-   * exception: the message the pusher reads is exactly what is being asserted.
-   */
-  static String runGitExpectingFailure(Path cwd, String... command) throws Exception {
-    ProcessBuilder pb = new ProcessBuilder(command);
-    if (cwd != null) {
-      pb.directory(cwd.toFile());
-    }
-    pb.redirectErrorStream(true);
-    Process p = pb.start();
-    String out = new String(p.getInputStream().readAllBytes());
-    if (p.waitFor() == 0) {
-      throw new AssertionError(
-          "git " + String.join(" ", command) + " unexpectedly succeeded:\n" + out);
-    }
-    return out;
-  }
-
-  /** The 33 bytes of a PNG header the media sniffer needs; the body is irrelevant to the store. */
+  /** A minimal but real PNG, so the sniffer and the IHDR resolution check see actual bytes. */
   private static byte[] png(int width, int height) {
     byte[] b = new byte[33];
     System.arraycopy(

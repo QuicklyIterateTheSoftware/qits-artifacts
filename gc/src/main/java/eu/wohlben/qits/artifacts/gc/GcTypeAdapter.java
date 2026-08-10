@@ -1,6 +1,5 @@
 package eu.wohlben.qits.artifacts.gc;
 
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
 import java.util.Comparator;
 import java.util.List;
 
@@ -8,8 +7,8 @@ import java.util.List;
  * Everything one repository type has to say about itself for a generic engine to collect it.
  *
  * <p>The settlement replaced six bespoke strategies with two engines and a per-type configuration,
- * and this is the seam that keeps that from becoming a retention-rule framework: the <b>rules</b>
- * live in {@link CacheEvictionStrategy} and {@link OwnArtifactsStrategy}, written once; the
+ * and this is the seam that keeps that from becoming a retention-rule framework: the <b>rule</b>
+ * lives in {@link OwnArtifactsStrategy}, written once; the
  * <b>facts</b> live here, one implementation per type, sharing no policy at all. An adapter never
  * decides what dies — it answers what exists, what a release is, when something was last touched,
  * and how a row is removed.
@@ -17,13 +16,13 @@ import java.util.List;
  * <p>The line between the two is worth stating, because it is the line the old design got wrong in
  * the other direction: "which of these is superseded" is a rule and belongs to an engine; "is
  * {@code 1.2.3-main.gab854a1} a release" is a fact about npm and can only be answered by npm's
- * adapter. Nothing in an engine may grow a {@code switch} on {@link RepositoryType}, and nothing in
- * an adapter may grow a window or a keep-count.
+ * adapter. Nothing in an engine may grow a {@code switch} on the type key, and nothing in an adapter
+ * may grow a window or a keep-count.
  */
 public interface GcTypeAdapter {
 
-  /** The type this adapter speaks for. */
-  RepositoryType type();
+  /** The STORED type key this adapter speaks for ({@code NPM_PACKAGES}). */
+  String type();
 
   /**
    * Every identity of this type that exists right now, each with its effective access time.

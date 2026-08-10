@@ -4,7 +4,8 @@ import eu.wohlben.qits.artifacts.control.ArtifactRepositoryService;
 import eu.wohlben.qits.artifacts.control.BlobReclaim;
 import eu.wohlben.qits.artifacts.control.LiveBlobCensus;
 import eu.wohlben.qits.artifacts.entity.ArtifactRepository;
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
+import eu.wohlben.qits.artifacts.control.RepositoryTypeProfiles;
+import eu.wohlben.qits.artifacts.entity.RepositoryTypeProfile;
 import eu.wohlben.qits.artifacts.gc.dto.GcRepositorySweepReport;
 import eu.wohlben.qits.artifacts.gc.dto.GcSweepOutcome;
 import eu.wohlben.qits.artifacts.gc.dto.GcSweepReport;
@@ -18,7 +19,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.EnumMap;
+import java.util.TreeMap;
 import java.util.List;
 import java.util.Map;
 
@@ -56,6 +57,9 @@ public class GcSweepExecutor {
   @Inject GcTypeConfig config;
   @Inject ArtifactRepositoryService repositories;
 
+  /** Every repository type this deployment registers — the receipt covers exactly these. */
+  @Inject RepositoryTypeProfiles repositoryTypes;
+
   /**
    * One full run: every live pin, a fresh census, every registered strategy, the unlink loop, the
    * receipt.
@@ -84,7 +88,7 @@ public class GcSweepExecutor {
    * anything is applied — never a second planner, because a second planner over one type is a
    * second policy. The adapters need no change: every {@code GcIdentity} carries its repository and
    * their delete loops already dispatch on it, so the funnels — the npm tombstone, the OCI
-   * collect, the proxy evictions — run exactly as they do in a whole-store run.
+   * collect — run exactly as they do in a whole-store run.
    *
    * <p><b>The whole-run abort translates unchanged, and it has to.</b> A pin source that cannot
    * answer ends this run before the census with nothing deleted, even though only one repository
@@ -121,8 +125,10 @@ public class GcSweepExecutor {
     String why = "the run was aborted before anything was deleted: " + pins.whyIncomplete();
     Log.warnf("gc sweep aborted: %s", pins.whyIncomplete());
     List<GcTypeSweepResult> types = new ArrayList<>();
-    for (RepositoryType type : RepositoryType.values()) {
-      types.add(new GcTypeSweepResult(type, null, null, why, List.of(), List.of()));
+    for (String type : repositoryTypes.keys()) {
+      types.add(
+          new GcTypeSweepResult(
+              RepositoryTypeProfile.wireNameOf(type), null, null, why, List.of(), List.of()));
     }
     return new GcSweepReport(
         Instant.now(),
@@ -151,7 +157,7 @@ public class GcSweepExecutor {
     Log.warnf("gc sweep of %s aborted: %s", row.name, pins.whyIncomplete());
     return new GcRepositorySweepReport(
         row.name,
-        row.type,
+        RepositoryTypeProfile.wireNameOf(row.type),
         Instant.now(),
         false,
         GcPlanner.iso(sweep.graceWindow()),
@@ -178,10 +184,10 @@ public class GcSweepExecutor {
     Instant executedAt = Instant.now();
     Duration window = sweep.graceWindow();
     GcStrategy.GraceWindow grace = graceSince(executedAt.minus(window));
-    RepositoryType type = row.type;
+    String type = row.type;
 
     List<GcStrategy> claiming =
-        registered.stream().filter(strategy -> strategy.type() == type).toList();
+        registered.stream().filter(strategy -> type.equals(strategy.type())).toList();
     if (claiming.isEmpty()) {
       // Not an error status: a repository nobody collects gets a receipt saying so and zeros, the
       // same posture the whole-store surface holds. The UI never offers the button for such a row.
@@ -192,7 +198,7 @@ public class GcSweepExecutor {
           window,
           pins,
           null,
-          "no strategy registered for " + type.wireName(),
+          "no strategy registered for " + RepositoryTypeProfile.wireNameOf(type),
           null);
     }
     if (claiming.size() > 1) {
@@ -224,7 +230,7 @@ public class GcSweepExecutor {
     Log.infof(
         "gc sweep %s (%s): deleted %d identities, withheld %d by grace, %d errors",
         row.name,
-        type.wireName(),
+        RepositoryTypeProfile.wireNameOf(type),
         applied.deleted().size(),
         applied.withheldByGraceWindow().size(),
         applied.errors().size());
@@ -246,7 +252,7 @@ public class GcSweepExecutor {
 
     return new GcRepositorySweepReport(
         row.name,
-        type,
+        RepositoryTypeProfile.wireNameOf(type),
         executedAt,
         false,
         GcPlanner.iso(window),
@@ -273,7 +279,7 @@ public class GcSweepExecutor {
       String error) {
     return new GcRepositorySweepReport(
         row.name,
-        row.type,
+        RepositoryTypeProfile.wireNameOf(row.type),
         executedAt,
         false,
         GcPlanner.iso(window),
@@ -295,21 +301,21 @@ public class GcSweepExecutor {
     Duration window = sweep.graceWindow();
     GcStrategy.GraceWindow grace = graceSince(executedAt.minus(window));
 
-    Map<RepositoryType, List<GcStrategy>> claimants = new EnumMap<>(RepositoryType.class);
+    Map<String, List<GcStrategy>> claimants = new TreeMap<>();
     for (GcStrategy strategy : registered) {
       claimants.computeIfAbsent(strategy.type(), type -> new ArrayList<>()).add(strategy);
     }
 
-    Map<RepositoryType, GcStrategy.Plan> plans = new EnumMap<>(RepositoryType.class);
+    Map<String, GcStrategy.Plan> plans = new TreeMap<>();
     List<GcTypeSweepResult> types = new ArrayList<>();
-    for (RepositoryType type : RepositoryType.values()) {
+    for (String type : repositoryTypes.keys()) {
       List<GcStrategy> claiming = claimants.getOrDefault(type, List.of());
       if (claiming.isEmpty()) {
         types.add(
             new GcTypeSweepResult(
-                type,
+                RepositoryTypeProfile.wireNameOf(type),
                 null,
-                "no strategy registered for " + type.wireName(),
+                "no strategy registered for " + RepositoryTypeProfile.wireNameOf(type),
                 null,
                 List.of(),
                 List.of()));
@@ -318,7 +324,7 @@ public class GcSweepExecutor {
       if (claiming.size() > 1) {
         types.add(
             new GcTypeSweepResult(
-                type,
+                RepositoryTypeProfile.wireNameOf(type),
                 names(claiming),
                 null,
                 "two strategies claim this type; a type has exactly one policy, and merging them"
@@ -337,13 +343,13 @@ public class GcSweepExecutor {
         GcStrategy.Applied applied = strategy.apply(plan, grace);
         Log.infof(
             "gc sweep %s: deleted %d identities, withheld %d by grace, %d errors",
-            type.wireName(),
+            RepositoryTypeProfile.wireNameOf(type),
             applied.deleted().size(),
             applied.withheldByGraceWindow().size(),
             applied.errors().size());
         types.add(
             new GcTypeSweepResult(
-                type,
+                RepositoryTypeProfile.wireNameOf(type),
                 name,
                 GcRules.note(config, type, strategy.note()),
                 applied.errors().isEmpty() ? null : String.join("; ", applied.errors()),
@@ -353,9 +359,10 @@ public class GcSweepExecutor {
         // Fail-closed, exactly as the planner: an exception out of plan() (or a wholesale one out
         // of apply()) reports the type as failed. The blob loop is safe either way — a row that
         // was not deleted keeps its blob referenced, and the fresh census sees that.
-        Log.infof("gc sweep %s: refused — %s", type.wireName(), message(aborted));
+        Log.infof("gc sweep %s: refused — %s", RepositoryTypeProfile.wireNameOf(type), message(aborted));
         types.add(
-            new GcTypeSweepResult(type, name, null, message(aborted), List.of(), List.of()));
+            new GcTypeSweepResult(
+                RepositoryTypeProfile.wireNameOf(type), name, null, message(aborted), List.of(), List.of()));
       }
     }
 

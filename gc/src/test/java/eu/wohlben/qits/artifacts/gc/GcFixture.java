@@ -13,7 +13,10 @@ import eu.wohlben.qits.artifacts.entity.NpmVersion;
 import eu.wohlben.qits.artifacts.entity.OciManifest;
 import eu.wohlben.qits.artifacts.entity.OciMirrorTagCheck;
 import eu.wohlben.qits.artifacts.entity.OciTag;
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
+import eu.wohlben.qits.artifacts.control.MavenPackagesProfile;
+import eu.wohlben.qits.artifacts.control.NpmPackagesProfile;
+import eu.wohlben.qits.artifacts.control.OciImagesProfile;
+import eu.wohlben.qits.artifacts.entity.RepositoryTypeProfile;
 import eu.wohlben.qits.artifacts.persistence.ArtifactRecordRepository;
 import eu.wohlben.qits.artifacts.persistence.ArtifactRepositoryRepository;
 import eu.wohlben.qits.artifacts.persistence.DaemonBinaryRepository;
@@ -186,8 +189,8 @@ abstract class GcFixture {
    * to test the window has to make its own young blob and say so.
    */
   Store seed() throws IOException {
-    repositoryService.ensure("qits", RepositoryType.OCI_IMAGES);
-    repositoryService.ensure("npm", RepositoryType.NPM_PACKAGES);
+    repositoryService.ensure("qits", OciImagesProfile.KEY);
+    repositoryService.ensure("npm", NpmPackagesProfile.KEY);
 
     String config = store(filled(CONFIG, (byte) 1));
     String layerKept = store(filled(LAYER_KEPT, (byte) 2));
@@ -229,173 +232,6 @@ abstract class GcFixture {
         manifestDoomed);
   }
 
-  /** What {@link #seedMirror()} built. */
-  record MirrorStore(
-      String config, String layer, String child, String index, String absentChild) {}
-
-  static final int MIRROR_CONFIG = 11;
-  static final int MIRROR_LAYER = 700;
-  static final int ABSENT_CHILD = 900;
-
-  /**
-   * One cached multi-arch image in a mirror namespace, <b>with one child that was never fetched</b>.
-   *
-   * <p>That missing child is the fixture's whole point. A push arrives children-first — the registry
-   * refuses an index whose children it does not have — but a <em>pull</em> arrives index-first, and
-   * the mirror binds it immediately and fetches children lazily, each on its own miss, so it never
-   * pays an upstream for an architecture nobody pulled. A mirror index referencing a child with no
-   * local row is therefore the normal state of a partially-pulled image, not a corruption, and every
-   * reader that walks manifests has to survive it.
-   */
-  MirrorStore seedMirror() throws IOException {
-    repositoryService.ensure(MIRROR_REPO, RepositoryType.OCI_MIRROR);
-
-    String config = store(filled(MIRROR_CONFIG, (byte) 6));
-    String layer = store(filled(MIRROR_LAYER, (byte) 7));
-    byte[] childBytes = imageManifest(config, Map.of(layer, (long) MIRROR_LAYER), MIRROR_CONFIG);
-    String child = store(childBytes);
-    // Never stored and never rowed: the architecture nobody pulled.
-    String absentChild = "a".repeat(64);
-    byte[] indexBytes =
-        indexManifest(Map.of(child, (long) childBytes.length, absentChild, (long) ABSENT_CHILD));
-    String index = store(indexBytes);
-
-    QuarkusTransaction.requiringNew()
-        .run(
-            () -> {
-              ociManifests.persist(
-                  mirrorManifest(child, childBytes.length, OciMediaTypes.OCI_MANIFEST_V1));
-              ociManifests.persist(
-                  mirrorManifest(index, indexBytes.length, OciMediaTypes.OCI_INDEX_V1));
-              ociTags.persist(mirrorTag("jdk-25", index));
-            });
-
-    for (String blobId : List.of(config, layer, child, index)) {
-      backdate(blobId, Duration.ofDays(30));
-    }
-    return new MirrorStore(config, layer, child, index, absentChild);
-  }
-
-  static final String MIRROR_REPO = "quay";
-  static final String MIRROR_IMAGE = "quarkus/ubi9-quarkus-mandrel-builder-image";
-
-  /**
-   * Ages every mirror row — tags and manifests, both timestamps each — so the cache window bites.
-   *
-   * <p>The blob <em>files</em> are already backdated by {@link #seedMirror()}; this is the other
-   * half, and the two are deliberately separate. A file's mtime drives the grace window, a row's
-   * timestamps drive the eviction rule, and a case that could not move one without the other could
-   * not tell the two mechanisms apart.
-   */
-  void ageMirrorRows(Duration age) {
-    Instant at = Instant.now().minus(age);
-    QuarkusTransaction.requiringNew()
-        .run(
-            () -> {
-              ociTags.update(
-                  "updatedAt = ?1, accessedAt = ?1 where repository = ?2", at, MIRROR_REPO);
-              ociManifests.update(
-                  "createdAt = ?1, accessedAt = ?1 where repository = ?2", at, MIRROR_REPO);
-            });
-  }
-
-  /** Moves one mirrored tag's {@code accessed_at}, as a pull through the mirror would. */
-  void touchMirrorTag(String tag, Instant at) {
-    QuarkusTransaction.requiringNew()
-        .run(
-            () ->
-                ociTags.update(
-                    "accessedAt = ?1 where repository = ?2 and imageName = ?3 and tag = ?4",
-                    at, MIRROR_REPO, MIRROR_IMAGE, tag));
-  }
-
-  /** Moves one mirrored manifest's {@code accessed_at}, as a digest-addressed pull would. */
-  void touchMirrorManifest(String digest, Instant at) {
-    QuarkusTransaction.requiringNew()
-        .run(
-            () ->
-                ociManifests.update(
-                    "accessedAt = ?1 where repository = ?2 and imageName = ?3 and digest = ?4",
-                    at, MIRROR_REPO, MIRROR_IMAGE, digest));
-  }
-
-  /** The mirror's freshness row for a tag — what the miss path writes, and what eviction must clear. */
-  void mirrorTagCheck(String tag, Instant checkedAt) {
-    QuarkusTransaction.requiringNew()
-        .run(
-            () -> {
-              OciMirrorTagCheck check = new OciMirrorTagCheck();
-              check.repository = MIRROR_REPO;
-              check.imageName = MIRROR_IMAGE;
-              check.tag = tag;
-              check.checkedAt = checkedAt;
-              mirrorTagChecks.persist(check);
-            });
-  }
-
-  static final String PROXY_REPO = "npmjs";
-  static final int PROXY_COLD_TARBALL = 70;
-  static final int PROXY_WARM_TARBALL = 80;
-
-  /** What {@link #seedProxy()} built. */
-  record ProxyStore(String coldTarball, String warmTarball) {}
-
-  static final String PROXY_COLD_PACKAGE = "left-pad";
-  static final String PROXY_WARM_PACKAGE = "chalk";
-
-  /**
-   * Two proxied packages, one cold and one warm, each with its cached packument.
-   *
-   * <p>The warm one is the case the staleness rule exists for: its <b>document</b> was last
-   * revalidated upstream long ago, while its tarball was pulled yesterday. A packument judged on
-   * {@code fetched_at} alone would evict the document of a package something is actively
-   * installing, and the next install would pay upstream for it again.
-   */
-  ProxyStore seedProxy() throws IOException {
-    repositoryService.ensure(PROXY_REPO, RepositoryType.NPM_PROXY);
-    String cold = store(filled(PROXY_COLD_TARBALL, (byte) 11));
-    String warm = store(filled(PROXY_WARM_TARBALL, (byte) 12));
-    Instant longAgo = Instant.now().minus(Duration.ofDays(200));
-    Instant yesterday = Instant.now().minus(Duration.ofDays(1));
-    QuarkusTransaction.requiringNew()
-        .run(
-            () -> {
-              npmVersions.persist(
-                  proxiedVersion(PROXY_COLD_PACKAGE, "1.3.0", cold, longAgo, longAgo));
-              npmVersions.persist(
-                  proxiedVersion(PROXY_WARM_PACKAGE, "5.3.0", warm, longAgo, yesterday));
-              npmProxyPackuments.persist(cachedPackument(PROXY_COLD_PACKAGE, longAgo));
-              npmProxyPackuments.persist(cachedPackument(PROXY_WARM_PACKAGE, longAgo));
-            });
-    for (String blobId : List.of(cold, warm)) {
-      backdate(blobId, Duration.ofDays(30));
-    }
-    return new ProxyStore(cold, warm);
-  }
-
-  private static NpmVersion proxiedVersion(
-      String packageName, String version, String blobId, Instant createdAt, Instant accessedAt) {
-    NpmVersion row = new NpmVersion();
-    row.repository = PROXY_REPO;
-    row.packageName = packageName;
-    row.version = version;
-    row.tarballBlobId = blobId;
-    row.manifestJson = "{}";
-    row.createdAt = createdAt;
-    row.accessedAt = accessedAt;
-    return row;
-  }
-
-  private static NpmProxyPackument cachedPackument(String packageName, Instant fetchedAt) {
-    NpmProxyPackument row = new NpmProxyPackument();
-    row.repository = PROXY_REPO;
-    row.packageName = packageName;
-    row.doc = "{\"name\":\"" + packageName + "\",\"versions\":{}}";
-    row.etag = "\"seed\"";
-    row.fetchedAt = fetchedAt;
-    return row;
-  }
-
   /** What {@link #seedMaven()} built. */
   record MavenStore(String jar, String pom) {}
 
@@ -411,7 +247,7 @@ abstract class GcFixture {
    * sizes ride on the rows, which is the whole reason this type needs no disk read.
    */
   MavenStore seedMaven() throws IOException {
-    repositoryService.ensure(MAVEN_REPO, RepositoryType.MAVEN_PACKAGES);
+    repositoryService.ensure(MAVEN_REPO, MavenPackagesProfile.KEY);
     String jar = store(filled(MAVEN_JAR, (byte) 8));
     String pom = store(filled(MAVEN_POM, (byte) 10));
     QuarkusTransaction.requiringNew()
@@ -424,74 +260,6 @@ abstract class GcFixture {
       backdate(blobId, Duration.ofDays(30));
     }
     return new MavenStore(jar, pom);
-  }
-
-  static final String MAVEN_PROXY_REPO = "central";
-  static final String MAVEN_PROXY_ARTIFACT = "org/slf4j/slf4j-api";
-  static final String MAVEN_PROXY_COLD_PATH = MAVEN_PROXY_ARTIFACT + "/1.7.36/slf4j-api-1.7.36.jar";
-  static final String MAVEN_PROXY_WARM_PATH = MAVEN_PROXY_ARTIFACT + "/2.0.13/slf4j-api-2.0.13.jar";
-  static final String MAVEN_PROXY_METADATA_PATH = MAVEN_PROXY_ARTIFACT + "/maven-metadata.xml";
-  static final int MAVEN_PROXY_COLD = 90;
-  static final int MAVEN_PROXY_WARM = 95;
-
-  /** What {@link #seedMavenProxy()} built. */
-  record MavenProxyStore(String coldJar, String warmJar) {}
-
-  /**
-   * Two cached files of one upstream artifact — one cold, one warm — and the cached {@code
-   * maven-metadata.xml} beside them.
-   *
-   * <p>The warm one is the case the document's staleness rule exists for: the <b>document</b> was
-   * last revalidated upstream long ago, while a jar under it was resolved yesterday. A document
-   * judged on {@code fetched_at} alone would be evicted out from under an artifact something is
-   * actively building against, and the next resolve would pay upstream for it again.
-   *
-   * <p>Both files sit under {@link #MAVEN_PROXY_ARTIFACT}, which is also the document's directory —
-   * that prefix relationship is what the adapter folds, so a fixture where they did not share one
-   * could not ask the question.
-   */
-  MavenProxyStore seedMavenProxy() throws IOException {
-    repositoryService.ensure(MAVEN_PROXY_REPO, RepositoryType.MAVEN_PROXY);
-    String cold = store(filled(MAVEN_PROXY_COLD, (byte) 13));
-    String warm = store(filled(MAVEN_PROXY_WARM, (byte) 14));
-    Instant longAgo = Instant.now().minus(Duration.ofDays(200));
-    Instant yesterday = Instant.now().minus(Duration.ofDays(1));
-    QuarkusTransaction.requiringNew()
-        .run(
-            () -> {
-              mavenProxyMetadata.persist(cachedMetadata(MAVEN_PROXY_METADATA_PATH, longAgo));
-              mavenArtifacts.persist(
-                  cachedArtifact(MAVEN_PROXY_COLD_PATH, cold, MAVEN_PROXY_COLD, longAgo, longAgo));
-              mavenArtifacts.persist(
-                  cachedArtifact(
-                      MAVEN_PROXY_WARM_PATH, warm, MAVEN_PROXY_WARM, longAgo, yesterday));
-            });
-    for (String blobId : List.of(cold, warm)) {
-      backdate(blobId, Duration.ofDays(30));
-    }
-    return new MavenProxyStore(cold, warm);
-  }
-
-  private static MavenArtifact cachedArtifact(
-      String path, String blobId, long size, Instant createdAt, Instant accessedAt) {
-    MavenArtifact row = new MavenArtifact();
-    row.repository = MAVEN_PROXY_REPO;
-    row.path = path;
-    row.blobId = blobId;
-    row.sizeBytes = size;
-    row.createdAt = createdAt;
-    row.accessedAt = accessedAt;
-    return row;
-  }
-
-  private static MavenProxyMetadata cachedMetadata(String path, Instant fetchedAt) {
-    MavenProxyMetadata row = new MavenProxyMetadata();
-    row.repository = MAVEN_PROXY_REPO;
-    row.path = path;
-    row.doc = "<metadata><artifactId>slf4j-api</artifactId></metadata>";
-    row.etag = "\"seed\"";
-    row.fetchedAt = fetchedAt;
-    return row;
   }
 
   static final String DAEMON_REPO = "daemons";
@@ -526,27 +294,6 @@ abstract class GcFixture {
     row.blobId = blobId;
     row.sizeBytes = size;
     row.createdAt = Instant.now();
-    return row;
-  }
-
-  private static OciManifest mirrorManifest(String digest, long size, String mediaType) {
-    OciManifest row = new OciManifest();
-    row.repository = MIRROR_REPO;
-    row.imageName = MIRROR_IMAGE;
-    row.digest = digest;
-    row.mediaType = mediaType;
-    row.size = size;
-    row.createdAt = Instant.now();
-    return row;
-  }
-
-  private static OciTag mirrorTag(String name, String digest) {
-    OciTag row = new OciTag();
-    row.repository = MIRROR_REPO;
-    row.imageName = MIRROR_IMAGE;
-    row.tag = name;
-    row.manifestDigest = digest;
-    row.updatedAt = Instant.now();
     return row;
   }
 

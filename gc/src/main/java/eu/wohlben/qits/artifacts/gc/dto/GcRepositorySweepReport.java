@@ -1,6 +1,5 @@
 package eu.wohlben.qits.artifacts.gc.dto;
 
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
 import java.time.Instant;
 import java.util.List;
 
@@ -47,7 +46,7 @@ import java.util.List;
  */
 public record GcRepositorySweepReport(
     String repository,
-    RepositoryType type,
+    String type,
     Instant executedAt,
     boolean dryRun,
     String graceWindow,

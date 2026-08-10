@@ -14,7 +14,11 @@ import eu.wohlben.qits.artifacts.entity.NpmDistTag;
 import eu.wohlben.qits.artifacts.entity.NpmVersion;
 import eu.wohlben.qits.artifacts.entity.OciManifest;
 import eu.wohlben.qits.artifacts.entity.OciTag;
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
+import eu.wohlben.qits.artifacts.control.CiScreenshotsProfile;
+import eu.wohlben.qits.artifacts.control.CiVideosProfile;
+import eu.wohlben.qits.artifacts.control.NpmPackagesProfile;
+import eu.wohlben.qits.artifacts.control.OciImagesProfile;
+import eu.wohlben.qits.artifacts.entity.RepositoryTypeProfile;
 import eu.wohlben.qits.artifacts.error.NotFoundException;
 import eu.wohlben.qits.artifacts.gc.dto.GcIdentity;
 import eu.wohlben.qits.artifacts.gc.dto.GcRepositorySweepReport;
@@ -65,7 +69,7 @@ class GcSweepExecutorTest extends GcFixture {
     // tombstone in one transaction, and the sweep unlinks the tarball nothing references any more.
     // The release is as cold as the condemned build and survives on the belt; the newer build was
     // published moments ago and survives on the window.
-    repositoryService.ensure("npm", RepositoryType.NPM_PACKAGES);
+    repositoryService.ensure("npm", NpmPackagesProfile.KEY);
     String releaseBlob = agedBlob(41);
     String supersededBlob = agedBlob(42);
     String newestBlob = agedBlob(43);
@@ -78,7 +82,7 @@ class GcSweepExecutorTest extends GcFixture {
     assertFalse(report.dryRun());
     assertNotNull(report.executedAt());
     assertEquals("P7D", report.graceWindow());
-    GcTypeSweepResult npm = typeResult(report, RepositoryType.NPM_PACKAGES);
+    GcTypeSweepResult npm = typeResult(report, NpmPackagesProfile.KEY);
     assertNull(npm.error());
     assertEquals(List.of(PKG + "@" + SUPERSEDED), identities(npm.deleted()));
     assertEquals(List.of(), npm.withheldByGraceWindow());
@@ -105,7 +109,7 @@ class GcSweepExecutorTest extends GcFixture {
     // The strand hazard, closed: deleting the row first would leave the young blob row-less — and
     // row-less blobs are untouchable by construction, so it would never be reclaimed at all. The
     // identity waits out the window with its file, and the next run past it takes both together.
-    repositoryService.ensure("npm", RepositoryType.NPM_PACKAGES);
+    repositoryService.ensure("npm", NpmPackagesProfile.KEY);
     String supersededBlob = store(filled(52, (byte) 52)); // NOT backdated: as young as a fresh push
     String newestBlob = store(filled(53, (byte) 53));
     // The ROW is cold even though its file is young — a republish of the same bytes after a long
@@ -115,7 +119,7 @@ class GcSweepExecutorTest extends GcFixture {
 
     GcSweepReport report = executor.execute(census.take(), List.of(npmStrategy), GcPins.none());
 
-    GcTypeSweepResult npm = typeResult(report, RepositoryType.NPM_PACKAGES);
+    GcTypeSweepResult npm = typeResult(report, NpmPackagesProfile.KEY);
     assertEquals(List.of(), npm.deleted());
     assertEquals(List.of(PKG + "@" + SUPERSEDED), identities(npm.withheldByGraceWindow()));
     assertNull(npm.error(), "withheld is not an error — it is the window working");
@@ -133,7 +137,7 @@ class GcSweepExecutorTest extends GcFixture {
     // The policy never condemns a dist-tag-named version; this proves the MECHANISM refuses one
     // anyway. A hand-built plan stands in for the policy bug, and collect()'s 409 lands in the
     // receipt's error column instead of breaking the packument.
-    repositoryService.ensure("npm", RepositoryType.NPM_PACKAGES);
+    repositoryService.ensure("npm", NpmPackagesProfile.KEY);
     String taggedBlob = agedBlob(62);
     versionRow(PKG, SUPERSEDED, taggedBlob, daysAgo(400));
     distTagRow(PKG, "main", SUPERSEDED);
@@ -167,8 +171,8 @@ class GcSweepExecutorTest extends GcFixture {
     // Rows carry their ages here because the settled rule is access-gated: the dead sha tag is two
     // months cold and the orphan manifest older still, while the calver release and the newest build
     // were written moments ago.
-    repositoryService.ensure("qits", RepositoryType.OCI_IMAGES);
-    repositoryService.ensure("npm", RepositoryType.NPM_PACKAGES);
+    repositoryService.ensure("qits", OciImagesProfile.KEY);
+    repositoryService.ensure("npm", NpmPackagesProfile.KEY);
     String config = agedBlob(10);
     String layerKept = agedBlob(100);
     String layerShared = agedBlob(200);
@@ -202,7 +206,7 @@ class GcSweepExecutorTest extends GcFixture {
     GcSweepReport report =
         executor.execute(census.take(), List.of(ociStrategy, npmStrategy), GcPins.none());
 
-    GcTypeSweepResult oci = typeResult(report, RepositoryType.OCI_IMAGES);
+    GcTypeSweepResult oci = typeResult(report, OciImagesProfile.KEY);
     assertNull(oci.error());
     assertEquals(
         List.of("alpha8:" + deadSha, "alpha8@sha256:" + manifestOrphan),
@@ -252,13 +256,13 @@ class GcSweepExecutorTest extends GcFixture {
     // Zero rows: nothingDies under the note naming the intended rule — the honest caption, on the
     // receipt as on the plan. Rows: the stub fails closed rather than guess with an unimplemented
     // rule, and the refusal names what to implement.
-    repositoryService.ensure("shots", RepositoryType.CI_SCREENSHOTS);
-    repositoryService.ensure("clips", RepositoryType.CI_VIDEOS);
+    repositoryService.ensure("shots", CiScreenshotsProfile.KEY);
+    repositoryService.ensure("clips", CiVideosProfile.KEY);
 
     GcSweepReport quiet =
         executor.execute(census.take(), List.of(screenshotsStub(), videosStub()), GcPins.none());
-    GcTypeSweepResult shots = typeResult(quiet, RepositoryType.CI_SCREENSHOTS);
-    GcTypeSweepResult clips = typeResult(quiet, RepositoryType.CI_VIDEOS);
+    GcTypeSweepResult shots = typeResult(quiet, CiScreenshotsProfile.KEY);
+    GcTypeSweepResult clips = typeResult(quiet, CiVideosProfile.KEY);
     // The receipt says what the plan says about absence: excluded by configuration, then the stub's
     // own caption. A receipt that only carried the caption would leave an operator reading "nothing
     // was deleted" with no way to tell a decision from a gap.
@@ -274,11 +278,11 @@ class GcSweepExecutorTest extends GcFixture {
     recordRow("shots", screenshot);
     GcSweepReport refused =
         executor.execute(census.take(), List.of(screenshotsStub(), videosStub()), GcPins.none());
-    GcTypeSweepResult refusedShots = typeResult(refused, RepositoryType.CI_SCREENSHOTS);
+    GcTypeSweepResult refusedShots = typeResult(refused, CiScreenshotsProfile.KEY);
     assertNotNull(refusedShots.error());
     assertTrue(refusedShots.error().contains("stub"), refusedShots.error());
     assertTrue(refusedShots.error().contains("branch"), "the refusal names the rule to implement");
-    assertNull(typeResult(refused, RepositoryType.CI_VIDEOS).error(), "videos still has no rows");
+    assertNull(typeResult(refused, CiVideosProfile.KEY).error(), "videos still has no rows");
     assertTrue(blobStore.exists(screenshot), "fail-closed keeps every blob of the type");
   }
 
@@ -289,8 +293,8 @@ class GcSweepExecutorTest extends GcFixture {
     // a whole-store run would free those bytes. Scoped to one repository it must not — the other's
     // row is standing — while content only this repository names still goes. The scoped plan's
     // retained set is what stops it before the re-census or the store's guard ever have to.
-    ArtifactRepository npm = repositoryService.ensure("npm", RepositoryType.NPM_PACKAGES);
-    repositoryService.ensure("npm2", RepositoryType.NPM_PACKAGES);
+    ArtifactRepository npm = repositoryService.ensure("npm", NpmPackagesProfile.KEY);
+    repositoryService.ensure("npm2", NpmPackagesProfile.KEY);
     String releaseBlob = agedBlob(91);
     String release2Blob = agedBlob(92);
     String sharedBlob = agedBlob(93);
@@ -305,7 +309,7 @@ class GcSweepExecutorTest extends GcFixture {
         executor.execute(npm, census.take(), List.of(npmStrategy), GcPins.none());
 
     assertEquals("npm", report.repository());
-    assertEquals(RepositoryType.NPM_PACKAGES, report.type());
+    assertEquals("npm-packages", report.type());
     assertFalse(report.dryRun());
     assertNull(report.aborted());
     assertNull(report.error());
@@ -337,7 +341,7 @@ class GcSweepExecutorTest extends GcFixture {
     // the bytes one repository releases can be the last local reference to content qits-ci pins by
     // digest. This suite's pin urls are closed ports, so this is the deployed behaviour under a
     // broken dependency rather than a simulated one.
-    repositoryService.ensure("npm", RepositoryType.NPM_PACKAGES);
+    repositoryService.ensure("npm", NpmPackagesProfile.KEY);
     String coldBlob = agedBlob(95);
     versionRow("npm", PKG, SUPERSEDED, coldBlob, daysAgo(400));
 
@@ -369,7 +373,7 @@ class GcSweepExecutorTest extends GcFixture {
     // thing to ask about, and the honest answer is a receipt with the reason and zeros — not a
     // status code the caller has to interpret. The explorer never offers the button for such a row,
     // and the route does not depend on that.
-    ArtifactRepository shots = repositoryService.ensure("shots", RepositoryType.CI_SCREENSHOTS);
+    ArtifactRepository shots = repositoryService.ensure("shots", CiScreenshotsProfile.KEY);
 
     GcRepositorySweepReport report =
         executor.execute(shots, census.take(), List.of(npmStrategy), GcPins.none());
@@ -499,9 +503,9 @@ class GcSweepExecutorTest extends GcFixture {
     return row;
   }
 
-  private static GcTypeSweepResult typeResult(GcSweepReport report, RepositoryType type) {
+  private static GcTypeSweepResult typeResult(GcSweepReport report, String type) {
     return report.types().stream()
-        .filter(result -> result.type() == type)
+        .filter(result -> RepositoryTypeProfile.wireNameOf(type).equals(result.type()))
         .findFirst()
         .orElseThrow();
   }

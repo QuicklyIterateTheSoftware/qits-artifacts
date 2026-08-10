@@ -1,7 +1,6 @@
 package eu.wohlben.qits.artifacts.gc;
 
 import eu.wohlben.qits.artifacts.control.LiveBlobCensus;
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
 import eu.wohlben.qits.artifacts.gc.dto.GcIdentity;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -21,9 +20,10 @@ import java.util.Set;
  *
  * <p><b>One strategy per type, and the rule inside it is an engine's.</b> This used to read "sharing
  * no policy code", on the argument that docker's and npm's rules only look alike by coincidence.
- * The user's settlement of 2026-08-05 ({@code artifacts-gc-plan.md}) overturned that: there are two
- * rules — {@link CacheEvictionStrategy} and {@link OwnArtifactsStrategy} — and configuration says
- * which type runs which. So an implementation of this interface is a <b>binder</b>: it names its
+ * The user's settlement of 2026-08-05 ({@code artifacts-gc-plan.md}) overturned that: the rule is an
+ * engine's — {@link OwnArtifactsStrategy} here, and the cache-eviction engine in
+ * qits-platform-mirror, which is where the types it collects went — and configuration says which
+ * type runs which. So an implementation of this interface is a <b>binder</b>: it names its
  * type and its {@link GcTypeAdapter}, and carries no rule of its own. What survives the settlement
  * is the count: exactly one strategy may claim a type, and two claimants are a collision the
  * planner reports rather than a merge it performs. Registering one is a CDI bean of this type and
@@ -43,8 +43,12 @@ import java.util.Set;
  */
 public interface GcStrategy {
 
-  /** The type this strategy collects. Exactly one strategy may claim a type. */
-  RepositoryType type();
+  /**
+   * The STORED type key this strategy collects ({@code OCI_IMAGES}). Exactly one strategy may claim
+   * a type. A key rather than an enum constant because repository types are registered openly now —
+   * a profile bean claims a key, and this claims the same one.
+   */
+  String type();
 
   /**
    * Whether this strategy's keep-set reads {@link GcPins}.
@@ -103,8 +107,8 @@ public interface GcStrategy {
    * would leave their blobs unswept with nothing in the report to say why.
    *
    * <p>The default refuses a plan that condemns anything: a strategy whose rules can kill must own
-   * its deletion mechanics by overriding this. For the strategies that never condemn — the mirror,
-   * the CI stubs — the default is the correct implementation, applied to the empty set.
+   * its deletion mechanics by overriding this. For the strategies that never condemn — the CI stubs
+   * — the default is the correct implementation, applied to the empty set.
    *
    * @param plan this strategy's own freshly computed plan
    * @param grace answers whether a blob's file is still inside the grace window

@@ -2,7 +2,7 @@ package eu.wohlben.qits.artifacts.gc;
 
 import eu.wohlben.qits.artifacts.control.LiveBlobCensus;
 import eu.wohlben.qits.artifacts.entity.ArtifactRepository;
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
+import eu.wohlben.qits.artifacts.control.CiScreenshotsProfile;
 import eu.wohlben.qits.artifacts.persistence.ArtifactRecordRepository;
 import eu.wohlben.qits.artifacts.persistence.ArtifactRepositoryRepository;
 import jakarta.inject.Inject;
@@ -47,8 +47,8 @@ public class CiScreenshotsGcStrategy implements GcStrategy {
   @Inject ArtifactRecordRepository records;
 
   @Override
-  public RepositoryType type() {
-    return RepositoryType.CI_SCREENSHOTS;
+  public String type() {
+    return CiScreenshotsProfile.KEY;
   }
 
   @Override
@@ -70,13 +70,13 @@ public class CiScreenshotsGcStrategy implements GcStrategy {
     }
     // The type's whole live set, verbatim from the census — empty today, and honest either way.
     return Plan.nothingDies(
-        List.of(), Set.copyOf(census.live(RepositoryType.CI_SCREENSHOTS).keySet()));
+        List.of(), Set.copyOf(census.live(CiScreenshotsProfile.KEY).keySet()));
   }
 
   private long rowCount() {
     long rows = 0;
     for (ArtifactRepository repository : repositories.listAll()) {
-      if (repository.type == RepositoryType.CI_SCREENSHOTS) {
+      if (CiScreenshotsProfile.KEY.equals(repository.type)) {
         rows += records.countByRepository(repository.name);
       }
     }

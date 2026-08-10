@@ -1,6 +1,7 @@
 package eu.wohlben.qits.artifacts.gc;
 
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
+import eu.wohlben.qits.artifacts.control.NpmPackagesProfile;
+import eu.wohlben.qits.artifacts.entity.RepositoryTypeProfile;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -61,8 +62,8 @@ final class FakeGcTypeAdapter implements GcTypeAdapter {
   }
 
   @Override
-  public RepositoryType type() {
-    return RepositoryType.NPM_PACKAGES;
+  public String type() {
+    return NpmPackagesProfile.KEY;
   }
 
   @Override

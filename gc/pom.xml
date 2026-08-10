@@ -20,10 +20,11 @@
          narrow public door (`BlobReclaim`, `OciRegistryCollection`, `NpmRegistryCollection`) that
          delegates to a member that stays package-private.
 
-         NOT a dependency on `git-storage`, deliberately: git packs are row-less to the census and
-         therefore structurally unreachable by any sweep, so pack GC is a later workstream behind
-         that module's own ports rather than something this module reaches into (AGENTS.md, "We do
-         not garbage collect git").
+         PIN-BASED HOSTED TYPES ONLY (byte-plane-split-plan.md phase 4). The access-tracked eviction
+         engine and the three cache adapters went to qits-platform-mirror with the caches they
+         collect; git pack GC went to qits-githost with the git host. What is left is one engine —
+         `OwnArtifactsStrategy` — over the types this service publishes, plus the reconciliation and
+         the sweep, which are type-agnostic and stay whole.
 
          The JAX-RS boundary is not here either. `GcPlanController` stays in `service` with every
          other route, so this module — like `artifacts` — carries no web layer. -->
@@ -36,6 +37,26 @@
                  doors above. The one direction that exists. -->
             <groupId>${project.groupId}</groupId>
             <artifactId>qits-artifacts-artifacts</artifactId>
+        </dependency>
+        <dependency>
+            <!-- The store's own doors: BlobReclaim, the repository rows, and RepositoryTypeProfiles
+                 — which is what the planner walks now that the type set is open rather than an
+                 enum it could call values() on. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-blobstore</artifactId>
+        </dependency>
+        <dependency>
+            <!-- The hosted formats' collections, which are the adapters' delete funnels. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-registries-npm</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-registries-maven</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-registries-oci</artifactId>
         </dependency>
         <dependency>
             <groupId>io.quarkus</groupId>

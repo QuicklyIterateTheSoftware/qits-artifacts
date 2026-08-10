@@ -5,7 +5,7 @@ import eu.wohlben.qits.artifacts.control.NpmSemver;
 import eu.wohlben.qits.artifacts.entity.ArtifactRepository;
 import eu.wohlben.qits.artifacts.entity.NpmDistTag;
 import eu.wohlben.qits.artifacts.entity.NpmVersion;
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
+import eu.wohlben.qits.artifacts.control.NpmPackagesProfile;
 import eu.wohlben.qits.artifacts.gc.dto.GcIdentity;
 import eu.wohlben.qits.artifacts.persistence.ArtifactRepositoryRepository;
 import eu.wohlben.qits.artifacts.persistence.NpmDistTagRepository;
@@ -76,15 +76,15 @@ public class NpmPackagesGcAdapter implements GcTypeAdapter {
   @Inject NpmRegistryCollection npm;
 
   @Override
-  public RepositoryType type() {
-    return RepositoryType.NPM_PACKAGES;
+  public String type() {
+    return NpmPackagesProfile.KEY;
   }
 
   @Override
   public List<GcCandidate> enumerate() {
     List<GcCandidate> candidates = new ArrayList<>();
     for (ArtifactRepository repository : repositories.listAll()) {
-      if (repository.type != RepositoryType.NPM_PACKAGES) {
+      if (!NpmPackagesProfile.KEY.equals(repository.type)) {
         continue;
       }
       for (String packageName : versions.listPackageNames(repository.name)) {

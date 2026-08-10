@@ -1,12 +1,11 @@
 package eu.wohlben.qits.artifacts.gc;
 
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
 import eu.wohlben.qits.artifacts.gc.dto.GcPlanSummary;
 import eu.wohlben.qits.artifacts.gc.dto.GcSweepPlan;
 import eu.wohlben.qits.artifacts.gc.dto.GcTypeConfiguration;
 import eu.wohlben.qits.artifacts.gc.dto.GcTypePlan;
 import java.util.ArrayList;
-import java.util.EnumMap;
+import java.util.TreeMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -19,7 +18,7 @@ import java.util.Map;
  * that re-derived "what would die" would be a second policy, and two policies in one report is the
  * mistake the whole design refuses.
  *
- * <p>It exists because the plan is long. Eight types, each with two identity lists, a configuration
+ * <p>It exists because the plan is long. Every type, each with two identity lists, a configuration
  * echo and a pins section is the right amount of detail to <em>check</em> a decision and the wrong
  * amount to <em>take</em> one: a reviewer needs "can this run, what does it cost, and which type is
  * doing the work" before any of it means anything.
@@ -35,7 +34,7 @@ final class GcSummary {
       GcSweepPlan sweep,
       GcPins pins,
       String graceWindow) {
-    Map<RepositoryType, GcTypeConfiguration> configured = new EnumMap<>(RepositoryType.class);
+    Map<String, GcTypeConfiguration> configured = new TreeMap<>();
     for (GcTypeConfiguration line : configuration) {
       configured.put(line.type(), line);
     }
@@ -107,7 +106,7 @@ final class GcSummary {
    * prevent.
    */
   private static String line(GcTypePlan type, GcTypeConfiguration configured) {
-    StringBuilder line = new StringBuilder(type.type().wireName());
+    StringBuilder line = new StringBuilder(type.type());
     if (configured != null && configured.strategy() != null) {
       line.append(" (").append(configured.strategy());
       if (configured.window() != null) {
@@ -134,7 +133,7 @@ final class GcSummary {
       return "no strategy registered, so nothing of it is ever collected";
     }
     if (type.error() != null) {
-      // The headline already carries the pin failures in full, and six types repeating them is a
+      // The headline already carries the pin failures in full, and every type repeating them is a
       // summary nobody reads to the end. The reason in full stays on the type's own entry.
       return "refused: " + upTo(type.error(), " — ");
     }
@@ -160,9 +159,8 @@ final class GcSummary {
   }
 
   /**
-   * Enough of a note for a summary line. The notes that matter here lead with their point — the npm
-   * proxy's H2 line opens with the fact that a packument is a CLOB and frees no disk — so the first
-   * sentence is the honest short form and the full text stays on the type's own entry.
+   * Enough of a note for a summary line. The notes that matter here lead with their point, so the
+   * first sentence is the honest short form and the full text stays on the type's own entry.
    */
   private static String firstSentence(String note) {
     int stop = note.indexOf(". ");

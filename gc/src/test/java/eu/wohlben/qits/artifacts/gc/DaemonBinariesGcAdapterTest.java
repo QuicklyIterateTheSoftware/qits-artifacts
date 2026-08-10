@@ -6,7 +6,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.artifacts.control.LiveBlobCensus;
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
+import eu.wohlben.qits.artifacts.control.DaemonBinariesProfile;
+import eu.wohlben.qits.artifacts.entity.RepositoryTypeProfile;
 import eu.wohlben.qits.artifacts.gc.dto.GcIdentity;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -258,16 +259,16 @@ class DaemonBinariesGcAdapterTest extends GcFixture {
     LiveBlobCensus.Census taken = census.take();
     GcStrategy.Plan plan = strategy.plan(taken, GcPins.none());
 
-    assertEquals(RepositoryType.DAEMON_BINARIES, strategy.type());
+    assertEquals(DaemonBinariesProfile.KEY, strategy.type());
     assertEquals(List.of(), plan.dead());
     assertEquals(List.of(), plan.kept());
-    assertEquals(taken.live(RepositoryType.DAEMON_BINARIES).keySet(), plan.blobsRetained());
+    assertEquals(taken.live(DaemonBinariesProfile.KEY).keySet(), plan.blobsRetained());
   }
 
   // --- fixture ---------------------------------------------------------------------------------
 
   private void repository() {
-    repositoryService.ensure(DAEMON_REPO, RepositoryType.DAEMON_BINARIES);
+    repositoryService.ensure(DAEMON_REPO, DaemonBinariesProfile.KEY);
   }
 
   private String blob(int size) throws IOException {

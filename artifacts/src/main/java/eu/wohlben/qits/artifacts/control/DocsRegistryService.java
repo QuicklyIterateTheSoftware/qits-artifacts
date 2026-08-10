@@ -3,7 +3,6 @@ package eu.wohlben.qits.artifacts.control;
 import eu.wohlben.qits.artifacts.entity.ArtifactRepository;
 import eu.wohlben.qits.artifacts.entity.DocsFile;
 import eu.wohlben.qits.artifacts.entity.DocsSite;
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
 import eu.wohlben.qits.artifacts.error.DocsException;
 import eu.wohlben.qits.artifacts.persistence.ArtifactRepositoryRepository;
 import eu.wohlben.qits.artifacts.persistence.DocsFileRepository;
@@ -43,7 +42,7 @@ public class DocsRegistryService {
   @Inject ArtifactRepositoryRepository repositories;
   @Inject DocsSiteRepository sites;
   @Inject DocsFileRepository files;
-  @Inject ArtifactAccessTracker accessTracker;
+  @Inject DocsAccessTracker accessTracker;
 
   /** One file of a bundle, as the route staged it: the whole of what {@link #publish} needs. */
   public record BundleFile(String path, String blobId, long sizeBytes, String mediaType) {}
@@ -69,9 +68,9 @@ public class DocsRegistryService {
    * means a fresh deployment needs no manual step.
    */
   @ActivateRequestContext
-  public RepositoryType requireDocsRepository(String name) {
+  public String requireDocsRepository(String name) {
     ArtifactRepository repository = name == null ? null : repositories.findById(name);
-    if (repository == null || repository.type != RepositoryType.DOCS) {
+    if (repository == null || !DocsProfile.KEY.equals(repository.type)) {
       throw new DocsException(
           404,
           "no such docs repository '"

@@ -1,6 +1,5 @@
 package eu.wohlben.qits.artifacts.gc.dto;
 
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
 import java.util.List;
 
 /**
@@ -22,7 +21,7 @@ import java.util.List;
  *     type whose content is shared with something that stays.
  */
 public record GcTypePlan(
-    RepositoryType type,
+    String type,
     String strategy,
     String note,
     String error,

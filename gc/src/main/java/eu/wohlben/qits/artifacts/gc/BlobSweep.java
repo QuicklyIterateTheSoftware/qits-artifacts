@@ -3,7 +3,6 @@ package eu.wohlben.qits.artifacts.gc;
 import eu.wohlben.qits.artifacts.control.BlobReclaim;
 import eu.wohlben.qits.artifacts.control.BlobStore;
 import eu.wohlben.qits.artifacts.control.LiveBlobCensus;
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
 import eu.wohlben.qits.artifacts.gc.dto.GcSweepOutcome;
 import eu.wohlben.qits.artifacts.gc.dto.GcSweepPlan;
 import eu.wohlben.qits.artifacts.gc.dto.GcUntouchablePool;
@@ -12,7 +11,7 @@ import jakarta.inject.Inject;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.EnumMap;
+import java.util.TreeMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -50,7 +49,7 @@ public class BlobSweep {
    * @param census the store as read; a type absent from {@code plans} contributes its live set
    * @param plans the strategies' answers, at most one per type
    */
-  public GcSweepPlan plan(LiveBlobCensus.Census census, Map<RepositoryType, GcStrategy.Plan> plans) {
+  public GcSweepPlan plan(LiveBlobCensus.Census census, Map<String, GcStrategy.Plan> plans) {
     return reconcile(census, plans, true);
   }
 
@@ -62,7 +61,7 @@ public class BlobSweep {
    * zero because its content was pushed this morning. The sweep figure is the one with a date on it.
    */
   public GcSweepPlan planForOneType(
-      LiveBlobCensus.Census census, RepositoryType type, GcStrategy.Plan plan) {
+      LiveBlobCensus.Census census, String type, GcStrategy.Plan plan) {
     return planForOneType(census, type, plan, false);
   }
 
@@ -81,21 +80,26 @@ public class BlobSweep {
    */
   public GcSweepPlan planForOneType(
       LiveBlobCensus.Census census,
-      RepositoryType type,
+      String type,
       GcStrategy.Plan plan,
       boolean applyGraceWindow) {
-    Map<RepositoryType, GcStrategy.Plan> only = new EnumMap<>(RepositoryType.class);
+    Map<String, GcStrategy.Plan> only = new TreeMap<>();
     only.put(type, plan);
     return reconcile(census, only, applyGraceWindow);
   }
 
   private GcSweepPlan reconcile(
       LiveBlobCensus.Census census,
-      Map<RepositoryType, GcStrategy.Plan> plans,
+      Map<String, GcStrategy.Plan> plans,
       boolean applyGraceWindow) {
     Set<String> released = new TreeSet<>();
     Set<String> live = new HashSet<>();
-    for (RepositoryType type : RepositoryType.values()) {
+    // Every type the CENSUS saw, plus every type with a plan — not the registered set. A row
+    // carrying a key no profile claims still holds blobs, and reconciling over registrations would
+    // leave those blobs out of `live` and therefore sweepable. The census is the store as it is.
+    Set<String> types = new TreeSet<>(census.liveByType().keySet());
+    types.addAll(plans.keySet());
+    for (String type : types) {
       GcStrategy.Plan plan = plans.get(type);
       if (plan == null) {
         live.addAll(census.live(type).keySet());
@@ -161,7 +165,7 @@ public class BlobSweep {
    * </ol>
    */
   public GcSweepOutcome execute(
-      LiveBlobCensus.Census planned, Map<RepositoryType, GcStrategy.Plan> plans) {
+      LiveBlobCensus.Census planned, Map<String, GcStrategy.Plan> plans) {
     GcSweepPlan structural = reconcile(planned, plans, false);
     GcSweepPlan matured = reconcile(planned, plans, true);
     Set<String> withheldIds = new HashSet<>(structural.blobIds());

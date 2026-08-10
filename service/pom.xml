@@ -12,8 +12,13 @@
     </parent>
 
     <!-- The web half of this context: the JAX-RS boundary over the `artifacts` library
-         (eu.wohlben.qits.artifacts.api) and the in-process JGit smart-HTTP git host
-         (eu.wohlben.qits.githost, plain Vert.x routes at /artifacts/git/*).
+         (eu.wohlben.qits.artifacts.api), the docs and daemon wires (raw Vert.x routes at
+         /artifacts/docs and /artifacts/daemons), and the SPA.
+
+         The npm, maven and OCI wires are NOT written here any more — they arrive as beans on the
+         qits-registries jars and register their own routes. The git smart-HTTP host is not here at
+         all: it moved to qits-githost with the storage engine it needs
+         (byte-plane-split-plan.md phase 3).
 
          A DEPLOYABLE APP, not a library JAR. It was extracted as a library — "a consuming Quarkus
          application pulls it in and gets the routes" — because packaging it would have needed an
@@ -55,13 +60,21 @@
             <artifactId>qits-artifacts-gc</artifactId>
         </dependency>
         <dependency>
-            <!-- The git host's storage engine (a JGit DfsRepository over blobs). It declares two
-                 ports and implements neither; the adapters are in this module
-                 (githost/persistence/), because git-storage may not depend on
-                 qits-artifacts-artifacts and artifacts may not depend on git-storage — they are
-                 different contexts — and this is the one module that already depends on both. -->
+            <!-- The three package formats, each carrying BOTH its store side and its wire. The
+                 routes register themselves — /artifacts/npm, /artifacts/maven and /v2 are literals
+                 in those jars — so this module writes no protocol code at all.
+                 Both halves of each format ship; only the hosted profiles are discovered here
+                 (quarkus.arc.exclude-types in application.properties vetoes the cache ones). -->
             <groupId>${project.groupId}</groupId>
-            <artifactId>qits-artifacts-git-storage</artifactId>
+            <artifactId>qits-registries-npm</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-registries-maven</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-registries-oci</artifactId>
         </dependency>
         <dependency>
             <!-- The platform's shared auth jar, resolved from the platform Maven repository:
@@ -103,17 +116,6 @@
             <artifactId>quarkus-oidc</artifactId>
         </dependency>
         <dependency>
-            <!-- The other direction: this service CALLS qits-ci with the git host's post-receive
-                 events, and that intake wants a bearer. The extension fetches, caches and refreshes
-                 the token; CiPostReceiveNotifier only attaches it.
-
-                 Disabled by default (quarkus.oidc-client.client-enabled), so with no client
-                 credentials configured nothing is fetched and the notifier posts exactly as it
-                 always has. -->
-            <groupId>io.quarkus</groupId>
-            <artifactId>quarkus-oidc-client</artifactId>
-        </dependency>
-        <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-rest-jackson</artifactId>
         </dependency>
@@ -127,16 +129,6 @@
             <artifactId>quarkus-smallrye-openapi</artifactId>
         </dependency>
         <dependency>
-            <!-- JGit core only (UploadPack/ReceivePack + the pkt-line protocol). GitHostRoutes
-                 drives these directly from Vert.x routes, so we need NEITHER a servlet container
-                 (quarkus-undertow) NOR jgit.http.server — undertow's presence breaks Quinoa's
-                 production static serving in the consuming app (the monorepo's
-                 docs/issues/2026-07-15_packaged-spa-not-served.md). JGit speaks the wire protocol
-                 ONLY; the git CLI remains the sole mutator of repositories. -->
-            <groupId>org.eclipse.jgit</groupId>
-            <artifactId>org.eclipse.jgit</artifactId>
-        </dependency>
-        <dependency>
             <!-- The SPA. Quinoa runs the npm build in src/main/webui (the qits-spa-artifacts
                  submodule) during augmentation and serves the result as static resources — see the
                  quarkus.quinoa.* block in application.properties for the paths.
@@ -144,8 +136,8 @@
                  It is why quarkus-undertow must stay out: Quinoa's production static serving goes
                  through Quarkus' own static-resource route, which undertow's servlet stack takes
                  over and then cannot find (the monorepo's
-                 docs/issues/2026-07-15_packaged-spa-not-served.md). The git host being on raw
-                 Vert.x routes rather than jgit.http.server is what keeps that dependency absent. -->
+                 docs/issues/2026-07-15_packaged-spa-not-served.md). Every wire here is a raw Vert.x
+                 route, which is what keeps that dependency absent. -->
             <groupId>io.quarkiverse.quinoa</groupId>
             <artifactId>quarkus-quinoa</artifactId>
         </dependency>
@@ -208,9 +200,9 @@
             </plugin>
             <plugin>
                 <!-- The *IT suite runs against the PACKAGED artifact, which is the only place the
-                     native binary can be exercised at all: @QuarkusTest runs on the JVM and a JGit
-                     reflection gap does not show up there. Bound but skipped by default (skipITs in
-                     the root pom); the `native` profile below flips it. -->
+                     native binary can be exercised at all: @QuarkusTest runs on the JVM and a
+                     reflection gap in the binary does not show up there. Bound but skipped by
+                     default (skipITs in the root pom); the `native` profile below flips it. -->
                 <artifactId>maven-failsafe-plugin</artifactId>
                 <executions>
                     <execution>
@@ -243,8 +235,8 @@
     <profiles>
         <!-- GraalVM native build (the same profile qits-gateway and qits-workspace-daemon carry):
              `-Dnative` disables the fast-jar and enables the native image. It lives in THIS module,
-             not the root pom, because only this module is an application — `artifacts`, `git-storage`
-             and `gc` are library jars and have nothing to native-compile. skipITs flips with it so a
+             not the root pom, because only this module is an application — `artifacts` and `gc` are
+             library jars and have nothing to native-compile. skipITs flips with it so a
              native build runs the @QuarkusIntegrationTest suite against the binary rather than
              skipping it silently. -->
         <profile>

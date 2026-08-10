@@ -5,7 +5,7 @@ import eu.wohlben.qits.artifacts.control.OciRegistryCollection;
 import eu.wohlben.qits.artifacts.entity.ArtifactRepository;
 import eu.wohlben.qits.artifacts.entity.OciManifest;
 import eu.wohlben.qits.artifacts.entity.OciTag;
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
+import eu.wohlben.qits.artifacts.control.OciImagesProfile;
 import eu.wohlben.qits.artifacts.gc.dto.GcIdentity;
 import eu.wohlben.qits.artifacts.persistence.ArtifactRepositoryRepository;
 import eu.wohlben.qits.artifacts.persistence.OciManifestRepository;
@@ -104,15 +104,15 @@ public class OciImagesGcAdapter implements GcTypeAdapter {
   @Inject OciRegistryCollection registry;
 
   @Override
-  public RepositoryType type() {
-    return RepositoryType.OCI_IMAGES;
+  public String type() {
+    return OciImagesProfile.KEY;
   }
 
   @Override
   public List<GcCandidate> enumerate() {
     List<GcCandidate> candidates = new ArrayList<>();
     for (ArtifactRepository repository : repositories.listAll()) {
-      if (repository.type != RepositoryType.OCI_IMAGES) {
+      if (!OciImagesProfile.KEY.equals(repository.type)) {
         continue;
       }
       for (String image : manifests.listImageNames(repository.name)) {

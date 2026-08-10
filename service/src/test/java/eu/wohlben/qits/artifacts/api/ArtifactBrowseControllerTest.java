@@ -16,7 +16,8 @@ import eu.wohlben.qits.artifacts.entity.NpmDistTag;
 import eu.wohlben.qits.artifacts.entity.NpmVersion;
 import eu.wohlben.qits.artifacts.entity.OciManifest;
 import eu.wohlben.qits.artifacts.entity.OciTag;
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
+import eu.wohlben.qits.artifacts.control.NpmPackagesProfile;
+import eu.wohlben.qits.artifacts.control.OciImagesProfile;
 import eu.wohlben.qits.artifacts.persistence.NpmDistTagRepository;
 import eu.wohlben.qits.artifacts.persistence.NpmVersionRepository;
 import eu.wohlben.qits.artifacts.persistence.OciManifestRepository;
@@ -60,8 +61,8 @@ class ArtifactBrowseControllerTest {
 
   @BeforeEach
   void seed() {
-    repositoryService.ensure("qits", RepositoryType.OCI_IMAGES);
-    repositoryService.ensure("npm", RepositoryType.NPM_PACKAGES);
+    repositoryService.ensure("qits", OciImagesProfile.KEY);
+    repositoryService.ensure("npm", NpmPackagesProfile.KEY);
 
     byte[] config = filled(5, (byte) 7);
     String configDigest = store(config);

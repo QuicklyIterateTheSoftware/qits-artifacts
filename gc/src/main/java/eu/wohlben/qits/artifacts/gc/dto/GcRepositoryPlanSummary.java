@@ -1,6 +1,5 @@
 package eu.wohlben.qits.artifacts.gc.dto;
 
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
 
 /**
  * What collecting <b>one repository</b> would do, in the figures a listing can draw.
@@ -40,7 +39,7 @@ import eu.wohlben.qits.artifacts.entity.RepositoryType;
  */
 public record GcRepositoryPlanSummary(
     String repository,
-    RepositoryType type,
+    String type,
     String strategy,
     String note,
     String error,

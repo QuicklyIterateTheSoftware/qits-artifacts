@@ -8,7 +8,10 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.artifacts.control.LiveBlobCensus;
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
+import eu.wohlben.qits.artifacts.control.CiVideosProfile;
+import eu.wohlben.qits.artifacts.control.NpmPackagesProfile;
+import eu.wohlben.qits.artifacts.control.OciImagesProfile;
+import eu.wohlben.qits.artifacts.entity.RepositoryTypeProfile;
 import eu.wohlben.qits.artifacts.gc.dto.GcIdentity;
 import eu.wohlben.qits.artifacts.gc.dto.GcPlanReport;
 import eu.wohlben.qits.artifacts.gc.dto.GcPlanSummary;
@@ -40,6 +43,13 @@ import org.junit.jupiter.api.Test;
 @QuarkusTest
 class GcPlanTest extends GcFixture {
 
+  /**
+   * How many repository types this deployment registers: the two CI profiles from qits-blobstore,
+   * the three hosted format profiles from qits-registries, and the two this service contributes.
+   * The cache profiles are excluded from discovery, so a report has seven lines, not ten.
+   */
+  private static final int REGISTERED_TYPES = 7;
+
   @Inject GcPlanner planner;
 
   @Test
@@ -60,24 +70,21 @@ class GcPlanTest extends GcFixture {
             "DaemonBinariesGcStrategy",
             "DocsGcStrategy",
             "MavenPackagesGcStrategy",
-            "MavenProxyGcStrategy",
             "NpmPackagesGcStrategy",
-            "NpmProxyGcStrategy",
-            "OciImageGcStrategy",
-            "OciMirrorGcStrategy"),
+            "OciImageGcStrategy"),
         planner.registered().stream().map(GcPlanner::nameOf).sorted().toList());
     GcPlanReport report = planner.plan();
 
     assertTrue(report.dryRun());
-    assertEquals(RepositoryType.values().length, report.types().size());
+    assertEquals(REGISTERED_TYPES, report.types().size());
     for (GcTypePlan type : report.types()) {
       switch (type.type()) {
-        case OCI_IMAGES -> {
+        case "oci-images" -> {
           assertEquals("OciImageGcStrategy", type.strategy());
           assertNull(type.note());
           assertNotNull(type.error(), "no qits-platform-deployments here, so the type must abort rather than plan");
         }
-        case DAEMON_BINARIES -> {
+        case "daemon-binaries" -> {
           assertEquals("DaemonBinariesGcStrategy", type.strategy());
           assertNull(type.note());
           assertNotNull(
@@ -85,35 +92,19 @@ class GcPlanTest extends GcFixture {
               "the binary every CI step downloads: no qits-ci, no plan, on purpose");
           assertEquals(0, type.dead().size(), "a refused type plans nothing");
         }
-        case NPM_PACKAGES -> {
+        case "npm-packages" -> {
           assertEquals("NpmPackagesGcStrategy", type.strategy());
           assertNull(type.note());
           assertNotNull(type.error(), "the own engine reads pins, and there are none here");
           assertEquals(0, type.dead().size(), "a refused type plans nothing");
         }
-        case MAVEN_PACKAGES -> {
+        case "maven-packages" -> {
           assertEquals("MavenPackagesGcStrategy", type.strategy());
           assertNull(type.note(), "the append-only note went with the append-only posture");
           assertNotNull(type.error(), "the own engine reads pins, and there are none here");
           assertEquals(0, type.dead().size(), "a refused type plans nothing");
         }
-        case OCI_MIRROR -> {
-          assertEquals("OciMirrorGcStrategy", type.strategy());
-          assertNull(type.note());
-          assertNotNull(type.error(), "the cache engine reads pins, and there are none here");
-          assertEquals(0, type.dead().size(), "a refused type plans nothing");
-        }
-        case NPM_PROXY -> {
-          assertEquals("NpmProxyGcStrategy", type.strategy());
-          assertNotNull(type.error(), "the cache engine reads pins, and there are none here");
-          assertEquals(0, type.dead().size(), "a refused type plans nothing");
-        }
-        case MAVEN_PROXY -> {
-          assertEquals("MavenProxyGcStrategy", type.strategy());
-          assertNotNull(type.error(), "the cache engine reads pins, and there are none here");
-          assertEquals(0, type.dead().size(), "a refused type plans nothing");
-        }
-        case CI_SCREENSHOTS -> {
+        case "ci-screenshots" -> {
           assertEquals("CiScreenshotsGcStrategy", type.strategy());
           // Two facts, and the type's own line has to carry both: the configuration excludes it,
           // and the stub names the rule it will eventually get. Without the first, `dead: []` beside
@@ -123,13 +114,19 @@ class GcPlanTest extends GcFixture {
           assertNull(type.error(), "zero rows: the stub plans nothing rather than refusing");
           assertEquals(0, type.dead().size());
         }
-        case CI_VIDEOS -> {
+        case "ci-videos" -> {
           assertEquals("CiVideosGcStrategy", type.strategy());
           assertEquals(GcRules.EXCLUDED_NOTE + CiVideosGcStrategy.NOTE, type.note());
           assertTrue(type.note().contains("byte"), "the note names the intended rule");
           assertNull(type.error(), "zero rows: the stub plans nothing rather than refusing");
           assertEquals(0, type.dead().size());
         }
+        case "docs" -> {
+          assertEquals("DocsGcStrategy", type.strategy());
+          assertNotNull(type.error(), "the own engine reads pins, and there are none here");
+          assertEquals(0, type.dead().size(), "a refused type plans nothing");
+        }
+        default -> throw new AssertionError("unexpected type in the report: " + type.type());
       }
       assertEquals(0, type.blobsSweepable());
       assertEquals(0L, type.reclaimableBytes());
@@ -150,7 +147,7 @@ class GcPlanTest extends GcFixture {
     Store store = seed();
     GcStrategy oci =
         strategy(
-            RepositoryType.OCI_IMAGES,
+            OciImagesProfile.KEY,
             new GcStrategy.Plan(
                 List.of(new GcIdentity("qits", "alpha:v2", "superseded")),
                 List.of(new GcIdentity("qits", "alpha:v1", "newest build")),
@@ -166,7 +163,7 @@ class GcPlanTest extends GcFixture {
     assertEquals(1, executable.blobsSweepable());
     assertEquals(LAYER_DOOMED, executable.reclaimableBytes());
     assertEquals(GcSummary.bytes(LAYER_DOOMED), executable.reclaimable());
-    assertEquals(RepositoryType.values().length, executable.types().size());
+    assertEquals(REGISTERED_TYPES, executable.types().size());
     assertTrue(
         executable.types().stream()
             .anyMatch(line -> line.startsWith("oci-images (own, P30D): 1 identities condemned")),
@@ -192,38 +189,20 @@ class GcPlanTest extends GcFixture {
   }
 
   @Test
-  void theSummaryCarriesTheH2HonestyLineWhereTheFiguresAreRead() throws Exception {
-    // reclaimableBytes: 0 beside a hundred condemned packuments reads as a broken collector. The
-    // full explanation is the type's note; what the summary owes is its first sentence, on the line
-    // where the zero is, because that is where the wrong conclusion is drawn.
-    seed();
-
-    GcPlanSummary summary = planner.plan(census.take(), planner.registered(), GcPins.none())
-        .summary();
-
-    assertTrue(
-        summary.types().stream()
-            .anyMatch(
-                line ->
-                    line.startsWith("npm-proxy (cache, P30D)")
-                        && line.contains("cached packuments are H2 CLOBs, not files")),
-        "the npm-proxy line has to carry it: " + summary.types());
-  }
-
-  @Test
   void aTypeNoStrategyClaimsIsReportedAsSuchRatherThanOmitted() throws Exception {
     // No shipped type is in this state any more — daemon-binaries was the last one — and the line
-    // still has to be right, because it is what a NEW RepositoryType reads as on the day it lands.
+    // still has to be right, because it is what a NEWLY CONTRIBUTED profile reads as on its first
+    // day.
     // "No plan" and "nothing to collect" are different facts, and a missing entry would read as the
     // second.
     seed();
 
     GcPlanReport report = planner.plan(census.take(), List.of(), GcPins.none());
 
-    assertEquals(RepositoryType.values().length, report.types().size());
+    assertEquals(REGISTERED_TYPES, report.types().size());
     for (GcTypePlan type : report.types()) {
       assertNull(type.strategy());
-      assertEquals("no strategy registered for " + type.type().wireName(), type.note());
+      assertEquals("no strategy registered for " + type.type(), type.note());
       assertEquals(List.of(), type.dead());
     }
     assertEquals(0, report.sweep().blobCount(), "and nothing of an unclaimed type is ever swept");
@@ -251,7 +230,7 @@ class GcPlanTest extends GcFixture {
     LiveBlobCensus.Census taken = census.take();
     GcStrategy oci =
         strategy(
-            RepositoryType.OCI_IMAGES,
+            OciImagesProfile.KEY,
             new GcStrategy.Plan(
                 List.of(new GcIdentity("qits", "alpha:v2", "sha tag, no deployment pins it")),
                 List.of(new GcIdentity("qits", "alpha:v1", "newest build")),
@@ -266,7 +245,7 @@ class GcPlanTest extends GcFixture {
         "the shared layer stays: npm still names it. The config stays: a kept manifest names it");
     assertEquals((long) LAYER_DOOMED + manifestSize(taken, store.manifestDoomed()),
         report.sweep().reclaimableBytes());
-    GcTypePlan ociPlan = typePlan(report, RepositoryType.OCI_IMAGES);
+    GcTypePlan ociPlan = typePlan(report, OciImagesProfile.KEY);
     assertEquals(4, ociPlan.blobsReleased(), "released is what the dead identity named");
     assertEquals(2, ociPlan.blobsSweepable(), "sweepable is what nothing else names");
     assertEquals("alpha:v2", ociPlan.dead().get(0).identity());
@@ -280,7 +259,7 @@ class GcPlanTest extends GcFixture {
     Store store = seed();
     GcStrategy oci =
         strategy(
-            RepositoryType.OCI_IMAGES,
+            OciImagesProfile.KEY,
             new GcStrategy.Plan(
                 List.of(new GcIdentity("qits", "alpha:v2", "superseded")),
                 List.of(),
@@ -301,7 +280,7 @@ class GcPlanTest extends GcFixture {
     backdate(store.rowless(), java.time.Duration.ofDays(30));
     GcStrategy rogue =
         strategy(
-            RepositoryType.CI_VIDEOS,
+            CiVideosProfile.KEY,
             new GcStrategy.Plan(List.of(), List.of(), Set.of(store.rowless()), Set.of()));
 
     GcPlanReport report = planner.plan(census.take(), List.of(rogue), GcPins.none());
@@ -318,7 +297,7 @@ class GcPlanTest extends GcFixture {
     Store store = seed();
     GcStrategy oci =
         strategy(
-            RepositoryType.OCI_IMAGES,
+            OciImagesProfile.KEY,
             new GcStrategy.Plan(
                 List.of(new GcIdentity("qits", "alpha:v2", "superseded")),
                 List.of(),
@@ -334,7 +313,7 @@ class GcPlanTest extends GcFixture {
     assertEquals(LAYER_DOOMED, report.sweep().withheldBytes());
     assertEquals(
         LAYER_DOOMED,
-        typePlan(report, RepositoryType.OCI_IMAGES).reclaimableBytes(),
+        typePlan(report, OciImagesProfile.KEY).reclaimableBytes(),
         "the per-type figure is what the rule frees, not what tonight's run would unlink");
   }
 
@@ -347,8 +326,8 @@ class GcPlanTest extends GcFixture {
     GcStrategy unreachable =
         new GcStrategy() {
           @Override
-          public RepositoryType type() {
-            return RepositoryType.OCI_IMAGES;
+          public String type() {
+            return OciImagesProfile.KEY;
           }
 
           @Override
@@ -358,7 +337,7 @@ class GcPlanTest extends GcFixture {
         };
     GcStrategy npm =
         strategy(
-            RepositoryType.NPM_PACKAGES,
+            NpmPackagesProfile.KEY,
             new GcStrategy.Plan(
                 List.of(new GcIdentity("npm", "@qits/thing@1.1.0", "superseded prerelease")),
                 List.of(),
@@ -367,7 +346,7 @@ class GcPlanTest extends GcFixture {
 
     GcPlanReport report = planner.plan(census.take(), List.of(unreachable, npm), GcPins.none());
 
-    GcTypePlan aborted = typePlan(report, RepositoryType.OCI_IMAGES);
+    GcTypePlan aborted = typePlan(report, OciImagesProfile.KEY);
     assertNotNull(aborted.error());
     assertTrue(aborted.error().contains("qits-platform-deployments unreachable"));
     assertEquals(0, aborted.blobsSweepable());
@@ -390,11 +369,11 @@ class GcPlanTest extends GcFixture {
         planner.plan(
             census.take(),
             List.of(
-                strategy(RepositoryType.OCI_IMAGES, doomsEverything),
-                strategy(RepositoryType.OCI_IMAGES, doomsEverything)),
+                strategy(OciImagesProfile.KEY, doomsEverything),
+                strategy(OciImagesProfile.KEY, doomsEverything)),
             GcPins.none());
 
-    GcTypePlan collided = typePlan(report, RepositoryType.OCI_IMAGES);
+    GcTypePlan collided = typePlan(report, OciImagesProfile.KEY);
     assertTrue(collided.error().contains("two strategies claim this type"));
     assertEquals(0, report.sweep().blobCount());
     assertFalse(report.sweep().blobIds().contains(store.layerKept()));
@@ -407,10 +386,10 @@ class GcPlanTest extends GcFixture {
     // of the time — and an absent row reads as "nothing to clean here" rather than as a fact about
     // whether anybody cleans it at all. So the rows come from artifact_repository.
     Store store = seed();
-    repositoryService.ensure("empty", RepositoryType.OCI_IMAGES);
+    repositoryService.ensure("empty", OciImagesProfile.KEY);
     GcStrategy oci =
         strategy(
-            RepositoryType.OCI_IMAGES,
+            OciImagesProfile.KEY,
             new GcStrategy.Plan(
                 List.of(new GcIdentity("qits", "alpha:v2", "superseded")),
                 List.of(new GcIdentity("qits", "alpha:v1", "newest build")),
@@ -424,7 +403,7 @@ class GcPlanTest extends GcFixture {
         report.repositories().stream().map(GcRepositoryPlanSummary::repository).toList());
 
     GcRepositoryPlanSummary qits = repositorySummary(report, "qits");
-    assertEquals(RepositoryType.OCI_IMAGES, qits.type());
+    assertEquals("oci-images", qits.type(), "the wire form, as every report spells a type");
     assertEquals(1, qits.identitiesCondemned());
     assertEquals(1, qits.identitiesKept());
     assertEquals(1, qits.blobsSweepable());
@@ -451,10 +430,10 @@ class GcPlanTest extends GcFixture {
     // therefore sums to LESS than the global figure, which is the honest answer and not a bug: the
     // alternative, splitting a shared blob's bytes between them, is a number no run corresponds to.
     Store store = seed();
-    repositoryService.ensure("qits2", RepositoryType.OCI_IMAGES);
+    repositoryService.ensure("qits2", OciImagesProfile.KEY);
     GcStrategy oci =
         strategy(
-            RepositoryType.OCI_IMAGES,
+            OciImagesProfile.KEY,
             new GcStrategy.Plan(
                 List.of(
                     new GcIdentity("qits", "alpha:v2", "superseded"),
@@ -494,7 +473,7 @@ class GcPlanTest extends GcFixture {
     // stub says so. A column of zeros with nothing beside them would make those two look identical
     // to "clean already", which they are not.
     seed();
-    repositoryService.ensure("clips", RepositoryType.CI_VIDEOS);
+    repositoryService.ensure("clips", CiVideosProfile.KEY);
 
     GcPlanReport report = planner.plan();
 
@@ -522,12 +501,12 @@ class GcPlanTest extends GcFixture {
     GcRepositoryPlanReport report = planner.planForRepository("qits");
 
     assertEquals("qits", report.repository());
-    assertEquals(RepositoryType.OCI_IMAGES, report.type());
+    assertEquals("oci-images", report.type());
     assertTrue(report.dryRun());
     assertFalse(report.executable(), "no qits-platform-deployments and no qits-ci here");
     assertEquals(2, report.pinFailures().size());
     assertEquals(2, report.pins().size(), "the provenance of a keep-set is half of what is reviewed");
-    assertEquals(RepositoryType.OCI_IMAGES, report.configuration().type());
+    assertEquals("oci-images", report.configuration().type());
     assertEquals("own", report.configuration().strategy());
     assertEquals("OciImageGcStrategy", report.strategy());
     assertTrue(report.error().contains("live pins unavailable"), report.error());
@@ -554,18 +533,18 @@ class GcPlanTest extends GcFixture {
     return census.onDisk().get(digest);
   }
 
-  private static GcTypePlan typePlan(GcPlanReport report, RepositoryType type) {
+  private static GcTypePlan typePlan(GcPlanReport report, String type) {
     return report.types().stream()
-        .filter(plan -> plan.type() == type)
+        .filter(plan -> RepositoryTypeProfile.wireNameOf(type).equals(plan.type()))
         .findFirst()
         .orElseThrow();
   }
 
   /** A strategy that hands back a fixed answer — the seam is the contract, not the policy. */
-  private static GcStrategy strategy(RepositoryType type, GcStrategy.Plan plan) {
+  private static GcStrategy strategy(String type, GcStrategy.Plan plan) {
     return new GcStrategy() {
       @Override
-      public RepositoryType type() {
+      public String type() {
         return type;
       }
 

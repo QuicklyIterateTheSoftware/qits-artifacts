@@ -6,7 +6,15 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
+import eu.wohlben.qits.artifacts.control.CiScreenshotsProfile;
+import eu.wohlben.qits.artifacts.control.CiVideosProfile;
+import eu.wohlben.qits.artifacts.control.DaemonBinariesProfile;
+import eu.wohlben.qits.artifacts.control.DocsProfile;
+import eu.wohlben.qits.artifacts.control.RepositoryTypeProfiles;
+import eu.wohlben.qits.artifacts.control.MavenPackagesProfile;
+import eu.wohlben.qits.artifacts.control.NpmPackagesProfile;
+import eu.wohlben.qits.artifacts.control.OciImagesProfile;
+import eu.wohlben.qits.artifacts.entity.RepositoryTypeProfile;
 import eu.wohlben.qits.artifacts.gc.dto.GcPlanReport;
 import eu.wohlben.qits.artifacts.gc.dto.GcTypeConfiguration;
 import io.quarkus.test.junit.QuarkusTest;
@@ -14,7 +22,7 @@ import jakarta.inject.Inject;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.EnumMap;
+import java.util.TreeMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -32,52 +40,50 @@ import org.junit.jupiter.api.Test;
  * and every other type stays pinned exactly as it was. A diff that quietly widened would be the one
  * change nobody could review.
  *
- * <p>Moved so far: {@code oci-mirror} and {@code npm-proxy} onto the cache engine, then {@code
- * oci-images} and {@code daemon-binaries} onto the own engine, then {@code npm-packages} and
- * {@code maven-packages}, and {@code maven-proxy} arrived on the cache engine with its type. Only
- * the two CI types are left unmoved, and they are excluded by the settlement rather than pending.
+ * <p>Every type here is on the OWN engine or excluded. The three cache types went to
+ * qits-platform-mirror with the eviction engine that collected them, so what is left is the
+ * pin-based half of the settlement: {@code oci-images}, {@code npm-packages}, {@code
+ * maven-packages}, {@code daemon-binaries} and {@code docs} collected, the two CI types excluded.
  */
 @QuarkusTest
 class GcTypeConfigTest extends GcFixture {
 
   @Inject GcTypeConfig config;
   @Inject GcPlanner planner;
+  @Inject RepositoryTypeProfiles repositoryTypes;
 
   @Test
   void everyRepositoryTypeIsConfiguredAndTheShippedValuesAreTheSettlements() {
-    // The settlement's own numbers: P30D for the caches and for oci-images/npm-packages, P90D for
-    // maven-packages and daemon-binaries; the two CI types excluded and honest about it. Looping
-    // over values() rather than listing eight cases is what makes a new RepositoryType constant fail
-    // here — a type with no policy is a decision nobody took, not a default.
-    Map<RepositoryType, GcPolicy> strategies = new EnumMap<>(RepositoryType.class);
-    Map<RepositoryType, Optional<Duration>> windows = new EnumMap<>(RepositoryType.class);
-    for (RepositoryType type : RepositoryType.values()) {
+    // The settlement's own numbers: P30D for oci-images and npm-packages, P90D for maven-packages,
+    // daemon-binaries and docs; the two CI types excluded and honest about it. Looping over the
+    // REGISTERED types rather than listing cases is what makes a newly contributed profile fail here
+    // — a type with no policy is a decision nobody took, not a default.
+    Map<String, GcPolicy> strategies = new TreeMap<>();
+    Map<String, Optional<Duration>> windows = new TreeMap<>();
+    for (String type : repositoryTypes.keys()) {
       strategies.put(type, config.of(type).strategy());
       windows.put(type, config.of(type).window());
     }
 
-    assertEquals(GcPolicy.CACHE, strategies.get(RepositoryType.OCI_MIRROR));
-    assertEquals(GcPolicy.CACHE, strategies.get(RepositoryType.NPM_PROXY));
-    assertEquals(GcPolicy.CACHE, strategies.get(RepositoryType.MAVEN_PROXY));
-    assertEquals(GcPolicy.OWN, strategies.get(RepositoryType.OCI_IMAGES));
-    assertEquals(GcPolicy.OWN, strategies.get(RepositoryType.NPM_PACKAGES));
-    assertEquals(GcPolicy.OWN, strategies.get(RepositoryType.MAVEN_PACKAGES));
-    assertEquals(GcPolicy.OWN, strategies.get(RepositoryType.DAEMON_BINARIES));
-    assertEquals(GcPolicy.EXCLUDED, strategies.get(RepositoryType.CI_SCREENSHOTS));
-    assertEquals(GcPolicy.EXCLUDED, strategies.get(RepositoryType.CI_VIDEOS));
+    assertEquals(GcPolicy.OWN, strategies.get(OciImagesProfile.KEY));
+    assertEquals(GcPolicy.OWN, strategies.get(NpmPackagesProfile.KEY));
+    assertEquals(GcPolicy.OWN, strategies.get(MavenPackagesProfile.KEY));
+    assertEquals(GcPolicy.OWN, strategies.get(DaemonBinariesProfile.KEY));
+    assertEquals(GcPolicy.OWN, strategies.get(DocsProfile.KEY));
+    assertEquals(GcPolicy.EXCLUDED, strategies.get(CiScreenshotsProfile.KEY));
+    assertEquals(GcPolicy.EXCLUDED, strategies.get(CiVideosProfile.KEY));
+    assertEquals(
+        7,
+        strategies.size(),
+        "the cache types are not merely unconfigured here — they are unregistered");
 
-    assertEquals(Duration.ofDays(30), config.requireWindow(RepositoryType.OCI_MIRROR));
-    assertEquals(Duration.ofDays(30), config.requireWindow(RepositoryType.NPM_PROXY));
-    assertEquals(Duration.ofDays(30), config.requireWindow(RepositoryType.OCI_IMAGES));
-    assertEquals(Duration.ofDays(30), config.requireWindow(RepositoryType.NPM_PACKAGES));
-    assertEquals(Duration.ofDays(90), config.requireWindow(RepositoryType.MAVEN_PACKAGES));
-    // P90D and not the other two caches' P30D: a library is resolved when something builds against
-    // it, which is maven-packages' sentence and does not stop being true because the jar is
-    // somebody else's.
-    assertEquals(Duration.ofDays(90), config.requireWindow(RepositoryType.MAVEN_PROXY));
-    assertEquals(Duration.ofDays(90), config.requireWindow(RepositoryType.DAEMON_BINARIES));
-    assertEquals(Optional.empty(), windows.get(RepositoryType.CI_SCREENSHOTS));
-    assertEquals(Optional.empty(), windows.get(RepositoryType.CI_VIDEOS));
+    assertEquals(Duration.ofDays(30), config.requireWindow(OciImagesProfile.KEY));
+    assertEquals(Duration.ofDays(30), config.requireWindow(NpmPackagesProfile.KEY));
+    assertEquals(Duration.ofDays(90), config.requireWindow(MavenPackagesProfile.KEY));
+    assertEquals(Duration.ofDays(90), config.requireWindow(DaemonBinariesProfile.KEY));
+    assertEquals(Duration.ofDays(90), config.requireWindow(DocsProfile.KEY));
+    assertEquals(Optional.empty(), windows.get(CiScreenshotsProfile.KEY));
+    assertEquals(Optional.empty(), windows.get(CiVideosProfile.KEY));
   }
 
   @Test
@@ -87,25 +93,26 @@ class GcTypeConfigTest extends GcFixture {
     // unaccessed for longer than P90D" is.
     GcPlanReport report = planner.plan();
 
-    assertEquals(RepositoryType.values().length, report.configuration().size());
     assertEquals(
-        List.of(RepositoryType.values()),
+        List.of(
+            "ci-screenshots",
+            "ci-videos",
+            "daemon-binaries",
+            "docs",
+            "maven-packages",
+            "npm-packages",
+            "oci-images"),
         report.configuration().stream().map(GcTypeConfiguration::type).toList(),
-        "in the enum's own order, so the echo and the per-type plans read down the page together");
+        "one line per registered type, in the registry's own order, so the echo and the per-type"
+            + " plans read down the page together");
 
-    GcTypeConfiguration mirror = line(report, RepositoryType.OCI_MIRROR);
-    assertEquals("cache", mirror.strategy());
-    assertEquals("P30D", mirror.window());
-    assertTrue(mirror.rule().contains("unaccessed for longer than P30D"));
-    assertTrue(mirror.rule().contains("Creation counts as the first access"));
-
-    GcTypeConfiguration maven = line(report, RepositoryType.MAVEN_PACKAGES);
+    GcTypeConfiguration maven = line(report, MavenPackagesProfile.KEY);
     assertEquals("own", maven.strategy());
     assertEquals("P90D", maven.window());
     assertTrue(maven.rule().contains("last 2 released versions"));
     assertTrue(maven.rule().contains("P90D"));
 
-    GcTypeConfiguration videos = line(report, RepositoryType.CI_VIDEOS);
+    GcTypeConfiguration videos = line(report, CiVideosProfile.KEY);
     assertEquals("excluded", videos.strategy());
     assertNull(videos.window(), "a window beside a type nobody collects reads as a running rule");
     assertEquals(GcRules.EXCLUDED, videos.rule());
@@ -123,11 +130,7 @@ class GcTypeConfigTest extends GcFixture {
     // types moved by earlier workstreams, and the two CI types, which condemn nothing by
     // configuration.
     Store store = seed();
-    MirrorStore mirror = seedMirror();
     seedMaven();
-    ProxyStore proxy = seedProxy();
-    MavenProxyStore mavenProxy = seedMavenProxy();
-    ageMirrorRows(Duration.ofDays(60));
     // One image, two build shas: the older one is what the access rule condemns, the newer one is
     // the pull target the belt protects for an image cd has never deployed.
     ociTag("alpha", COLD_SHA, store.manifestKept(), Instant.now().minus(Duration.ofDays(60)));
@@ -157,8 +160,8 @@ class GcTypeConfigTest extends GcFixture {
 
     GcPlanReport report = planner.plan(census.take(), planner.registered(), GcPins.none());
 
-    Map<RepositoryType, List<String>> dead = new LinkedHashMap<>();
-    Map<RepositoryType, List<String>> kept = new LinkedHashMap<>();
+    Map<String, List<String>> dead = new LinkedHashMap<>();
+    Map<String, List<String>> kept = new LinkedHashMap<>();
     report
         .types()
         .forEach(
@@ -171,93 +174,54 @@ class GcTypeConfigTest extends GcFixture {
                   plan.kept().stream().map(identity -> identity.identity()).sorted().toList());
             });
 
-    // The two caches, unchanged from the workstream that moved them.
-    assertEquals(
-        List.of(MIRROR_IMAGE + "@sha256:" + mirror.child(), MIRROR_IMAGE + ":jdk-25").stream()
-            .sorted()
-            .toList(),
-        dead.get(RepositoryType.OCI_MIRROR),
-        "cold cached content is what the settlement configured this type to delete");
-    assertEquals(List.of(), kept.get(RepositoryType.OCI_MIRROR));
-    assertEquals(
-        List.of(PROXY_COLD_PACKAGE + NpmProxyGcAdapter.PACKUMENT, PROXY_COLD_PACKAGE + "@1.3.0"),
-        dead.get(RepositoryType.NPM_PROXY));
-    assertEquals(
-        List.of(PROXY_WARM_PACKAGE + NpmProxyGcAdapter.PACKUMENT, PROXY_WARM_PACKAGE + "@5.3.0"),
-        kept.get(RepositoryType.NPM_PROXY),
-        "a package installed yesterday keeps its tarball and its document");
-
-    // The cache this workstream added. One file, not a coordinate: a cache repairs itself on the
-    // next request, so a cold jar goes without its warm sibling or the document above them.
-    assertEquals(
-        List.of(MAVEN_PROXY_COLD_PATH),
-        dead.get(RepositoryType.MAVEN_PROXY),
-        "a dependency nothing has resolved in 200 days, past this type's P90D");
-    assertEquals(
-        List.of(MAVEN_PROXY_WARM_PATH, MAVEN_PROXY_METADATA_PATH + MavenProxyGcAdapter.METADATA),
-        kept.get(RepositoryType.MAVEN_PROXY));
-
     // The two that moved in this workstream.
     assertEquals(
         List.of("alpha:" + COLD_SHA),
-        dead.get(RepositoryType.OCI_IMAGES),
+        dead.get(RepositoryTypeProfile.wireNameOf(OciImagesProfile.KEY)),
         "a build sha no pin holds and no deploy would pull, cold past P30D");
     assertEquals(
         List.of("alpha:" + WARM_SHA, "alpha:v1", "alpha:v2"),
-        kept.get(RepositoryType.OCI_IMAGES),
+        kept.get(RepositoryTypeProfile.wireNameOf(OciImagesProfile.KEY)),
         "the newest build stays for the deploy that has not happened, and the warm tags stay on use");
     assertEquals(
         List.of(DAEMON + "@2026.601.10"),
-        dead.get(RepositoryType.DAEMON_BINARIES),
+        dead.get(RepositoryTypeProfile.wireNameOf(DaemonBinariesProfile.KEY)),
         "the third version down a belt of two, and nothing has launched it in a year");
     assertEquals(
         List.of(DAEMON + "@2026.701.20", DAEMON + "@2026.801.30"),
-        kept.get(RepositoryType.DAEMON_BINARIES));
+        kept.get(RepositoryTypeProfile.wireNameOf(DaemonBinariesProfile.KEY)));
 
     // The two that moved in this workstream.
     assertEquals(
         List.of("@qits/thing@0.9.0-main.gaaaaaa1"),
-        dead.get(RepositoryType.NPM_PACKAGES),
+        dead.get(RepositoryTypeProfile.wireNameOf(NpmPackagesProfile.KEY)),
         "a prerelease earns no belt, and nothing has installed it in a year");
     assertEquals(
-        List.of("@qits/thing@1.0.0", "@qits/thing@1.1.0"), kept.get(RepositoryType.NPM_PACKAGES));
+        List.of("@qits/thing@1.0.0", "@qits/thing@1.1.0"), kept.get(RepositoryTypeProfile.wireNameOf(NpmPackagesProfile.KEY)));
     assertEquals(
         List.of("eu.wohlben.qits:qits-other:1.0.0"),
-        dead.get(RepositoryType.MAVEN_PACKAGES),
+        dead.get(RepositoryTypeProfile.wireNameOf(MavenPackagesProfile.KEY)),
         "one coordinate, not one path — the jar of a version the belt no longer covers");
     assertEquals(
         List.of(
             "eu.wohlben.qits:qits-eventstream:1.0.0",
             "eu.wohlben.qits:qits-other:1.1.0",
             "eu.wohlben.qits:qits-other:2.0.0"),
-        kept.get(RepositoryType.MAVEN_PACKAGES),
+        kept.get(RepositoryTypeProfile.wireNameOf(MavenPackagesProfile.KEY)),
         "the jar and pom of the fixture's release are one identity now");
 
     // The two nobody collects — excluded by the settlement, and still saying so.
-    for (RepositoryType type :
-        List.of(RepositoryType.CI_SCREENSHOTS, RepositoryType.CI_VIDEOS)) {
-      assertEquals(List.of(), dead.get(type), type.wireName() + " must still condemn nothing");
-      assertEquals(List.of(), kept.get(type));
+    for (String type : List.of(CiScreenshotsProfile.KEY, CiVideosProfile.KEY)) {
+      String wire = RepositoryTypeProfile.wireNameOf(type);
+      assertEquals(List.of(), dead.get(wire), wire + " must still condemn nothing");
+      assertEquals(List.of(), kept.get(wire));
     }
 
-    // The blob half of the same comparison: the whole cached image, the cold proxied tarball, the
-    // cold daemon binary, the cold published tarball and the cold jar. The cold image tag frees
-    // nothing on its own — its manifest is still named by the tags beside it, which is the
-    // reconciliation doing its job.
+    // The blob half of the same comparison: the cold daemon binary, the cold published tarball and
+    // the cold jar. The cold image tag frees nothing on its own — its manifest is still named by the
+    // tags beside it, which is the reconciliation doing its job.
     assertEquals(
-        List.of(
-                mirror.child(),
-                mirror.config(),
-                mirror.index(),
-                mirror.layer(),
-                proxy.coldTarball(),
-                mavenProxy.coldJar(),
-                coldDaemon,
-                coldTarball,
-                coldJar)
-            .stream()
-            .sorted()
-            .toList(),
+        List.of(coldDaemon, coldTarball, coldJar).stream().sorted().toList(),
         report.sweep().blobIds());
     assertEquals(List.of(store.rowless()), report.untouchable().blobIds());
   }
@@ -268,40 +232,24 @@ class GcTypeConfigTest extends GcFixture {
     // qits-ci is down: every type on an engine reads pins, so every one of them is refused rather
     // than planned against "nothing is pinned". This suite's pin urls are closed ports, which is
     // that state exactly.
-    seedMirror();
-    seedProxy();
-    ageMirrorRows(Duration.ofDays(60));
+    seed();
 
     GcPlanReport report = planner.plan();
 
     assertFalse(report.executable());
-    for (RepositoryType type :
+    for (String type :
         List.of(
-            RepositoryType.OCI_MIRROR,
-            RepositoryType.NPM_PROXY,
-            RepositoryType.MAVEN_PROXY,
-            RepositoryType.OCI_IMAGES,
-            RepositoryType.DAEMON_BINARIES)) {
+            OciImagesProfile.KEY,
+            NpmPackagesProfile.KEY,
+            MavenPackagesProfile.KEY,
+            DaemonBinariesProfile.KEY,
+            DocsProfile.KEY)) {
       assertTrue(
           typePlan(report, type).error().contains("live pins unavailable"),
-          type.wireName() + ": " + typePlan(report, type).error());
+          RepositoryTypeProfile.wireNameOf(type) + ": " + typePlan(report, type).error());
       assertEquals(List.of(), typePlan(report, type).dead());
     }
     assertEquals(0, report.sweep().blobCount(), "a refusal reclaims nothing, by construction");
-  }
-
-  @Test
-  void everyReportCarriesTheProxysH2HonestyLine() throws Exception {
-    // reclaimableBytes counts files, and a packument is not one. Without this line on the type's
-    // own report line, a run that condemned a hundred documents reads as a run that did nothing.
-    seedProxy();
-
-    GcPlanReport report = planner.plan(census.take(), planner.registered(), GcPins.none());
-
-    String note = typePlan(report, RepositoryType.NPM_PROXY).note();
-    assertNotNull(note);
-    assertTrue(note.contains("SHUTDOWN COMPACT"), note);
-    assertTrue(note.contains("0 bytes"), note);
   }
 
   // --- fixture ---------------------------------------------------------------------------------
@@ -312,7 +260,7 @@ class GcTypeConfigTest extends GcFixture {
   private static final String OTHER_ARTIFACT = "eu/wohlben/qits/qits-other";
 
   private void daemonRepository() {
-    repositoryService.ensure(DAEMON_REPO, RepositoryType.DAEMON_BINARIES);
+    repositoryService.ensure(DAEMON_REPO, DaemonBinariesProfile.KEY);
   }
 
   /** One more tag on the substrate's own image, with {@code updated_at} under the case's control. */
@@ -368,16 +316,16 @@ class GcTypeConfigTest extends GcFixture {
     return Instant.now().minus(Duration.ofDays(days));
   }
 
-  private static GcTypeConfiguration line(GcPlanReport report, RepositoryType type) {
+  private static GcTypeConfiguration line(GcPlanReport report, String type) {
     return report.configuration().stream()
-        .filter(configured -> configured.type() == type)
+        .filter(configured -> RepositoryTypeProfile.wireNameOf(type).equals(configured.type()))
         .findFirst()
         .orElseThrow();
   }
 
   private static eu.wohlben.qits.artifacts.gc.dto.GcTypePlan typePlan(
-      GcPlanReport report, RepositoryType type) {
+      GcPlanReport report, String type) {
     List<eu.wohlben.qits.artifacts.gc.dto.GcTypePlan> plans = new ArrayList<>(report.types());
-    return plans.stream().filter(plan -> plan.type() == type).findFirst().orElseThrow();
+    return plans.stream().filter(plan -> RepositoryTypeProfile.wireNameOf(type).equals(plan.type())).findFirst().orElseThrow();
   }
 }

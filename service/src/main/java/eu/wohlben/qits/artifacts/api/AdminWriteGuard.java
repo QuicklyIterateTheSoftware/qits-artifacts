@@ -45,12 +45,11 @@ public class AdminWriteGuard implements ContainerRequestFilter {
    * deletes bytes — and that write exists now: {@code POST /gc/sweep} inherited this guard by
    * construction instead of by remembering. (A deployment shipping a blank token still runs the
    * guard as a no-op — the standing posture until the platform's auth story lands.)
-   * {@code mirror-upstreams} is the first entry here that was added <em>with</em> its writes rather
-   * than ahead of them: registering an upstream is what decides which public registry this service
-   * dials on a miss, so shipping that route unguarded would be handing out an outbound fetch.
+   *
+   * <p>{@code mirror-upstreams} was here and is gone with the controller: which public registry a
+   * cache dials on a miss is qits-platform-mirror's decision now, and so is guarding it.
    */
-  private static final Set<String> GUARDED_PREFIXES =
-      Set.of("repositories", "store", "gc", "mirror-upstreams");
+  private static final Set<String> GUARDED_PREFIXES = Set.of("repositories", "store", "gc");
 
   @Inject MachineAuth machineAuth;
 

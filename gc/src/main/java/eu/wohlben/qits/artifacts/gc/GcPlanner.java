@@ -3,7 +3,8 @@ package eu.wohlben.qits.artifacts.gc;
 import eu.wohlben.qits.artifacts.control.ArtifactRepositoryService;
 import eu.wohlben.qits.artifacts.control.LiveBlobCensus;
 import eu.wohlben.qits.artifacts.entity.ArtifactRepository;
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
+import eu.wohlben.qits.artifacts.control.RepositoryTypeProfiles;
+import eu.wohlben.qits.artifacts.entity.RepositoryTypeProfile;
 import eu.wohlben.qits.artifacts.gc.dto.GcPlanReport;
 import eu.wohlben.qits.artifacts.gc.dto.GcRepositoriesPlanResponse;
 import eu.wohlben.qits.artifacts.gc.dto.GcRepositoryPlanReport;
@@ -19,7 +20,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
-import java.util.EnumMap;
+import java.util.TreeMap;
 import java.util.List;
 import java.util.Map;
 
@@ -28,10 +29,11 @@ import java.util.Map;
  * unlink.
  *
  * <p>This is the artifact the user reads before any collection is switched on, so its job is to be
- * <b>honest about absence</b>. Every type appears in every report, including the ones nobody
- * collects: a missing entry would read as "nothing to collect here", and "no strategy registered" is
- * a different fact. With no strategies registered — which is what ships today — the whole report is
- * zeros with five reasons, and that is the correct output rather than an empty one.
+ * <b>honest about absence</b>. Every REGISTERED type appears in every report, including the ones
+ * nobody collects: a missing entry would read as "nothing to collect here", and "no strategy
+ * registered" is a different fact. "Registered" is the profile beans on the classpath rather than an
+ * enum's constants — the cache types are qits-platform-mirror's and are absent here, which is a
+ * stronger statement than reporting them uncollected.
  *
  * <p>Strategies are found by CDI type. Adding one to a repository type is a bean implementing {@link
  * GcStrategy}; nothing here is edited, and nothing here knows what a tag or a version is.
@@ -43,9 +45,9 @@ import java.util.Map;
  * <p><b>The report also echoes the configuration</b> ({@link GcRules}): per type, the configured
  * engine, its window and the effective rule as a sentence. The settlement moved the policy into
  * configuration, and configuration is the half of a plan the dead and kept lists cannot show —
- * "nothing died" reads identically whether the rule is right or the window is a year. For the two
- * cache types the echo now reads as the rule that actually ran: {@link CacheEvictionStrategy}
- * writes the sentence and the same class produced the plan beside it.
+ * "nothing died" reads identically whether the rule is right or the window is a year. The echo reads
+ * as the rule that actually ran: {@link OwnArtifactsStrategy} writes the sentence and the same class
+ * produced the plan beside it.
  *
  * <p><b>Per repository is a reading of the same run, never a second planner.</b> The type loop is
  * the only place a rule is ever applied; a repository's figures are its share of its type's plan
@@ -64,6 +66,14 @@ public class GcPlanner {
   @Inject GcTypeConfig config;
   @Inject GcPinSources pinSources;
   @Inject ArtifactRepositoryService repositories;
+
+  /**
+   * Every repository type this deployment registers — what "every type appears in every report"
+   * means now that the set is open. It is the profile beans on the classpath, so a type the mirror
+   * owns is absent here rather than reported as uncollected, and a format module left out of the
+   * build takes its line out with it.
+   */
+  @Inject RepositoryTypeProfiles repositoryTypes;
 
   /**
    * A fresh census, every live pin, every registered strategy, and the reconciliation over all of
@@ -108,7 +118,7 @@ public class GcPlanner {
     ArtifactRepository row = repositories.require(name);
     GcPins pins = pinSources.fetch();
     LiveBlobCensus.Census taken = census.take();
-    RepositoryType type = row.type;
+    String type = row.type;
     Outcome outcome = outcomeOf(type, claiming(registered(), type), taken, pins);
 
     GcStrategy.Plan scoped = outcome.plan() == null ? null : outcome.plan().scopedTo(name);
@@ -119,7 +129,7 @@ public class GcPlanner {
 
     return new GcRepositoryPlanReport(
         name,
-        type,
+        RepositoryTypeProfile.wireNameOf(type),
         taken.takenAt(),
         true,
         iso(sweep.graceWindow()),
@@ -144,17 +154,18 @@ public class GcPlanner {
 
   GcPlanReport plan(
       LiveBlobCensus.Census census, Collection<GcStrategy> strategies, GcPins pins) {
-    Map<RepositoryType, GcStrategy.Plan> plans = new EnumMap<>(RepositoryType.class);
-    Map<RepositoryType, Outcome> outcomes = new EnumMap<>(RepositoryType.class);
+    Map<String, GcStrategy.Plan> plans = new TreeMap<>();
+    Map<String, Outcome> outcomes = new TreeMap<>();
     List<GcTypePlan> types = new ArrayList<>();
-    for (RepositoryType type : RepositoryType.values()) {
+    for (String type : repositoryTypes.keys()) {
       Outcome outcome = outcomeOf(type, claiming(strategies, type), census, pins);
       outcomes.put(type, outcome);
       GcStrategy.Plan plan = outcome.plan();
       if (plan == null) {
         types.add(
             new GcTypePlan(
-                type, outcome.strategy(), outcome.note(), outcome.error(),
+                RepositoryTypeProfile.wireNameOf(type),
+                outcome.strategy(), outcome.note(), outcome.error(),
                 List.of(), List.of(), 0, 0, 0L));
         continue;
       }
@@ -162,7 +173,7 @@ public class GcPlanner {
       GcSweepPlan attributed = sweep.planForOneType(census, type, plan);
       types.add(
           new GcTypePlan(
-              type,
+              RepositoryTypeProfile.wireNameOf(type),
               outcome.strategy(),
               outcome.note(),
               null,
@@ -175,7 +186,7 @@ public class GcPlanner {
 
     // The configuration echo, beside the outcomes rather than instead of them: what each type is
     // configured to do today, in the sentence the engine that will do it writes for itself.
-    List<GcTypeConfiguration> configuration = GcRules.echo(config);
+    List<GcTypeConfiguration> configuration = GcRules.echo(config, repositoryTypes.keys());
     GcSweepPlan sweepPlan = sweep.plan(census, plans);
     String graceWindow = iso(sweep.graceWindow());
     return new GcPlanReport(
@@ -207,18 +218,24 @@ public class GcPlanner {
    * what the rule frees, and what a run now would actually unlink.
    */
   private List<GcRepositoryPlanSummary> perRepository(
-      LiveBlobCensus.Census census, Map<RepositoryType, Outcome> outcomes) {
+      LiveBlobCensus.Census census, Map<String, Outcome> outcomes) {
     List<ArtifactRepository> rows = new ArrayList<>(repositories.list());
     rows.sort(Comparator.comparing(row -> row.name));
     List<GcRepositoryPlanSummary> summaries = new ArrayList<>();
     for (ArtifactRepository row : rows) {
+      // A row whose type no profile claims is not this deployment's to plan — the mirror rows the
+      // migration chain still prefills are the case. Reporting one with zeros would read as
+      // "nothing to collect here", which is a claim about a type this service cannot enforce.
+      if (repositoryTypes.find(row.type).isEmpty()) {
+        continue;
+      }
       Outcome outcome = outcomes.get(row.type);
       GcStrategy.Plan plan = outcome == null ? null : outcome.plan();
       if (plan == null) {
         summaries.add(
             new GcRepositoryPlanSummary(
                 row.name,
-                row.type,
+                RepositoryTypeProfile.wireNameOf(row.type),
                 outcome == null ? null : outcome.strategy(),
                 outcome == null ? null : outcome.note(),
                 outcome == null ? null : outcome.error(),
@@ -236,7 +253,7 @@ public class GcPlanner {
       summaries.add(
           new GcRepositoryPlanSummary(
               row.name,
-              row.type,
+              RepositoryTypeProfile.wireNameOf(row.type),
               outcome.strategy(),
               outcome.note(),
               null,
@@ -259,12 +276,16 @@ public class GcPlanner {
    * of them would eventually be two different sentences.
    */
   private Outcome outcomeOf(
-      RepositoryType type,
+      String type,
       List<GcStrategy> claiming,
       LiveBlobCensus.Census census,
       GcPins pins) {
     if (claiming.isEmpty()) {
-      return new Outcome(null, "no strategy registered for " + type.wireName(), null, null);
+      return new Outcome(
+          null,
+          "no strategy registered for " + RepositoryTypeProfile.wireNameOf(type),
+          null,
+          null);
     }
     if (claiming.size() > 1) {
       return new Outcome(
@@ -296,8 +317,8 @@ public class GcPlanner {
   private record Outcome(String strategy, String note, String error, GcStrategy.Plan plan) {}
 
   private static List<GcStrategy> claiming(
-      Collection<GcStrategy> strategies, RepositoryType type) {
-    return strategies.stream().filter(strategy -> strategy.type() == type).toList();
+      Collection<GcStrategy> strategies, String type) {
+    return strategies.stream().filter(strategy -> type.equals(strategy.type())).toList();
   }
 
   /** The empty attribution for a repository whose type produced no plan at all. */

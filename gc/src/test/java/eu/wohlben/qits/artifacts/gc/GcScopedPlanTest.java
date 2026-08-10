@@ -24,7 +24,6 @@ class GcScopedPlanTest {
   private static final Duration WINDOW = Duration.ofDays(30);
   private static final Instant NOW = Instant.parse("2026-08-05T12:00:00Z");
 
-  private final CacheEvictionStrategy cache = new CacheEvictionStrategy();
   private final OwnArtifactsStrategy own = new OwnArtifactsStrategy();
 
   @Test
@@ -40,7 +39,7 @@ class GcScopedPlanTest {
             .addIn("quay", "quay/tool:1", "quay/tool", false, daysAgo(40), "shared", "quay-only")
             .addIn("hub", "hub/tool:1", "hub/tool", false, daysAgo(40), "shared", "hub-only");
 
-    GcStrategy.Plan plan = cache.plan(adapter, WINDOW, NOW, GcPinned.NONE);
+    GcStrategy.Plan plan = own.plan(adapter, WINDOW, NOW, GcPinned.NONE);
 
     assertEquals(Set.of("shared", "quay-only", "hub-only"), plan.blobsReleased());
     assertEquals(
@@ -105,7 +104,7 @@ class GcScopedPlanTest {
         new FakeGcTypeAdapter()
             .addIn("quay", "quay/tool:1", "quay/tool", false, daysAgo(40), "cold");
 
-    GcStrategy.Plan hub = cache.plan(adapter, WINDOW, NOW, GcPinned.NONE).scopedTo("hub");
+    GcStrategy.Plan hub = own.plan(adapter, WINDOW, NOW, GcPinned.NONE).scopedTo("hub");
 
     assertEquals(List.of(), hub.dead());
     assertEquals(List.of(), hub.kept());

@@ -1,6 +1,5 @@
 package eu.wohlben.qits.artifacts.gc.dto;
 
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
 import java.util.List;
 
 /**
@@ -20,7 +19,7 @@ import java.util.List;
  *     takes both.
  */
 public record GcTypeSweepResult(
-    RepositoryType type,
+    String type,
     String strategy,
     String note,
     String error,

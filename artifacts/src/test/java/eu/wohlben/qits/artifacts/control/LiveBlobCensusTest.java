@@ -1,11 +1,9 @@
 package eu.wohlben.qits.artifacts.control;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.artifacts.dto.StoreSummary;
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import java.util.List;
@@ -44,17 +42,15 @@ class LiveBlobCensusTest extends SeededStoreFixture {
             store.shared(),
             store.manifestKept(),
             store.manifestDoomed()),
-        sorted(taken.live(RepositoryType.OCI_IMAGES).keySet()),
+        sorted(taken.live(OciImagesProfile.KEY).keySet()),
         "the manifest closure, manifests included — a manifest is a blob too");
     assertEquals(
         sorted(store.tarball(), store.shared()),
-        sorted(taken.live(RepositoryType.NPM_PACKAGES).keySet()));
-    assertEquals(Set.of(), taken.live(RepositoryType.NPM_PROXY).keySet());
-    assertEquals(Set.of(), taken.live(RepositoryType.OCI_MIRROR).keySet());
-    assertEquals(Set.of(), taken.live(RepositoryType.MAVEN_PACKAGES).keySet());
-    assertEquals(Set.of(), taken.live(RepositoryType.DAEMON_BINARIES).keySet());
-    assertEquals(Set.of(), taken.live(RepositoryType.CI_SCREENSHOTS).keySet());
-    assertEquals(Set.of(), taken.live(RepositoryType.CI_VIDEOS).keySet());
+        sorted(taken.live(NpmPackagesProfile.KEY).keySet()));
+    assertEquals(Set.of(), taken.live(MavenPackagesProfile.KEY).keySet());
+    assertEquals(Set.of(), taken.live(DaemonBinariesProfile.KEY).keySet());
+    assertEquals(Set.of(), taken.live(CiScreenshotsProfile.KEY).keySet());
+    assertEquals(Set.of(), taken.live(CiVideosProfile.KEY).keySet());
   }
 
   @Test
@@ -68,61 +64,14 @@ class LiveBlobCensusTest extends SeededStoreFixture {
     LiveBlobCensus.Census taken = census.take();
 
     assertEquals(
-        Set.of(maven.jar(), maven.pom()), taken.live(RepositoryType.MAVEN_PACKAGES).keySet());
+        Set.of(maven.jar(), maven.pom()), taken.live(MavenPackagesProfile.KEY).keySet());
     assertEquals(
         (long) MAVEN_JAR + MAVEN_POM,
-        taken.liveBytes(RepositoryType.MAVEN_PACKAGES),
+        taken.liveBytes(MavenPackagesProfile.KEY),
         "sized from the rows — the one protocol table that has the size, so no disk read");
     assertTrue(
         taken.rowless().stream().noneMatch(Set.of(maven.jar(), maven.pom())::contains),
         "nothing maven deployed may be classified as an orphan");
-  }
-
-  @Test
-  void whatAMirrorCachedIsLiveUnderItsOwnTypeRatherThanOrphaned() throws Exception {
-    // The pin the mirror plan asks for. Cached bytes have manifest rows like any other, so the
-    // closure reaches them — but only if the census WALKS the new type. Without that line they are
-    // row-less: reported as orphans by the store summary and, worse, indistinguishable from the
-    // untouchable pool in every later reading.
-    seed();
-    MirrorStore mirror = seedMirror();
-
-    LiveBlobCensus.Census taken = census.take();
-
-    assertTrue(
-        taken.live(RepositoryType.OCI_MIRROR).keySet().containsAll(
-            Set.of(mirror.index(), mirror.child(), mirror.config(), mirror.layer())),
-        "the index, its fetched child, and that child's config and layer");
-    assertTrue(
-        taken.rowless().stream().noneMatch(Set.of(mirror.index(), mirror.child(), mirror.config(), mirror.layer())::contains),
-        "nothing a mirror cached may be classified as an orphan");
-    assertFalse(
-        taken.live(RepositoryType.OCI_IMAGES).containsKey(mirror.layer()),
-        "and it is the MIRROR's live set, not the hosted registry's — the two types are collected"
-            + " under different rules");
-  }
-
-  @Test
-  void aMirrorIndexWhoseChildWasNeverFetchedIsWalkedRatherThanRefused() throws Exception {
-    // The lazy pull order, as the census sees it: an index binds first and its children arrive one
-    // miss at a time, so an index pointing at a manifest with no local row is the normal state of a
-    // partially-pulled image. The walk must survive it and keep counting — the property is lenient
-    // by construction (OciManifestParser.sizedReferences), and this is the test rather than the
-    // assumption the plan asked for.
-    MirrorStore mirror = seedMirror();
-
-    LiveBlobCensus.Census taken = census.take();
-
-    assertTrue(
-        taken.live(RepositoryType.OCI_MIRROR).containsKey(mirror.child()),
-        "the child that WAS fetched is still reached — the walk did not stop at the missing one");
-    assertTrue(
-        taken.live(RepositoryType.OCI_MIRROR).containsKey(mirror.absentChild()),
-        "and the missing one is counted at its declared size, which is all that is known of it");
-    assertEquals(
-        0L,
-        taken.bytesOnDisk(Set.of(mirror.absentChild())),
-        "it frees nothing, because there is no file: a declared size is not bytes on disk");
   }
 
   @Test
@@ -133,8 +82,8 @@ class LiveBlobCensusTest extends SeededStoreFixture {
 
     LiveBlobCensus.Census taken = census.take();
 
-    assertTrue(taken.live(RepositoryType.OCI_IMAGES).containsKey(store.shared()));
-    assertTrue(taken.live(RepositoryType.NPM_PACKAGES).containsKey(store.shared()));
+    assertTrue(taken.live(OciImagesProfile.KEY).containsKey(store.shared()));
+    assertTrue(taken.live(NpmPackagesProfile.KEY).containsKey(store.shared()));
     assertEquals(SHARED, taken.onDisk().get(store.shared()));
   }
 
@@ -157,12 +106,12 @@ class LiveBlobCensusTest extends SeededStoreFixture {
     LiveBlobCensus.Census taken = census.take();
     StoreSummary summary = explorer.storeSummary();
 
-    assertEquals(taken.liveBytes(RepositoryType.OCI_IMAGES), summary.ociUnionBytes());
-    assertEquals(taken.liveBytes(RepositoryType.OCI_MIRROR), summary.ociMirrorBytes());
-    assertEquals(taken.liveBytes(RepositoryType.NPM_PACKAGES), summary.npmPublishedBytes());
-    assertEquals(taken.liveBytes(RepositoryType.NPM_PROXY), summary.npmProxyTarballBytes());
-    assertEquals(taken.liveBytes(RepositoryType.MAVEN_PACKAGES), summary.mavenPublishedBytes());
-    assertEquals(taken.liveBytes(RepositoryType.DAEMON_BINARIES), summary.daemonBinaryBytes());
+    assertEquals(taken.liveBytes(OciImagesProfile.KEY), summary.ociUnionBytes());
+    assertEquals(0L, summary.ociMirrorBytes(), "no cache type is registered here");
+    assertEquals(taken.liveBytes(NpmPackagesProfile.KEY), summary.npmPublishedBytes());
+    assertEquals(0L, summary.npmProxyTarballBytes(), "nor can a row carry one");
+    assertEquals(taken.liveBytes(MavenPackagesProfile.KEY), summary.mavenPublishedBytes());
+    assertEquals(taken.liveBytes(DaemonBinariesProfile.KEY), summary.daemonBinaryBytes());
     assertEquals(taken.rowlessBytes(), summary.orphanBytes());
     assertEquals(taken.diskTotalBytes(), summary.diskTotalBytes());
     assertEquals(taken.ociPerImageSumBytes(), summary.ociPerImageSumBytes());

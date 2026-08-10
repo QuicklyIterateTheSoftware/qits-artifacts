@@ -8,10 +8,10 @@ import eu.wohlben.qits.artifacts.dto.PackageVersionSummary;
 import eu.wohlben.qits.artifacts.dto.RepositorySummary;
 import eu.wohlben.qits.artifacts.dto.StoreSummary;
 import eu.wohlben.qits.artifacts.entity.ArtifactRepository;
+import eu.wohlben.qits.artifacts.entity.RepositoryTypeProfile;
 import eu.wohlben.qits.artifacts.entity.NpmDistTag;
 import eu.wohlben.qits.artifacts.entity.OciManifest;
 import eu.wohlben.qits.artifacts.entity.OciTag;
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
 import eu.wohlben.qits.artifacts.error.BadRequestException;
 import eu.wohlben.qits.artifacts.error.NotFoundException;
 import eu.wohlben.qits.artifacts.persistence.ArtifactRecordRepository;
@@ -69,15 +69,28 @@ public class ArtifactExplorerService {
   @Inject OciManifestFootprints footprints;
   @Inject BlobDiskIndex diskIndex;
   @Inject LiveBlobCensus census;
+  @Inject RepositoryTypeProfiles repositoryTypes;
 
-  /** Every repository, with the one count and the one size its type can answer. */
+  /**
+   * Every repository this service serves, with the one count and the one size its type can answer.
+   *
+   * <p><b>A row whose type no profile on this classpath claims is not listed.</b> The migration
+   * chain is carried through the byte-plane split unchanged, so a fresh database still prefills the
+   * three OCI mirror namespaces V7 created — rows that belong to qits-platform-mirror now. Listing
+   * one would mean answering "how many things are in it" about a type this service cannot read, and
+   * every honest answer to that is a refusal. Omitting them says the true thing: this service serves
+   * the hosted plane, and those rows are somebody else's.
+   */
   public List<RepositorySummary> listRepositories() {
     List<RepositorySummary> summaries = new ArrayList<>();
     for (ArtifactRepository repository : repositories.listAll()) {
+      if (repositoryTypes.find(repository.type).isEmpty()) {
+        continue;
+      }
       summaries.add(
           new RepositorySummary(
               repository.name,
-              repository.type,
+              wireName(repository),
               repository.createdAt,
               itemCount(repository),
               sizeOf(repository)));
@@ -86,11 +99,10 @@ public class ArtifactExplorerService {
   }
 
   /**
-   * The images of an OCI repository, hosted or mirror.
+   * The images of a hosted OCI repository.
    *
-   * <p>Both types answer from {@code oci_manifest}, which is what makes this one query rather than
-   * two — the same shape the npm listing has over its two types, and the reason a mirror namespace is
-   * browsable the moment something has been pulled through it.
+   * <p>Mirror namespaces are not browsable here any more — they are qits-platform-mirror's, with its
+   * own explorer. The query is unchanged: {@code oci_manifest} was always one table over both types.
    *
    * @throws NotFoundException there is no such repository
    * @throws BadRequestException it is not an image repository
@@ -168,10 +180,9 @@ public class ArtifactExplorerService {
   }
 
   /**
-   * The packages of an npm repository, hosted or proxy.
+   * The packages of a hosted npm repository.
    *
-   * <p>Both types answer from {@code npm_version}, which is what makes this one query rather than
-   * two — and what makes a proxied package appear only once its tarball has been pulled. See {@code
+   * <p>Cache namespaces are qits-platform-mirror's now. See {@code
    * NpmVersionRepository.listPackageNames} for why the packument table is not the source.
    */
   public List<PackageSummary> listPackages(String repository) {
@@ -223,19 +234,23 @@ public class ArtifactExplorerService {
    */
   public StoreSummary storeSummary() {
     LiveBlobCensus.Census taken = census.take();
+    // The four cache figures are STRUCTURALLY zero here, not merely empty: this service registers
+    // no cache type, so no repository row can carry one and the census has nothing to attribute.
+    // They keep their places in the record rather than being removed, because the panel's whole
+    // argument is that every way of counting is named — and "nothing cached" is an answer a reader
+    // needs, whereas a missing row reads as a figure someone forgot. qits-platform-mirror reports
+    // its own.
     return new StoreSummary(
         taken.ociPerImageSumBytes(),
-        taken.liveBytes(RepositoryType.OCI_IMAGES),
-        taken.liveBytes(RepositoryType.OCI_MIRROR),
+        taken.liveBytes(OciImagesProfile.KEY),
+        0L,
         taken.rowlessBytes(),
-        taken.liveBytes(RepositoryType.NPM_PACKAGES),
-        taken.liveBytes(RepositoryType.NPM_PROXY),
-        taken.npmProxyPackumentBytes(),
-        taken.liveBytes(RepositoryType.MAVEN_PACKAGES),
-        // What the pull-through cache holds. The census attributes maven_artifact rows by their
-        // repository's type, so landing MAVEN_PROXY changed this one line and no census code.
-        taken.liveBytes(RepositoryType.MAVEN_PROXY),
-        taken.liveBytes(RepositoryType.DAEMON_BINARIES),
+        taken.liveBytes(NpmPackagesProfile.KEY),
+        0L,
+        0L,
+        taken.liveBytes(MavenPackagesProfile.KEY),
+        0L,
+        taken.liveBytes(DaemonBinariesProfile.KEY),
         taken.diskTotalBytes());
   }
 
@@ -248,30 +263,25 @@ public class ArtifactExplorerService {
    */
   private ArtifactRepository requireOci(String name) {
     ArtifactRepository repository = require(name);
-    if (repository.type != RepositoryType.OCI_IMAGES
-        && repository.type != RepositoryType.OCI_MIRROR) {
+    if (!OciImagesProfile.KEY.equals(repository.type)) {
       throw new BadRequestException(
-          "Repository '"
-              + name
-              + "' is "
-              + repository.type.wireName()
-              + ", not oci-images or oci-mirror");
+          "Repository '" + name + "' is " + wireName(repository) + ", not oci-images");
     }
     return repository;
   }
 
   private ArtifactRepository requireNpm(String name) {
     ArtifactRepository repository = require(name);
-    if (repository.type != RepositoryType.NPM_PACKAGES
-        && repository.type != RepositoryType.NPM_PROXY) {
+    if (!NpmPackagesProfile.KEY.equals(repository.type)) {
       throw new BadRequestException(
-          "Repository '"
-              + name
-              + "' is "
-              + repository.type.wireName()
-              + ", not npm-packages or npm-proxy");
+          "Repository '" + name + "' is " + wireName(repository) + ", not npm-packages");
     }
     return repository;
+  }
+
+  /** A repository's type as the API spells it — the kebab form, never the stored key. */
+  private static String wireName(ArtifactRepository repository) {
+    return RepositoryTypeProfile.wireNameOf(repository.type);
   }
 
   private ArtifactRepository require(String name) {
@@ -282,35 +292,55 @@ public class ArtifactExplorerService {
     return repository;
   }
 
+  /**
+   * The one count this repository's type can answer.
+   *
+   * <p>A switch over the STORED type key, and it needs a default arm now that the type set is open:
+   * a row can carry a key no profile on this classpath claims (a cache row left behind by the split,
+   * say). Reporting a count of zero for one would read as an empty repository, so it refuses instead
+   * — the same stance {@code RepositoryTypeProfiles.require} takes.
+   */
   private long itemCount(ArtifactRepository repository) {
     return switch (repository.type) {
-      case OCI_IMAGES, OCI_MIRROR -> manifests.countImages(repository.name);
-      case NPM_PACKAGES, NPM_PROXY -> versions.countPackages(repository.name);
-      // Deployed or cached files — one number with a type-dependent meaning, the standing
-      // convention. One table holds both maven types, so one arm answers for both.
-      case MAVEN_PACKAGES, MAVEN_PROXY -> mavenArtifacts.countByRepository(repository.name);
+      case OciImagesProfile.KEY -> manifests.countImages(repository.name);
+      case NpmPackagesProfile.KEY -> versions.countPackages(repository.name);
+      // Deployed files — one number with a type-dependent meaning, the standing convention.
+      case MavenPackagesProfile.KEY -> mavenArtifacts.countByRepository(repository.name);
       // Published versions across every daemon this repository holds — one number, the same
       // type-dependent meaning the line above has.
-      case DAEMON_BINARIES -> daemonBinaries.countByRepository(repository.name);
+      case DaemonBinariesProfile.KEY -> daemonBinaries.countByRepository(repository.name);
       // Published VERSIONS, not files. A docs bundle is fifty-odd paths and none of them is an
       // identity, so counting files here would report a number no other view of this type uses.
-      case DOCS -> docsSites.countByRepository(repository.name);
-      case CI_SCREENSHOTS, CI_VIDEOS -> records.countByRepository(repository.name);
+      case DocsProfile.KEY -> docsSites.countByRepository(repository.name);
+      case CiScreenshotsProfile.KEY, CiVideosProfile.KEY ->
+          records.countByRepository(repository.name);
+      default -> throw unservable(repository);
     };
   }
 
   private Long sizeOf(ArtifactRepository repository) {
     return switch (repository.type) {
-      case OCI_IMAGES, OCI_MIRROR ->
+      case OciImagesProfile.KEY ->
           OciManifestFootprints.sum(footprints.union(manifests.listByRepository(repository.name)));
-      case NPM_PACKAGES, NPM_PROXY ->
+      case NpmPackagesProfile.KEY ->
           tarballBytes(List.of(repository.name), diskIndex.sizes(), new HashSet<>());
       // The union over distinct blob ids, sized from the rows — the one protocol table that has it.
-      case MAVEN_PACKAGES, MAVEN_PROXY -> mavenBytes(repository.name);
-      case DAEMON_BINARIES -> daemonBytes(repository.name);
-      case DOCS -> docsBytes(repository.name);
-      case CI_SCREENSHOTS, CI_VIDEOS -> recordBytes(repository.name);
+      case MavenPackagesProfile.KEY -> mavenBytes(repository.name);
+      case DaemonBinariesProfile.KEY -> daemonBytes(repository.name);
+      case DocsProfile.KEY -> docsBytes(repository.name);
+      case CiScreenshotsProfile.KEY, CiVideosProfile.KEY -> recordBytes(repository.name);
+      default -> throw unservable(repository);
     };
+  }
+
+  /** A row whose type this deployment serves no view of — named, never silently counted as empty. */
+  private static BadRequestException unservable(ArtifactRepository repository) {
+    return new BadRequestException(
+        "Repository '"
+            + repository.name
+            + "' carries type "
+            + wireName(repository)
+            + ", which this service does not serve");
   }
 
   /** The npm half of a union: distinct tarballs, sized from disk, with what they name collected. */

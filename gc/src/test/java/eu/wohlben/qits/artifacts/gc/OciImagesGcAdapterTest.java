@@ -8,7 +8,8 @@ import eu.wohlben.qits.artifacts.control.LiveBlobCensus;
 import eu.wohlben.qits.artifacts.control.OciMediaTypes;
 import eu.wohlben.qits.artifacts.entity.OciManifest;
 import eu.wohlben.qits.artifacts.entity.OciTag;
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
+import eu.wohlben.qits.artifacts.control.OciImagesProfile;
+import eu.wohlben.qits.artifacts.entity.RepositoryTypeProfile;
 import eu.wohlben.qits.artifacts.gc.dto.GcIdentity;
 import eu.wohlben.qits.artifacts.gc.dto.GcPlanReport;
 import io.quarkus.narayana.jta.QuarkusTransaction;
@@ -288,7 +289,7 @@ class OciImagesGcAdapterTest extends GcFixture {
     assertEquals(List.of(), plan.dead());
     assertEquals(List.of(), plan.kept());
     assertEquals(Set.of(), plan.blobsReleased());
-    assertEquals(taken.live(RepositoryType.OCI_IMAGES).keySet(), plan.blobsRetained());
+    assertEquals(taken.live(OciImagesProfile.KEY).keySet(), plan.blobsRetained());
   }
 
   @Test
@@ -307,7 +308,7 @@ class OciImagesGcAdapterTest extends GcFixture {
     assertTrue(
         plan.kept().stream()
             .allMatch(kept -> OwnArtifactsStrategy.keptAccessed(WINDOW).equals(kept.rule())));
-    assertEquals(taken.live(RepositoryType.OCI_IMAGES).keySet(), plan.blobsRetained());
+    assertEquals(taken.live(OciImagesProfile.KEY).keySet(), plan.blobsRetained());
     GcPlanReport report = planner.plan(taken, List.of(strategy), GcPins.none());
     assertEquals(List.of(), report.sweep().blobIds());
   }
@@ -320,7 +321,7 @@ class OciImagesGcAdapterTest extends GcFixture {
   }
 
   private void repository() {
-    repositoryService.ensure("qits", RepositoryType.OCI_IMAGES);
+    repositoryService.ensure("qits", OciImagesProfile.KEY);
   }
 
   /** One config blob shared by every manifest in a case, the way a rebuilt image shares its base. */

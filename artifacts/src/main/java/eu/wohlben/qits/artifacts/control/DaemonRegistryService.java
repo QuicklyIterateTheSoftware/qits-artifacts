@@ -2,7 +2,6 @@ package eu.wohlben.qits.artifacts.control;
 
 import eu.wohlben.qits.artifacts.entity.ArtifactRepository;
 import eu.wohlben.qits.artifacts.entity.DaemonBinary;
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
 import eu.wohlben.qits.artifacts.error.DaemonException;
 import eu.wohlben.qits.artifacts.persistence.ArtifactRepositoryRepository;
 import eu.wohlben.qits.artifacts.persistence.DaemonBinaryRepository;
@@ -37,7 +36,7 @@ public class DaemonRegistryService {
 
   @Inject ArtifactRepositoryRepository repositories;
   @Inject DaemonBinaryRepository binaries;
-  @Inject ArtifactAccessTracker accessTracker;
+  @Inject DaemonAccessTracker accessTracker;
 
   /** A published binary, flattened for the serve path. */
   public record StoredBinary(
@@ -52,9 +51,9 @@ public class DaemonRegistryService {
    * needs no manual step.
    */
   @ActivateRequestContext
-  public RepositoryType requireDaemonRepository(String name) {
+  public String requireDaemonRepository(String name) {
     ArtifactRepository repository = name == null ? null : repositories.findById(name);
-    if (repository == null || repository.type != RepositoryType.DAEMON_BINARIES) {
+    if (repository == null || !DaemonBinariesProfile.KEY.equals(repository.type)) {
       throw new DaemonException(
           404,
           "no such daemon repository '"

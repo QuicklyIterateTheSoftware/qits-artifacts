@@ -5,7 +5,7 @@ import eu.wohlben.qits.artifacts.control.MavenRegistryCollection;
 import eu.wohlben.qits.artifacts.control.MavenVersionOrder;
 import eu.wohlben.qits.artifacts.entity.ArtifactRepository;
 import eu.wohlben.qits.artifacts.entity.MavenArtifact;
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
+import eu.wohlben.qits.artifacts.control.MavenPackagesProfile;
 import eu.wohlben.qits.artifacts.gc.dto.GcIdentity;
 import eu.wohlben.qits.artifacts.persistence.ArtifactRepositoryRepository;
 import eu.wohlben.qits.artifacts.persistence.MavenArtifactRepository;
@@ -86,15 +86,15 @@ public class MavenPackagesGcAdapter implements GcTypeAdapter {
   @Inject MavenRegistryCollection maven;
 
   @Override
-  public RepositoryType type() {
-    return RepositoryType.MAVEN_PACKAGES;
+  public String type() {
+    return MavenPackagesProfile.KEY;
   }
 
   @Override
   public List<GcCandidate> enumerate() {
     List<GcCandidate> candidates = new ArrayList<>();
     for (ArtifactRepository repository : repositories.listAll()) {
-      if (repository.type != RepositoryType.MAVEN_PACKAGES) {
+      if (!MavenPackagesProfile.KEY.equals(repository.type)) {
         continue;
       }
       units(repository.name).values().forEach(unit -> candidates.add(unit.candidate()));

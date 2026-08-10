@@ -4,19 +4,27 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <!-- Standalone parent for the extracted qits-artifacts repo (docs/epics/qits-artifacts in the
-         qits monorepo). Two things live here, and only two: the metadata-rich BLOB STORE (named,
-         typed repositories; content-addressed blobs; flat string metadata with a `latest` collapse)
-         and the in-process GIT SMART-HTTP HOST that workspace containers clone from and push to.
-         They share a repo because the git host is the other half of "qits serves bytes over HTTP",
-         and because the monorepo's `qits-repositories` target was dropped — that name collides with
-         domain.repository (migration-plan.md §3.4).
+    <!-- Standalone parent for qits-artifacts — the ENV-SCOPED HOSTED BYTE PLANE
+         (byte-plane-split-plan.md phase 4): hosted npm, maven and OCI registries, published docs
+         bundles, the platform's daemon binaries, CI media, and the pin-based garbage collection over
+         all of them.
+
+         What is NOT here any more, and where it went:
+           - the pull-through caches (NPM_PROXY, MAVEN_PROXY, OCI_MIRROR, their upstreams and the
+             access-tracked eviction GC) -> qits-platform-mirror, the one platform-scoped byte
+             service;
+           - the git smart-HTTP host (`git-storage` and eu.wohlben.qits.githost) -> qits-githost,
+             an env service of its own: a repository is not an artifact, it only shared the storage
+             layout;
+           - the content-addressed blob core and the three registry protocols -> the shared
+             libraries qits-blobstore and qits-registries-{common,npm,maven,oci}, which this repo
+             now CONSUMES rather than contains.
 
          Blobs reference qits branches and flows by *string metadata*, never by foreign key, so this
-         context never breaks when qits' schema moves. Both modules therefore own no FK into another
-         context's tables, and `artifacts` owns its OWN named datasource + Flyway lineage — the one
-         it already had in the monorepo, carried over unsquashed (migration-plan.md §7, "own
-         lineage, unaffected").
+         context never breaks when qits' schema moves. `artifacts` owns its OWN named datasource +
+         Flyway lineage — carried over unsquashed and unchanged by the split (migration-plan.md §7,
+         "own lineage, unaffected"). The libraries deliberately carry no migrations: each consuming
+         service owns its schema.
 
          DELIBERATELY ITS OWN GAV, following qits-workspaces rather than the qits-workspace-daemon
          extraction which kept eu.wohlben:qits so its children's <parent> resolved unchanged. That
@@ -41,20 +49,22 @@
     <name>qits-artifacts</name>
 
     <modules>
-        <!-- Every library before the app. `service` depends on all three; the libraries' own
-             edges are what the order records. `artifacts` and `git-storage` do NOT depend on each
-             other — they are different contexts — which is why `git-storage` declares its own ports
-             and leaves the adapters to `service` (see git-storage/README.md). `gc` sits after both
-             because it depends on `artifacts` — one way, never back — and on `git-storage` not at
-             all (see gc/pom.xml). -->
+        <!-- Every library before the app. `artifacts` is what did NOT move out to qits-blobstore or
+             qits-registries: the docs and daemon registries, the store explorer, the live blob
+             census, the seeder, and the Flyway lineage. `gc` sits after it because it depends on it
+             — one way, never back. `service` is the deployable. -->
         <module>artifacts</module>
-        <module>git-storage</module>
         <module>gc</module>
         <module>service</module>
     </modules>
 
     <properties>
         <qits.auth-core.version>2026.807.165756</qits.auth-core.version>
+        <!-- The two shared libraries the byte plane was carved into. Published from their own
+             repositories (libs/qits-blobstore, libs/qits-registries) and consumed here like any
+             other artifact. -->
+        <qits.blobstore.version>1.0.0-SNAPSHOT</qits.blobstore.version>
+        <qits.registries.version>1.0.0-SNAPSHOT</qits.registries.version>
         <qits.maven.repository.url>http://localhost:8081/artifacts/maven/maven</qits.maven.repository.url>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -70,8 +80,6 @@
         <lombok.version>1.18.38</lombok.version>
         <lombok-mapstruct-binding.version>0.2.0</lombok-mapstruct-binding.version>
         <mapstruct.version>1.6.3</mapstruct.version>
-        <!-- Not in the platform BOM, so pinned here exactly as the monorepo pins it. -->
-        <jgit.version>7.3.0.202506031305-r</jgit.version>
         <!-- Quinoa is a Quarkiverse extension: not in quarkus-bom either, and its version does NOT
              track the platform's. 2.8.2 is built against Quarkus 3.27.3 LTS — older than the 3.34.6
              above, which is the direction that works, since a Quarkus extension compiled against an
@@ -111,11 +119,6 @@
                 <version>${mapstruct.version}</version>
             </dependency>
             <dependency>
-                <groupId>org.eclipse.jgit</groupId>
-                <artifactId>org.eclipse.jgit</artifactId>
-                <version>${jgit.version}</version>
-            </dependency>
-            <dependency>
                 <groupId>io.quarkiverse.quinoa</groupId>
                 <artifactId>quarkus-quinoa</artifactId>
                 <version>${quinoa.version}</version>
@@ -125,15 +128,43 @@
                 <artifactId>commons-compress</artifactId>
                 <version>${commons-compress.version}</version>
             </dependency>
+            <!-- The shared byte-plane libraries. `qits-blobstore` is the content-addressed store
+                 (repository/record entities, disk index, census inputs, and the OPEN repository-type
+                 registration every profile bean plugs into); the three `qits-registries` modules
+                 carry one package format each, both halves of it — hosted and pull-through cache —
+                 because the two share a table and a set of routes. This service wires only the
+                 hosted halves; the cache profiles are excluded from bean discovery in
+                 service/src/main/resources/application.properties. -->
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-blobstore</artifactId>
+                <version>${qits.blobstore.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-registries-common</artifactId>
+                <version>${qits.registries.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-registries-npm</artifactId>
+                <version>${qits.registries.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-registries-maven</artifactId>
+                <version>${qits.registries.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-registries-oci</artifactId>
+                <version>${qits.registries.version}</version>
+            </dependency>
+
             <!-- The reactor's own modules, so `service` depends on them version-less. -->
             <dependency>
                 <groupId>${project.groupId}</groupId>
                 <artifactId>qits-artifacts-artifacts</artifactId>
-                <version>${project.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>${project.groupId}</groupId>
-                <artifactId>qits-artifacts-git-storage</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>

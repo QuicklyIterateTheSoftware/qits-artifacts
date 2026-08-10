@@ -1,19 +1,16 @@
 package eu.wohlben.qits.artifacts.control;
 
 import eu.wohlben.qits.artifacts.entity.ArtifactRepository;
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
 import eu.wohlben.qits.artifacts.persistence.ArtifactRecordRepository;
 import eu.wohlben.qits.artifacts.persistence.ArtifactRepositoryRepository;
 import eu.wohlben.qits.artifacts.persistence.DaemonBinaryRepository;
 import eu.wohlben.qits.artifacts.persistence.MavenArtifactRepository;
-import eu.wohlben.qits.artifacts.persistence.NpmProxyPackumentRepository;
 import eu.wohlben.qits.artifacts.persistence.NpmVersionRepository;
 import eu.wohlben.qits.artifacts.persistence.OciManifestRepository;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.time.Instant;
 import java.util.Collection;
-import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
@@ -40,22 +37,16 @@ import java.util.Set;
  * <p>Liveness per type, and where it is read from:
  *
  * <ul>
- *   <li>{@code oci-images} / {@code oci-mirror} — the manifest closure ({@link
- *       OciManifestFootprints}, which walks an index's children, so a child manifest of a live index
- *       is live). Sizes are the {@code size} fields inside the manifest documents, which is what the
- *       OCI union has always been counted from. The two types are walked identically and counted
- *       <em>separately</em>: what a mirror cached is live, so nothing pulled through it is ever
- *       mistaken for an orphan, and the closure tolerates a mirror index whose children have no
- *       local row — the lazy pull order fetches an index first and its children later, each on its
- *       own miss.
- *   <li>{@code npm-packages} / {@code npm-proxy} — {@code npm_version.tarball_blob_id}, sized from
- *       disk because there is no size column.
- *   <li>{@code maven-packages} / {@code maven-proxy} — {@code maven_artifact.blob_id}, sized from
- *       the row: that table is the one protocol table whose size was free at stage time, so no disk
- *       read and no null size like npm's. Attribution runs off the repository row's type, exactly
- *       like the CI records below, so both maven types' live sets fill from this one table — which
- *       is why the pull-through cache needed no census code. A cached jar is as live as a deployed
- *       one; what may be re-fetched is the collector's question, not this one's.
+ *   <li>{@code oci-images} — the manifest closure ({@link OciManifestFootprints}, which walks an
+ *       index's children, so a child manifest of a live index is live). Sizes are the {@code size}
+ *       fields inside the manifest documents, which is what the OCI union has always been counted
+ *       from.
+ *   <li>{@code npm-packages} — {@code npm_version.tarball_blob_id}, sized from disk because there is
+ *       no size column.
+ *   <li>{@code maven-packages} — {@code maven_artifact.blob_id}, sized from the row: that table is
+ *       the one protocol table whose size was free at stage time, so no disk read and no null size
+ *       like npm's. Attribution runs off the repository row's type, exactly like the CI records
+ *       below.
  *   <li>{@code daemon-binaries} — {@code daemon_binary.blob_id}, sized from the row for the same
  *       reason maven's is. This is the set that made {@code orphanBytes} honest: every row-less
  *       blob the store held was a ci-daemon build pushed through the blob-upload session, which
@@ -74,8 +65,12 @@ import java.util.Set;
  * pool used to be three ELF binaries uploaded through the OCI blob-upload session, one of which is
  * the CI daemon every build downloads. The {@code daemon-binaries} type is what gives those bytes a
  * row; adopting the three already on the volume is an ops action, so until it runs they stay here,
- * reported and left alone. The git host's DFS pack blobs are in that pool too until its GC (a later
- * workstream) contributes them as a live set of its own.
+ * reported and left alone.
+ *
+ * <p><b>The types are open, so this class enumerates none of them.</b> It reads each repository
+ * row's own type key and files that repository's blobs under it, which is why nothing here changed
+ * when the cache types left for qits-platform-mirror — a deployment with no rows of a type simply
+ * has no live set for it.
  */
 @ApplicationScoped
 public class LiveBlobCensus {
@@ -84,7 +79,6 @@ public class LiveBlobCensus {
   @Inject ArtifactRecordRepository records;
   @Inject OciManifestRepository manifests;
   @Inject NpmVersionRepository versions;
-  @Inject NpmProxyPackumentRepository packuments;
   @Inject MavenArtifactRepository mavenArtifacts;
   @Inject DaemonBinaryRepository daemonBinaries;
   @Inject OciManifestFootprints footprints;
@@ -98,34 +92,32 @@ public class LiveBlobCensus {
    *
    * @param takenAt when the reading was taken; a plan older than a push is a plan on stale facts
    * @param onDisk blob id (bare hex) to bytes on disk, for every file under the blob root
-   * @param liveByType blob id to the size that type knows for it — declared manifest sizes for OCI,
-   *     disk sizes for npm tarballs, row sizes for CI records
+   * @param liveByType STORED type key ({@code OCI_IMAGES}) to blob id to the size that type knows
+   *     for it — declared manifest sizes for OCI, disk sizes for npm tarballs, row sizes for CI
+   *     records. Keyed by the row's own key rather than by an enum, because the type set is open
    * @param ociPerImageSumBytes the per-image unions added up, which double-counts what images share
    *     and is reported beside the union rather than instead of it
-   * @param npmProxyPackumentBytes cached packument characters — H2 CLOBs, not files, so outside
-   *     every disk figure here
    */
   public record Census(
       Instant takenAt,
       Map<String, Long> onDisk,
-      Map<RepositoryType, Map<String, Long>> liveByType,
-      long ociPerImageSumBytes,
-      long npmProxyPackumentBytes) {
+      Map<String, Map<String, Long>> liveByType,
+      long ociPerImageSumBytes) {
 
     public Census {
       onDisk = Map.copyOf(onDisk);
-      Map<RepositoryType, Map<String, Long>> copy = new EnumMap<>(RepositoryType.class);
+      Map<String, Map<String, Long>> copy = new HashMap<>();
       liveByType.forEach((type, live) -> copy.put(type, Map.copyOf(live)));
       liveByType = Map.copyOf(copy);
     }
 
     /** Every blob this type still reaches, with the size that type knows for it. */
-    public Map<String, Long> live(RepositoryType type) {
+    public Map<String, Long> live(String type) {
       return liveByType.getOrDefault(type, Map.of());
     }
 
     /** The type's union, summed once — never a sum over its identities. */
-    public long liveBytes(RepositoryType type) {
+    public long liveBytes(String type) {
       return OciManifestFootprints.sum(live(type));
     }
 
@@ -174,76 +166,43 @@ public class LiveBlobCensus {
    */
   public Census take() {
     Map<String, Long> onDisk = diskIndex.sizes();
-    Map<RepositoryType, Map<String, Long>> live = new EnumMap<>(RepositoryType.class);
-    for (RepositoryType type : RepositoryType.values()) {
-      live.put(type, new HashMap<>());
-    }
+    Map<String, Map<String, Long>> live = new HashMap<>();
 
     List<ArtifactRepository> all = repositories.listAll();
     long perImageSum = 0;
     for (ArtifactRepository repository : all) {
-      // Both OCI types are walked, and each contributes to ITS OWN live set: the manifest closure is
-      // a property of the rows, not of who pushed them, and a mirror's cached layers are as live as
-      // a pushed image's. Only the hosted type feeds ociPerImageSumBytes, because that figure exists
-      // to be compared against the hosted union — the explorer's "the two differ by the layers two
-      // images share" line, which mixing a second type into would make unreadable.
-      if (repository.type == RepositoryType.OCI_IMAGES
-          || repository.type == RepositoryType.OCI_MIRROR) {
-        Map<String, Long> ociUnion = live.get(repository.type);
-        for (String image : manifests.listImageNames(repository.name)) {
-          Map<String, Long> perImage =
-              footprints.union(manifests.listByImage(repository.name, image));
-          if (repository.type == RepositoryType.OCI_IMAGES) {
-            perImageSum += OciManifestFootprints.sum(perImage);
-          }
-          perImage.forEach(ociUnion::putIfAbsent);
-        }
+      // Every table is read for every repository and attributed to that repository's OWN type key.
+      // A repository of the wrong type simply has no rows in a table — an npm root holds no
+      // manifests — so nothing here needs to know which types exist, which is what lets the type
+      // set be open. The tables answer.
+      Map<String, Long> blobs = live.computeIfAbsent(repository.type, type -> new HashMap<>());
+      // The OCI half: the manifest closure, walked per image so the per-image sum can be compared
+      // against the union — the explorer's "the two differ by the layers two images share" line.
+      for (String image : manifests.listImageNames(repository.name)) {
+        Map<String, Long> perImage = footprints.union(manifests.listByImage(repository.name, image));
+        perImageSum += OciManifestFootprints.sum(perImage);
+        perImage.forEach(blobs::putIfAbsent);
       }
-      Map<String, Long> recordBlobs = live.get(repository.type);
       for (Object[] blob : records.listDistinctBlobs(repository.name)) {
-        recordBlobs.putIfAbsent((String) blob[0], (Long) blob[1]);
+        blobs.putIfAbsent((String) blob[0], (Long) blob[1]);
       }
-      // The maven half, on the records pattern: attributed by the row's repository type rather than
-      // by a hardcoded constant, so BOTH maven types' live sets fill from maven_artifact — which is
-      // why MAVEN_PROXY landed with no census code at all. Sized from the row, the one protocol
-      // table that has the size.
-      Map<String, Long> mavenBlobs = live.get(repository.type);
+      // The maven half. Sized from the row, the one protocol table that has the size.
       for (Object[] blob : mavenArtifacts.listDistinctBlobs(repository.name)) {
-        mavenBlobs.putIfAbsent((String) blob[0], (Long) blob[1]);
+        blobs.putIfAbsent((String) blob[0], (Long) blob[1]);
       }
-      // The daemon half, on the same pattern and for the sharpest reason in this method: these
-      // bytes used to BE the orphan pool. Every one of the store's 124 MiB of row-less blobs was a
-      // ci-daemon build, uploaded through the OCI blob-upload session, which writes no row — so
-      // orphanBytes reported a live, downloaded-every-build executable as garbage-shaped. With rows
-      // the census sees it natively and orphanBytes tells the truth.
-      Map<String, Long> daemonBlobs = live.get(repository.type);
+      // The daemon half, for the sharpest reason in this method: these bytes used to BE the orphan
+      // pool. Every one of the store's 124 MiB of row-less blobs was a ci-daemon build, uploaded
+      // through the OCI blob-upload session, which writes no row — so orphanBytes reported a live,
+      // downloaded-every-build executable as garbage-shaped. With rows the census sees it natively.
       for (Object[] blob : daemonBinaries.listDistinctBlobs(repository.name)) {
-        daemonBlobs.putIfAbsent((String) blob[0], (Long) blob[1]);
+        blobs.putIfAbsent((String) blob[0], (Long) blob[1]);
+      }
+      // The npm half: distinct tarballs, sized from disk because npm_version has no size column.
+      for (String blobId : versions.listTarballBlobIds(List.of(repository.name))) {
+        blobs.putIfAbsent(blobId, onDisk.getOrDefault(blobId, 0L));
       }
     }
 
-    List<String> hosted = namesOfType(all, RepositoryType.NPM_PACKAGES);
-    List<String> proxied = namesOfType(all, RepositoryType.NPM_PROXY);
-    tarballs(hosted, onDisk, live.get(RepositoryType.NPM_PACKAGES));
-    tarballs(proxied, onDisk, live.get(RepositoryType.NPM_PROXY));
-
-    return new Census(
-        Instant.now(), onDisk, live, perImageSum, packuments.totalDocLength(proxied));
-  }
-
-  /** The npm half: distinct tarballs, sized from disk because {@code npm_version} has no size. */
-  private void tarballs(
-      List<String> repositoryNames, Map<String, Long> onDisk, Map<String, Long> into) {
-    for (String blobId : versions.listTarballBlobIds(repositoryNames)) {
-      into.putIfAbsent(blobId, onDisk.getOrDefault(blobId, 0L));
-    }
-  }
-
-  private static List<String> namesOfType(
-      List<ArtifactRepository> repositories, RepositoryType type) {
-    return repositories.stream()
-        .filter(repository -> repository.type == type)
-        .map(repository -> repository.name)
-        .toList();
+    return new Census(Instant.now(), onDisk, live, perImageSum);
   }
 }

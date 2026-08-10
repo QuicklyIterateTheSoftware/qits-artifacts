@@ -7,7 +7,10 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.artifacts.entity.NpmVersion;
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
+import eu.wohlben.qits.artifacts.control.CiVideosProfile;
+import eu.wohlben.qits.artifacts.control.NpmPackagesProfile;
+import eu.wohlben.qits.artifacts.control.OciImagesProfile;
+import eu.wohlben.qits.artifacts.entity.RepositoryTypeProfile;
 import eu.wohlben.qits.artifacts.gc.dto.GcPinSource;
 import eu.wohlben.qits.artifacts.gc.dto.GcPlanReport;
 import eu.wohlben.qits.artifacts.gc.dto.GcSweepReport;
@@ -38,6 +41,9 @@ import org.junit.jupiter.api.Test;
  */
 @QuarkusTest
 class GcPinsTest extends GcFixture {
+
+  /** The seven types this deployment registers — see {@code GcPlanTest} for the arithmetic. */
+  private static final int REGISTERED_TYPES = 7;
 
   @Inject GcPlanner planner;
   @Inject GcSweepExecutor executor;
@@ -136,7 +142,7 @@ class GcPinsTest extends GcFixture {
     // The content below is exactly what a healthy run deletes — a superseded main build whose
     // tarball has aged past the grace window — and npm's rule needs no pin to condemn it. It
     // survives anyway, which is the settlement's abort rule doing the only thing it is for.
-    repositoryService.ensure("npm", RepositoryType.NPM_PACKAGES);
+    repositoryService.ensure("npm", NpmPackagesProfile.KEY);
     String supersededBlob = agedBlob(62);
     versionRow(PKG, RELEASE, agedBlob(61));
     versionRow(PKG, SUPERSEDED, supersededBlob);
@@ -148,9 +154,9 @@ class GcPinsTest extends GcFixture {
     assertTrue(report.aborted().contains("qits-platform-deployments"));
     assertTrue(report.aborted().contains("qits-ci"));
     assertFalse(report.dryRun(), "it is still the execute surface's receipt");
-    assertEquals(RepositoryType.values().length, report.types().size());
+    assertEquals(REGISTERED_TYPES, report.types().size());
     for (GcTypeSweepResult type : report.types()) {
-      assertEquals(report.aborted(), type.error(), type.type().wireName());
+      assertEquals(report.aborted(), type.error(), type.type());
       assertEquals(0, type.deleted().size());
     }
     assertEquals(0, report.sweep().blobsUnlinked());
@@ -184,7 +190,7 @@ class GcPinsTest extends GcFixture {
     assertFalse(report.executable());
     assertEquals(2, report.pinFailures().size());
     assertEquals(2, report.pins().size(), "and the same two sources are named in the pins section");
-    GcTypePlan oci = typePlan(report, RepositoryType.OCI_IMAGES);
+    GcTypePlan oci = typePlan(report, OciImagesProfile.KEY);
     assertNotNull(oci.error());
     assertTrue(oci.error().contains("live pins unavailable"));
     assertEquals(0, oci.dead().size());
@@ -193,10 +199,10 @@ class GcPinsTest extends GcFixture {
     // Every type on an engine reads pins now, so the useful half of a broken run is the CI stubs:
     // they carry their caption rather than an error, which is what keeps the report readable when
     // half of it is a refusal.
-    GcTypePlan npm = typePlan(report, RepositoryType.NPM_PACKAGES);
+    GcTypePlan npm = typePlan(report, NpmPackagesProfile.KEY);
     assertNotNull(npm.error(), "the own engine reads pins too");
     assertEquals(0, npm.dead().size());
-    GcTypePlan videos = typePlan(report, RepositoryType.CI_VIDEOS);
+    GcTypePlan videos = typePlan(report, CiVideosProfile.KEY);
     assertNull(videos.error(), "a type that reads no pins is still planned");
     assertNotNull(videos.note());
     assertEquals(0, report.sweep().blobCount());
@@ -212,12 +218,12 @@ class GcPinsTest extends GcFixture {
 
     assertTrue(report.executable());
     assertEquals(0, report.pinFailures().size());
-    assertNull(typePlan(report, RepositoryType.OCI_IMAGES).error());
+    assertNull(typePlan(report, OciImagesProfile.KEY).error());
   }
 
-  private static GcTypePlan typePlan(GcPlanReport report, RepositoryType type) {
+  private static GcTypePlan typePlan(GcPlanReport report, String type) {
     return report.types().stream()
-        .filter(plan -> plan.type() == type)
+        .filter(plan -> RepositoryTypeProfile.wireNameOf(type).equals(plan.type()))
         .findFirst()
         .orElseThrow();
   }

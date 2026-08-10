@@ -4,7 +4,6 @@ import eu.wohlben.qits.artifacts.entity.MavenArtifact;
 import eu.wohlben.qits.artifacts.entity.NpmVersion;
 import eu.wohlben.qits.artifacts.entity.OciManifest;
 import eu.wohlben.qits.artifacts.entity.OciTag;
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
 import io.quarkus.narayana.jta.QuarkusTransaction;
 import jakarta.inject.Inject;
 import java.io.ByteArrayInputStream;
@@ -68,8 +67,8 @@ abstract class SeededStoreFixture extends ArtifactsTestSupport {
    * to test the window has to make its own young blob and say so.
    */
   Store seed() throws IOException {
-    repositoryService.ensure("qits", RepositoryType.OCI_IMAGES);
-    repositoryService.ensure("npm", RepositoryType.NPM_PACKAGES);
+    repositoryService.ensure("qits", OciImagesProfile.KEY);
+    repositoryService.ensure("npm", NpmPackagesProfile.KEY);
 
     String config = store(filled(CONFIG, (byte) 1));
     String layerKept = store(filled(LAYER_KEPT, (byte) 2));
@@ -111,56 +110,6 @@ abstract class SeededStoreFixture extends ArtifactsTestSupport {
         manifestDoomed);
   }
 
-  /** What {@link #seedMirror()} built. */
-  record MirrorStore(
-      String config, String layer, String child, String index, String absentChild) {}
-
-  static final int MIRROR_CONFIG = 11;
-  static final int MIRROR_LAYER = 700;
-  static final int ABSENT_CHILD = 900;
-
-  /**
-   * One cached multi-arch image in a mirror namespace, <b>with one child that was never fetched</b>.
-   *
-   * <p>That missing child is the fixture's whole point. A push arrives children-first — the registry
-   * refuses an index whose children it does not have — but a <em>pull</em> arrives index-first, and
-   * the mirror binds it immediately and fetches children lazily, each on its own miss, so it never
-   * pays an upstream for an architecture nobody pulled. A mirror index referencing a child with no
-   * local row is therefore the normal state of a partially-pulled image, not a corruption, and every
-   * reader that walks manifests has to survive it.
-   */
-  MirrorStore seedMirror() throws IOException {
-    repositoryService.ensure(MIRROR_REPO, RepositoryType.OCI_MIRROR);
-
-    String config = store(filled(MIRROR_CONFIG, (byte) 6));
-    String layer = store(filled(MIRROR_LAYER, (byte) 7));
-    byte[] childBytes = imageManifest(config, Map.of(layer, (long) MIRROR_LAYER), MIRROR_CONFIG);
-    String child = store(childBytes);
-    // Never stored and never rowed: the architecture nobody pulled.
-    String absentChild = "a".repeat(64);
-    byte[] indexBytes =
-        indexManifest(Map.of(child, (long) childBytes.length, absentChild, (long) ABSENT_CHILD));
-    String index = store(indexBytes);
-
-    QuarkusTransaction.requiringNew()
-        .run(
-            () -> {
-              ociManifests.persist(
-                  mirrorManifest(child, childBytes.length, OciMediaTypes.OCI_MANIFEST_V1));
-              ociManifests.persist(
-                  mirrorManifest(index, indexBytes.length, OciMediaTypes.OCI_INDEX_V1));
-              ociTags.persist(mirrorTag("jdk-25", index));
-            });
-
-    for (String blobId : List.of(config, layer, child, index)) {
-      backdate(blobId, Duration.ofDays(30));
-    }
-    return new MirrorStore(config, layer, child, index, absentChild);
-  }
-
-  static final String MIRROR_REPO = "quay";
-  static final String MIRROR_IMAGE = "quarkus/ubi9-quarkus-mandrel-builder-image";
-
   /** What {@link #seedMaven()} built. */
   record MavenStore(String jar, String pom) {}
 
@@ -176,7 +125,7 @@ abstract class SeededStoreFixture extends ArtifactsTestSupport {
    * sizes ride on the rows, which is the whole reason this type needs no disk read.
    */
   MavenStore seedMaven() throws IOException {
-    repositoryService.ensure(MAVEN_REPO, RepositoryType.MAVEN_PACKAGES);
+    repositoryService.ensure(MAVEN_REPO, MavenPackagesProfile.KEY);
     String jar = store(filled(MAVEN_JAR, (byte) 8));
     String pom = store(filled(MAVEN_POM, (byte) 10));
     QuarkusTransaction.requiringNew()
@@ -199,48 +148,6 @@ abstract class SeededStoreFixture extends ArtifactsTestSupport {
     row.sizeBytes = size;
     row.createdAt = Instant.now();
     return row;
-  }
-
-  private static OciManifest mirrorManifest(String digest, long size, String mediaType) {
-    OciManifest row = new OciManifest();
-    row.repository = MIRROR_REPO;
-    row.imageName = MIRROR_IMAGE;
-    row.digest = digest;
-    row.mediaType = mediaType;
-    row.size = size;
-    row.createdAt = Instant.now();
-    return row;
-  }
-
-  private static OciTag mirrorTag(String name, String digest) {
-    OciTag row = new OciTag();
-    row.repository = MIRROR_REPO;
-    row.imageName = MIRROR_IMAGE;
-    row.tag = name;
-    row.manifestDigest = digest;
-    row.updatedAt = Instant.now();
-    return row;
-  }
-
-  /** A real OCI index — the children are manifests, not blobs, which is what makes the walk recurse. */
-  static byte[] indexManifest(Map<String, Long> children) {
-    List<String> descriptors = new ArrayList<>();
-    children.forEach(
-        (digest, size) ->
-            descriptors.add(
-                "{\"mediaType\":\""
-                    + OciMediaTypes.OCI_MANIFEST_V1
-                    + "\",\"digest\":\"sha256:"
-                    + digest
-                    + "\",\"size\":"
-                    + size
-                    + "}"));
-    return ("{\"schemaVersion\":2,\"mediaType\":\""
-            + OciMediaTypes.OCI_INDEX_V1
-            + "\",\"manifests\":["
-            + String.join(",", descriptors)
-            + "]}")
-        .getBytes(StandardCharsets.UTF_8);
   }
 
   String store(byte[] bytes) {

@@ -5,7 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.artifacts.dto.StoreSummary;
-import eu.wohlben.qits.artifacts.entity.RepositoryType;
+import eu.wohlben.qits.artifacts.entity.RepositoryTypeProfile;
 import eu.wohlben.qits.artifacts.error.DaemonException;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -35,13 +35,15 @@ class DaemonRegistryStorageTest extends SeededStoreFixture {
   @Inject DaemonRegistryService daemons;
   @Inject ArtifactExplorerService explorer;
 
+  @Inject DaemonBinariesProfile profile;
+
   @Test
   void theWireNameIsKebabAndRoundTrips() {
-    // The enum name is not the API contract, and this type's wire name is what a deployment writes
+    // The stored key is not the API contract, and this type's wire name is what a deployment writes
     // into a repository body and what every GC report prints.
-    assertEquals("daemon-binaries", RepositoryType.DAEMON_BINARIES.wireName());
-    assertEquals(RepositoryType.DAEMON_BINARIES, RepositoryType.fromWire("daemon-binaries"));
-    assertEquals(RepositoryType.DAEMON_BINARIES, RepositoryType.fromWire("DAEMON_BINARIES"));
+    assertEquals("daemon-binaries", profile.wireName());
+    assertEquals(DaemonBinariesProfile.KEY, RepositoryTypeProfile.keyOfWireName("daemon-binaries"));
+    assertEquals(DaemonBinariesProfile.KEY, RepositoryTypeProfile.keyOfWireName("DAEMON_BINARIES"));
   }
 
   @Test
@@ -50,10 +52,11 @@ class DaemonRegistryStorageTest extends SeededStoreFixture {
     // sniff — an ELF binary sniffs to nothing and would 400 — and no metadata to require. The empty
     // media-type set is what makes the zero cap safe rather than merely unused: accepts() refuses a
     // stray JSON-API upload before anything reads maxBytes().
-    assertEquals(Set.of(), RepositoryType.DAEMON_BINARIES.allowedMediaTypes());
-    assertEquals(Set.of(), RepositoryType.DAEMON_BINARIES.requiredMetadataKeys());
-    assertEquals(0L, RepositoryType.DAEMON_BINARIES.maxBytes());
-    assertTrue(!RepositoryType.DAEMON_BINARIES.accepts("application/octet-stream"));
+    assertTrue(!profile.allowsValidatedUploads());
+    assertEquals(Set.of(), profile.allowedMediaTypes());
+    assertEquals(Set.of(), profile.requiredMetadataKeys());
+    assertEquals(0L, profile.maxBytes());
+    assertTrue(!profile.accepts("application/octet-stream"));
   }
 
   @Test
@@ -104,7 +107,7 @@ class DaemonRegistryStorageTest extends SeededStoreFixture {
 
   @Test
   void aRepositoryOfAnotherTypeIsNotADaemonRepository() throws IOException {
-    repositoryService.ensure("npm", RepositoryType.NPM_PACKAGES);
+    repositoryService.ensure("npm", NpmPackagesProfile.KEY);
 
     DaemonException refused =
         assertThrows(DaemonException.class, () -> daemons.requireDaemonRepository("npm"));
@@ -121,8 +124,8 @@ class DaemonRegistryStorageTest extends SeededStoreFixture {
 
     LiveBlobCensus.Census taken = census.take();
 
-    assertEquals(Set.of(blobId), taken.live(RepositoryType.DAEMON_BINARIES).keySet());
-    assertEquals(43L, taken.liveBytes(RepositoryType.DAEMON_BINARIES));
+    assertEquals(Set.of(blobId), taken.live(DaemonBinariesProfile.KEY).keySet());
+    assertEquals(43L, taken.liveBytes(DaemonBinariesProfile.KEY));
     assertEquals(
         Set.of(),
         taken.rowless(),
@@ -138,7 +141,7 @@ class DaemonRegistryStorageTest extends SeededStoreFixture {
     LiveBlobCensus.Census taken = census.take();
     StoreSummary summary = explorer.storeSummary();
 
-    assertEquals(taken.liveBytes(RepositoryType.DAEMON_BINARIES), summary.daemonBinaryBytes());
+    assertEquals(taken.liveBytes(DaemonBinariesProfile.KEY), summary.daemonBinaryBytes());
     assertEquals(43L, summary.daemonBinaryBytes());
     // The identity the whole panel rests on, with the new figure carrying its share: no byte is
     // both live and an orphan, and the disk total is the sum of the two.
@@ -155,13 +158,13 @@ class DaemonRegistryStorageTest extends SeededStoreFixture {
     daemons.publish(DAEMONS, CI_DAEMON, "2026.801.160000", blobId, 43);
     daemons.publish(DAEMONS, CI_DAEMON, "2026.801.170000", blobId, 43);
 
-    assertEquals(43L, census.take().liveBytes(RepositoryType.DAEMON_BINARIES));
+    assertEquals(43L, census.take().liveBytes(DaemonBinariesProfile.KEY));
     assertEquals(2, daemons.listVersions(DAEMONS, CI_DAEMON).size());
   }
 
   /** The seeded {@code daemons} row plus one staged, promoted blob — the publish route's halves. */
   private String seedDaemonRepository(int size, byte fill) throws IOException {
-    repositoryService.ensure(DAEMONS, RepositoryType.DAEMON_BINARIES);
+    repositoryService.ensure(DAEMONS, DaemonBinariesProfile.KEY);
     return store(filled(size, fill));
   }
 }
