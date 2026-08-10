@@ -1,45 +1,54 @@
-# qits-platform-artifacts
+# qits-artifacts
 
-qits' **byte plane**: the metadata-rich blob store, the in-process git smart-HTTP host workspace
-containers clone from and push to, the OCI registry they pull images from, the npm registry —
-hosted, plus a pull-through cache of npmjs — they install from, the maven repository they deploy
-their own library to, and the documentation bundles the platform publishes and qits-platform-docs
-serves back.
-
-One repo, because every one of them is "qits serves bytes over HTTP against on-disk state it owns"
-and none has an inbound edge from the rest of qits. The protocol registries are the third through
-sixth uses of the byte plane and all were predicted by the code — `RepositoryType`
-already reserved the seam — and none needed a new storage layer, because a content-addressed
-SHA-256 blob store *is* the OCI blob model and is a perfectly good home for a tarball or a jar.
-The git host landed here rather than in a `qits-repositories` service because that name collides
-with `domain.repository` — see `migration-plan.md` §3.4 in the home repo.
+qits' **hosted byte plane**, env-scoped: the hosted OCI registry the platform pushes its images to,
+the hosted npm registry and maven repository its own libraries publish to, the daemon binaries every
+CI step downloads and executes, the documentation bundles qits-docs serves back, the CI media the
+golden-diff loop produces — and the pin-based garbage collection over all of them.
 
     mvn verify        # a clone of this repo alone builds and tests green — no monorepo, no docker
+
+## What is NOT here, and where it went
+
+This repository was `qits-platform-artifacts` and held three things it no longer does
+(`byte-plane-split-plan.md` in the home repo, phase 4):
+
+| Left | Went to | Why |
+|---|---|---|
+| the pull-through caches — `npm-proxy`, `maven-proxy`, `oci-mirror`, their upstreams and the access-tracked eviction GC | **qits-platform-mirror** | a cache of somebody else's registry is shared across every environment, and holding it was the *only* reason this service was platform-scoped. Without it, this one is an env service again. |
+| the git smart-HTTP host — the `git-storage` module, `eu.wohlben.qits.githost*`, the post-receive fan-out | **qits-githost** | a repository is not an artifact. It only ever shared the storage layout, and every consumer of it (qits-ci, qits-deployments, qits-workspaces, the daemons) is an env service already. |
+| the content-addressed blob store and the three protocol implementations | the libraries **qits-blobstore** and **qits-registries-{common,npm,maven,oci}** | the mirror needs the same store and the same wire code; a library is what stops that being a fork. |
+
+So the two-endpoint topology a client sees: `@qits`-scoped npm packages, qits images and qits jars
+come from **this** service at the env's own address; everything third-party comes from the mirror.
+Splitting that is client configuration — npm scoped registries, dockerd `registry-mirrors`, the
+maven repositories list — because the route prefixes are literals in the shared jars and both
+services answer the same paths.
+
+**The schema did not move.** The Flyway lineage under `artifacts/src/main/resources/db/artifacts/`
+is carried through the split byte for byte: the libraries ship no migrations by design, each
+consuming service owns its own, and this one's is the original chain. That leaves orphaned tables
+behind — the git host's `git_pack`/`git_pack_file`/`git_repository_protection` (V4/V5) and the proxy
+tables — which is a cutover data question rather than a reason to rewrite history. The one visible
+consequence: V7 still **prefills three `oci-mirror` repository rows**, and rows of a type this
+service registers no profile for are omitted from the explorer listing and from the GC plan rather
+than reported with numbers nothing here can compute.
 
 ## Layout
 
 | Module | What |
 |---|---|
-| `artifacts/` | `eu.wohlben.qits.artifacts.*` — entity, persistence, dto, mapper, control, error. The blob store proper. No web, no JAX-RS. |
-| `git-storage/` | `eu.wohlben.qits.githost.storage` — a JGit `DfsRepository` whose packs, pack indexes and refs are blobs, plus the two ports it declares and does not implement (`PackBlobStore`, `PackCatalog`). One compile dependency: JGit. |
-| `gc/` | `eu.wohlben.qits.artifacts.gc` (+ `.dto`) — garbage collection: the six per-type strategies, the two configured engines that will replace them, the planner, the reconciliation and the sweep, plus the two pin ports (`CdDeploymentPins`, `CiDaemonPins`) and their HTTP adapters. A *process* modelled from within qits-platform-artifacts, not artifacts domain. Depends on `artifacts` and on nothing else here. No web, no JAX-RS — `GcPlanController` is in `service/`. |
-| `service/` | `eu.wohlben.qits.artifacts.api` (the JAX-RS boundary), `eu.wohlben.qits.githost` (the Vert.x + JGit smart-HTTP host), `eu.wohlben.qits.githost.persistence` (the DFS storage adapters and the git host's entities), `eu.wohlben.qits.registry` (the Vert.x OCI Distribution API), `eu.wohlben.qits.npm` (the Vert.x npm registry and its upstream proxy) and `eu.wohlben.qits.maven` (the Vert.x maven repository). |
-| `service/src/main/webui/` | The `qits-platform-spa-artifacts` submodule — an Angular SPA, built into the app by Quinoa and served at `/artifacts`. Not Java, and not a Maven module. |
+| `artifacts/` | What did not move out: the docs and daemon registries (entities, persistence, services), the store explorer, the live blob census, the repository seeder, the two repository-type **profile beans** this service contributes (`DAEMON_BINARIES`, `DOCS`) — and the Flyway lineage. A library jar: no web, no JAX-RS. |
+| `gc/` | `eu.wohlben.qits.artifacts.gc` (+ `.dto`) — garbage collection: the pin-based own-artifacts engine, the per-type adapters, the planner, the reconciliation and the sweep, plus the two pin ports (`CdDeploymentPins`, `CiDaemonPins`) and their HTTP adapters. A *process* modelled from within this service, not artifacts domain. Depends on `artifacts` and, one way, never back. |
+| `service/` | `eu.wohlben.qits.artifacts.api` (the JAX-RS boundary), `eu.wohlben.qits.docs` and `eu.wohlben.qits.daemon` (two raw Vert.x wires), and the SPA. The npm, maven and OCI wires are **not** written here any more — they arrive as beans on the qits-registries jars and register their own routes. |
+| `service/src/main/webui/` | The SPA submodule — an Angular app, built into the app by Quinoa and served at `/artifacts`. Not Java, and not a Maven module. |
 
-`artifacts/`, `git-storage/` and `gc/` are library jars. `artifacts` and `git-storage` depend on
-nothing of each other's — they are different contexts, which is why `git-storage` declares ports and
-`service` implements them. `gc` depends on `artifacts` and on `git-storage` not at all, and the
-dependency runs **one way**: `artifacts` does not know a garbage collector exists, which is what
-keeps a retention rule out of the write path. Where a strategy needs one of the store's funnels,
-`artifacts` opens a narrow public door — `BlobReclaim`, `OciRegistryCollection`,
-`NpmRegistryCollection` — that delegates to a member which stays package-private.
-**`service/` is the application** — it carries
+`artifacts/` and `gc/` are library jars; **`service/` is the application** — it carries
 `<packaging>quarkus</packaging>` and produces a process, as a JVM fast-jar or as a native binary:
 
     ./mvnw verify
     java -jar service/target/quarkus-app/quarkus-run.jar   # :8080 — SPA /artifacts/, blobs /artifacts/api/**,
-                                                           #         git /artifacts/git/**, npm /artifacts/npm/**,
-                                                           #         maven /artifacts/maven/**, docs /artifacts/docs/**,
+                                                           #         npm /artifacts/npm/**, maven /artifacts/maven/**,
+                                                           #         docs /artifacts/docs/**, daemons /artifacts/daemons/**,
                                                            #         images /v2/**
 
     ./mvnw verify -Dnative
@@ -52,20 +61,17 @@ docker. That fallback still works and is what a CI without a GraalVM gets; it is
 intended path, and it is worth recognising by name when a build that normally takes a minute starts
 downloading a container image.
 
-`-Dnative` also flips `skipITs`, so it runs `PackagedProcessIT` against the binary it just built —
-openapi, swagger-ui, a blob round trip, a real `git clone` + `push`, an image push/pull, an npm
-publish/install and a maven deploy/resolve. That suite is the only thing in this repo that
-exercises **JGit compiled ahead of time**, which is the part of this service most likely to break
-in a native image (see "The git host" below), the only thing that exercises zero-copy `sendFile`
-serving in a binary, and the only place the five route stacks are proved to coexist in one process.
+`quarkus.native.additional-build-args` is gone with the git host: every flag it carried was a JGit
+static native-image refuses to freeze into the image heap, and JGit left with the host.
 
-It was extracted as a library, on the reasoning that packaging it would need an auth variant, a
-webui and a main class. All three have lapsed: authentication terminates at `qits-gateway` and this
-service reads a header, Quarkus supplies the main class, and the webui is now this repo's own —
-`service/src/main/webui` is the `qits-platform-spa-artifacts` submodule, which `quarkus-quinoa` builds during
-augmentation and serves from the packaged artifact at `/artifacts`. A fresh clone therefore wants
-`git submodule update --init` before `./mvnw package`; without it Quinoa finds no `package.json`,
-disables itself with a warning, and the app ships with no client while the build stays green.
+`-Dnative` also flips `skipITs`, so it runs `PackagedProcessIT` against the binary it just built —
+openapi, swagger-ui, a blob round trip, an image push/pull, an npm publish/install, a maven
+deploy/resolve and the browse endpoints. It is the only place the route stacks are proved to
+coexist in one process, and the only thing that exercises zero-copy `sendFile` serving in a binary.
+
+`service/src/main/webui` is a submodule, so a fresh clone wants `git submodule update --init` before
+`./mvnw package`; without it Quinoa finds no `package.json`, disables itself with a warning, and the
+app ships with no client while the build stays green.
 
 The segment is spelled a THIRD time inside the client — the Angular `baseHref` in its `angular.json`
 is `/artifacts/` — because the browser resolves asset urls against the document, not against
@@ -75,11 +81,17 @@ Everything is served under the `/artifacts` gateway segment, because `qits-gatew
 verbatim by prefix and rewrites nothing — there is no unprefixed form, on `qits-net` either.
 
 Note the route stacks resolve differently: `/artifacts/api/**` is JAX-RS and moves with
-`quarkus.rest.path`; `/artifacts/git/**`, `/artifacts/npm/**`, `/artifacts/maven/**`,
-`/artifacts/docs/**` and `/v2/**`
-are registered straight onto the Vert.x router with the segment as a literal, and do not. A `git
-clone http://<host>/artifacts/git/<repoId>` against the packaged process is the check that matters,
-because nothing in the JAX-RS configuration can prove it.
+`quarkus.rest.path`; `/artifacts/npm/**`, `/artifacts/maven/**`, `/artifacts/docs/**`,
+`/artifacts/daemons/**` and `/v2/**` are registered straight onto the Vert.x router with the segment
+as a literal, and do not.
+
+**Which types this deployment registers is one line of configuration.** Repository types are
+contributed as `RepositoryTypeProfile` beans, and each qits-registries module ships *both* halves of
+its format — hosted and cache — so the cache profiles arrive on the classpath whether this service
+wants them or not. `quarkus.arc.exclude-types` in `service/src/main/resources/application.properties`
+vetoes the three, which is what makes "the caches are the mirror's" true rather than merely
+intended: `RepositoryTypeProfiles` then indexes exactly seven keys, `ensure` answers a request for
+any other with a 400 naming what IS registered, and the GC plan reports those same seven.
 
 `artifacts/` owns its **own datasource, persistence unit and Flyway lineage**
 (`db/artifacts/migration`, a separate H2 under `~/.qits/data/artifacts`). It always did — that
@@ -119,182 +131,13 @@ Reads are never guarded — a blob must be usable directly as an `<img>`/`<video
 
 ## The git host
 
-`GitHostRoutes` mounts JGit's `UploadPack`/`ReceivePack` on plain Vert.x routes at `/artifacts/git/*` —
-deliberately **not** as a servlet, because `quarkus-undertow`'s presence breaks Quinoa's production
-static serving — which used to mean "in the consuming app" and now means in this one, since the SPA
-above is served that way. JGit speaks the wire protocol and nothing else: receive-pack is the only
-writer this host has.
-
-Those routes are also why `quarkus.quinoa.ignored-path-prefixes` is spelled out in
-`application.properties` rather than left to Quinoa's derivation: Quinoa derives its ignore list
-from `quarkus.rest.path` and `quarkus.http.non-application-root-path`, and no config key names
-`/artifacts/git` at all. The routes below match ahead of Quinoa's SPA re-route on their own, but
-the paths *between* them — `/artifacts/git/<repoId>` with no suffix — match nothing, and without the
-ignore they would answer `200 text/html` where `git` needs a 404.
-
-JGit is **not** a Quarkus extension, so nothing tells the native compiler about it and the whole git
-host is the part of this service that a GraalVM build breaks silently. Three things had to be
-declared, all of them in `service/src/main/resources/application.properties` and
-`githost/JGitReflection.java`, and each failed only in the binary while `mvn verify` stayed green:
-JGit's statics that cannot be frozen into an image (a `Random`, a started thread pool), and the enum
-`values()` methods `Config.getEnum` recovers reflectively — without which *every* repository fails
-to open and the host answers 404 to everything, indistinguishable from an unknown repo id.
-
-`git` is a second-level segment beside `api`, not `/artifacts/api/git/*`: it is a wire protocol
-spoken by `git`, not a JSON API, and it appears in no OpenAPI document. Git treats the url as an
-opaque base and appends the suffixes itself, so a base of any depth works — the segment is a
-routing decision, not a protocol one.
-
-There is **no authentication** on `/artifacts/git/*`. Repo ids are capability UUIDs and the callers
-are workspace containers, which cannot hold a user session. A deployment must therefore allow-list
-`/artifacts/git/*` (in the monorepo that is `auth/core`'s `PublicPaths`).
-
-Two addressing schemes, told apart by path length — which the fixed prefix preserves, since it adds
-one segment to both:
-
-- `/artifacts/git/:repoId` — the opaque UUID, handed straight to the storage.
-- `/artifacts/git/:projectId/:repoName` — a project's repositories served as siblings, so committed
-  relative submodule urls (`../<name>.git`) resolve natively. Needs the `RepositoryNameResolver`
-  port, whose shipped adapter asks qits-projects and answers nothing until
-  `qits.projects.name-resolver-url` is set — see "The boundary".
-
-Beside them, the base itself answers `GET /artifacts/git` with
-`{"repositories": ["<repoId>", ...]}` — every repository this host serves, sorted
-lexicographically. It is one segment shorter than every
-route above, so it shadows none of them. The host withheld this listing while nothing needed it;
-qits-ci's trigger engine has to enumerate candidates before it can fire an event-triggered pipeline,
-so the decision is reversed rather than left standing. Reads are unauthenticated here as everywhere
-else on this host.
-
-This base is a **cross-repo contract**: qits-ci fetches pipeline config from it and
-qits-workspace-daemon's `Provisioner` clones from it, both against the literal `/artifacts/git`.
-
-### Reading one file without cloning
-
-The wire protocol has no blob-at-path verb, so a consumer that wanted one file kept a local mirror
-and re-fetched it. Two routes on the id-addressed base answer that question directly:
-
-- `GET /artifacts/git/<repoId>/blob/<rev>/<path>` — the raw bytes, `application/octet-stream`.
-- `GET /artifacts/git/<repoId>/tree/<rev>[/<path>]` — `{"entries": [{"name", "type"}]}` for that
-  directory; no path lists the root. `type` is `blob` or `tree`, and a symlink or a submodule
-  gitlink is listed as `blob` — neither can be descended into. The order is git's own tree order.
-
-Both carry the resolved commit in a **`Git-Commit-Sha`** response header. The name deliberately
-avoids the `X-Qits-` prefix, which qits-gateway strips unconditionally — the same fact that makes
-the push bypasses push options rather than headers. It is what makes a read at a branch name
-useful: the caller learns which commit it got and can pin the next read to that sha.
-
-`<rev>` is a full sha or a ref name, resolved by JGit's `Repository.resolve`, and **any commit the
-repository holds is readable — reachable from a ref or not**. That is the point: a post-receive
-consumer reads at the sha it was told about instead of racing the branch. It costs nothing, because
-a content read walks one tree while `UploadPack`'s want policy stays `ADVERTISED` precisely to avoid
-reachability walks. A rev is one path segment, so `feature/x` is written `feature%2Fx`. Revision
-*expressions* (`main^{tree}`, `HEAD@{2}`) are refused: this route serves a sha or a ref.
-
-The answers: 200; 404 for a repository, rev or path that does not resolve, and for a path that is
-the wrong kind of object (a directory read as a blob, a file listed as a tree); 400 for a rev or
-path this route will not look up at all; 413 for a blob past the 8 MiB `MAX_BLOB_BYTES` constant,
-which is sized for source files because that is what the route is for — bulk bytes are what cloning
-is for. Reads are unauthenticated, like everything else on this host.
-
-`blob` and `tree` are literal second segments, where the name-addressed scheme carries a repository
-*name*. They are registered first, and the one request both shapes match — a clone of a repository
-actually called `blob` or `tree`, whose `info/refs` looks like a content read — is handed back to
-the router instead of answered, so no repository becomes unclonable because of what it is called.
-
-### Where a repository lives
-
-In this service's own blob store. A repository is a JGit `DfsRepository`: its packs, pack indexes,
-refs and reftables are content-addressed blobs, and `git_pack`/`git_pack_file` in the H2 lineage
-are the catalog that says which of them a repository is made of. Nothing is on disk as a
-repository, there is no volume to mount and no key to point anywhere else.
-
-Three consequences:
-
-- **The git CLI cannot open one.** No directory for `--git-dir`, no worktree to add, no config file
-  to write. Every operation is the wire protocol or in-process JGit — which is the point:
-  receive-pack is the only writer, so no ref moves without firing `post-receive`.
-- **`DfsRepository.getConfig()` does not persist**, which is why the per-repository protection
-  override is a row (see below) rather than a line in a config file.
-- **Existence is the ref database's answer.** A repository that was created has a reftable in the
-  catalog; one that was not reads empty and is a 404. There is no `git_repository` row to keep in
-  step.
-
-`PUT /artifacts/git/:repoId` is therefore the only way a repository comes into being. A second
-backend — bare origins on a volume shared with qits-projects and qits-workspaces — ran beside this
-one for a release cycle behind `qits.repositories.git.storage`; both the property and the volume
-are gone.
-
-### The default branch's seatbelt
-
-`ProtectedRefHook` is a JGit `PreReceiveHook` that refuses a direct **update or delete** of a
-repository's default branch, so that releasing is something the platform does — through
-qits-workspaces' `POST /workspaces/api/workspaces/{id}/integrate` — rather than something a person
-remembers to do. It is a hook in Java rather than a `hooks/pre-receive` script because this host
-**runs no git**: JGit is driven in-process, so a script in the bare's `hooks/` would never execute.
-
-- The protected ref is the repository's own `HEAD` (`repo.getFullBranch()`), which is per-repo with
-  nothing to keep in step and no cross-service read. Every other ref is untouched — workspace
-  branches are force-pushed and deleted constantly and this must be invisible to them.
-- **Creates are allowed.** An empty repository has no default branch to protect, so the first-run
-  seeding push needs nothing.
-- Two bypasses, both carried as **push options**, because options ride inside the pack protocol and
-  therefore behave identically through all three doors this host is reachable through — a header
-  cannot, since qits-gateway strips the whole `X-Qits-` prefix unconditionally:
-  - `-o qits.release` — the integrate flow's own push. **Fast-forward only**, which is what keeps
-    that push a compare-and-swap.
-  - `-o qits.token=<value>` — "push anyway", including non-fast-forward and delete, **iff** the
-    value equals `qits.repositories.git.push-token`. That property has **no default: unset matches
-    nothing, and a configured-empty value matches nothing either.** With protection on and no token
-    configured there is no direct push to the default branch at all; a deployment that wants the
-    dev-loop escape configures one.
-- Every accepted bypass and every refusal is logged at INFO, the token value never echoed, so "how
-  much direct-to-main pushing is still happening" stays a question with an answer.
-- Refusals name the integrate endpoint and say a matching token is what overrides them. They never
-  echo a configured value — only whether this host has one, which is the part the pusher cannot
-  otherwise know.
-
-It ships **inert** (`protect-default-branch=false`) and that is load-bearing: this service is the git
-host that serves its own redeploy, so a protection bug landing enabled could refuse the very push
-that fixes it. A deployment turns it on by env; a single repository opts in or out through a row in
-`git_repository_protection` (`RepositoryProtectionStore`), and no row means the platform-wide setting
-decides.
-
-That override used to be `[qits] protectDefaultBranch` in the bare's own config. It became a row
-because a repository has no config file — `DfsRepository.getConfig()` is in-memory and its save is a
-no-op — so the old read would have answered the platform default for every repository, with no
-symptom anywhere.
-
-Push options need `setAllowPushOptions(true)` on **both** `ReceivePack` instances — the one in
-`service(...)` that receives them and the one in `infoRefs(...)` that advertises the capability. A
-client only sends `-o` if it was offered, so missing the advertisement produces the confusing failure
-where the option is silently never seen and every bypass is refused.
-
-After a successful push, `PostReceiveNotifier` POSTs `{repoId, branch, oldSha, newSha}` per updated
-branch ref to `qits.ci.intake-url`. That was already an HTTP call inside the monolith, which
-is exactly why the artifacts→ci seam survived the split untouched: only the url moves when
-[qits-ci](https://github.com/QuicklyIterateTheSoftware/qits-ci) becomes its own deployable. It is
-fire-and-forget — a failed delivery is a missed advisory run, never a failed push.
-
-The same event goes to `qits.projects.intake-url` as well, where
-[qits-projects](https://github.com/QuicklyIterateTheSoftware/qits-projects) answers it by pushing the
-repository to its GitHub sync target — so a repository is backed up by being pushed to, with nothing
-scheduling it. Same body, same branches-only filter (tags are covered by projects' own backup
-sweep), same fire-and-forget: an unreachable intake costs a backup, never the push and never the
-other consumer's event.
-
-One difference between the two, and it is deliberate: **`-o qits.no-ci` suppresses the CI event
-only.** The option exists so importing a history does not queue a run per branch; a backup is owed
-for that push exactly as for any other.
-
-qits-ci's intake wants a bearer minted by qits-platform-idp for `aud=qits-ci`, so the notifier attaches one
-when this deployment has client credentials (`quarkus.oidc-client.client-enabled` plus
-`QITS_ARTIFACTS_CLIENT_SECRET`). Without them nothing is fetched and the POST goes out as it always
-has, which is what lets the two services cut over one at a time. This service hosts every project's
-repositories, so its client at the idp is granted `project=*` — qits-ci's guard matches the event's
-project against that claim.
+It is not here. The smart-HTTP host, the DFS storage over blobs and the post-receive fan-out are
+**qits-githost**'s, an env service of its own, where the fan-out is durable domain events rather
+than an HTTP call. Its README carries what this section used to.
 
 ## The OCI registry
+
+> **Both halves of this format ship in `qits-registries-oci`, and this service wires only the hosted one.** The pull-through cache half — its repository type, its upstream configuration and its eviction GC — is qits-platform-mirror's, and the paragraphs below that describe it describe code this deployment does not register.
 
 `RegistryRoutes` serves the [OCI Distribution
 API](https://github.com/opencontainers/distribution-spec) at the literal `/v2`, so an image pushed
@@ -606,6 +449,8 @@ either the registry is wrong, or a capability declaration above is.
 
 ## The npm registry
 
+> **Both halves of this format ship in `qits-registries-npm`, and this service wires only the hosted one.** The pull-through cache half — its repository type, its upstream configuration and its eviction GC — is qits-platform-mirror's, and the paragraphs below that describe it describe code this deployment does not register.
+
 `NpmRoutes` serves the npm registry API at `/artifacts/npm/<repository>/…`. Two repository types
 share those routes, and which one a repository is decides what it will do:
 
@@ -742,6 +587,8 @@ instead of Vert.x' HTML page. Dist-tag mutation APIs (`npm dist-tag add`) are ab
 publish-if-absent is the versioning convention, so a tag only ever moves as part of a publish.
 
 ## The maven repository
+
+> **Both halves of this format ship in `qits-registries-maven`, and this service wires only the hosted one.** The pull-through cache half — its repository type, its upstream configuration and its eviction GC — is qits-platform-mirror's, and the paragraphs below that describe it describe code this deployment does not register.
 
 `MavenRoutes` serves a maven repository at `/artifacts/maven/<repository>/<path…>`, the npm shape
 verbatim: npm lives at `/artifacts/npm/npm/<pkg>`, so the platform's own library deploys to
@@ -1128,6 +975,8 @@ a migration cannot verify one against the running store. Until then: report it; 
   cleanup and is not started.
 
 ## Garbage collection
+
+> **The cache engine is gone from this repo.** `CacheEvictionStrategy` and the three cache adapters went to qits-platform-mirror with the types they collect, and git pack GC went to qits-githost. What is left is the pin-based `OwnArtifactsStrategy` over the hosted types, the two CI stubs, and the reconciliation and sweep, which are type-agnostic and unchanged.
 
 **Reading is the default; executing is a separate, deliberate act.** The dry-run plan shipped
 first, the user reviewed it, and only then did the execute route land. Nothing executes without the
