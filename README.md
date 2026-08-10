@@ -19,10 +19,11 @@ This repository was `qits-platform-artifacts` and held three things it no longer
 | the content-addressed blob store and the three protocol implementations | the libraries **qits-blobstore** and **qits-registries-{common,npm,maven,oci}** | the mirror needs the same store and the same wire code; a library is what stops that being a fork. |
 
 So the two-endpoint topology a client sees: `@qits`-scoped npm packages, qits images and qits jars
-come from **this** service at the env's own address; everything third-party comes from the mirror.
-Splitting that is client configuration — npm scoped registries, dockerd `registry-mirrors`, the
-maven repositories list — because the route prefixes are literals in the shared jars and both
-services answer the same paths.
+come from **this** service at the env's own address; everything third-party comes from the mirror,
+one deployment for the whole platform (`127.0.0.1:8082` on a host, `qits-platform-mirror:8080` on
+qits-net). Splitting that is client configuration — npm scoped registries, dockerd
+`registry-mirrors`, the maven repositories list — because the route prefixes are literals in the
+shared jars and both services answer the same paths.
 
 **The schema did not move.** The Flyway lineage under `artifacts/src/main/resources/db/artifacts/`
 is carried through the split byte for byte: the libraries ship no migrations by design, each
@@ -31,7 +32,9 @@ behind — the git host's `git_pack`/`git_pack_file`/`git_repository_protection`
 tables — which is a cutover data question rather than a reason to rewrite history. The one visible
 consequence: V7 still **prefills three `oci-mirror` repository rows**, and rows of a type this
 service registers no profile for are omitted from the explorer listing and from the GC plan rather
-than reported with numbers nothing here can compute.
+than reported with numbers nothing here can compute. There is a second consequence, less visible and
+worth knowing before reading further: excluding a profile does not unregister the wire code that
+ships beside it, so those three namespaces still answer a pull. See "The pull-through mirror".
 
 ## Layout
 
@@ -137,7 +140,7 @@ than an HTTP call. Its README carries what this section used to.
 
 ## The OCI registry
 
-> **Both halves of this format ship in `qits-registries-oci`, and this service wires only the hosted one.** The pull-through cache half — its repository type, its upstream configuration and its eviction GC — is qits-platform-mirror's, and the paragraphs below that describe it describe code this deployment does not register.
+> **Both halves of this format ship in `qits-registries-oci`, and this service registers only the hosted one.** The pull-through cache half — its repository type, its upstream rows and its eviction GC — is qits-platform-mirror's; "The pull-through mirror" below is what is left at the seam.
 
 `RegistryRoutes` serves the [OCI Distribution
 API](https://github.com/opencontainers/distribution-spec) at the literal `/v2`, so an image pushed
@@ -188,122 +191,30 @@ NAME_INVALID`, because it has no repository/image split at all.
 
 ### The pull-through mirror
 
-A second kind of namespace answers on the same `/v2` routes: a **mirror**, which fronts an upstream
-public registry. Registered upstreams are rows, not config, and each carries the local segment it is
-reachable under:
+It is not here. The `oci-mirror` type, the upstream rows a mirrored namespace resolves through, the
+miss path with its tag TTL and its anonymous-bearer dance, and the four `mirror-upstreams` admin
+routes are **qits-platform-mirror**'s — one cache warmed by every environment rather than a copy per
+tier, reached at its own address (`127.0.0.1:8082` on a deployment host, `/v2` at that root) and
+documented in its own README. Third-party images come from there; this service serves what the
+platform pushed.
 
-| domain | namespace | pulled as |
-|---|---|---|
-| `quay.io` | `quay` | `docker pull <host>/quay/quarkus/ubi9-quarkus-mandrel-builder-image:jdk-25` |
-| `registry.access.redhat.com` | `redhat` | `docker pull <host>/redhat/ubi9/ubi-minimal:9.6` |
-| `docker.io` | `hub` | `docker pull <host>/hub/alpine:latest` |
+Three things about the seam, none of them visible from either README alone:
 
-All three are prefilled by the migration and re-ensured at every boot, so a fresh deployment has
-them with no manual step. They are ordinary `artifact_repository` rows of type `oci-mirror`, and what
-is cached under one is ordinary `oci_manifest`/`oci_tag` rows — so the hit path is the existing code,
-unchanged, and the explorer browses a mirror namespace exactly as it browses `qits`.
-
-Four rules are worth knowing before pulling through one:
-
-- **A push is `405`, by type.** A mirror never accepts content from a client. Cached upstream content
-  and pushed content must not share a namespace, and because it is the *type* refusing, no
-  deployment can configure its way past it and no repository can drift from one meaning to the
-  other. Same rule the npm proxy carries.
-- **A single-component image under `hub` means `library/`.** `hub/alpine` is `hub/library/alpine`,
-  the docker daemon's own expansion, so both spellings share one cache entry.
-- **A first segment that names no repository at all remaps into `hub`**, on `GET`/`HEAD` only, when
-  a Docker Hub upstream is registered. That exists so the optional Docker Desktop
-  `"registry-mirrors": ["http://localhost:8081"]` setting works — a daemon-configured mirror client
-  asks for bare Hub names. An existing repository always wins its segment, so `/v2/qits/…` never
-  reaches the remap; the consequence is that a Hub organisation sharing a name with a local
-  repository is shadowed, which is the correct precedence here.
-- **A miss fetches.** That is the cache: a `GET` that resolves into a mirror namespace and finds
-  nothing cached fetches from the upstream the row names, verifies the digest while the bytes
-  stream, promotes and serves. See below for what it costs and what it does when the upstream is
-  not there.
-
-#### What a miss does
-
-| asked for | not cached | cached |
-|---|---|---|
-| manifest by **digest** | one upstream `GET`, digest verified, kept **forever** | served; never revalidated |
-| **blob** | one upstream `GET`, digest verified **while streaming**, kept forever | served |
-| manifest by **tag**, within `tag-ttl` | — | served, **zero** upstream traffic |
-| manifest by **tag**, expired | one `GET` | one `HEAD`; unchanged digest is free, a moved one costs one `GET` |
-
-Digest-addressed content is immutable, so it is cached forever and revalidated never. A tag is the
-one mirrored thing that moves — `jdk-25` and `9.6` change under toolchain and security updates — so
-it carries a TTL and is revalidated by `HEAD`, which returns `Docker-Content-Digest` and which
-Docker Hub does not count against its anonymous pull limit. That is what keeps builds current with
-**zero curation** and at no measurable cost.
-
-**Children are fetched lazily.** A pulled multi-arch index binds the moment it arrives, with no
-child present: pull order is the reverse of push order, so the push path's "everything it references
-must already exist" rule is deliberately not applied to a mirror bind. Each child arrives as its own
-miss when a client asks for it by digest, so an architecture nobody pulls is never paid for — and
-since a multi-arch pull counts once per architecture *fetched*, lazy is the rate-limit-correct order
-as well as the cheap one.
-
-**Offline, the cache is strictly additive.** Manifests-by-digest and blobs serve forever with no
-upstream contact. An expired tag whose upstream is unreachable **serves stale** — so once a base
-image has been pulled once, every later build succeeds with the internet down. Only a never-cached
-reference can fail, and the answer says which of the two things went wrong:
-
-- upstream unreachable, nothing cached → **`502`**, naming the upstream. Not a `404`: nothing here
-  knows whether the image exists, and "no such manifest" would send a puller to debug the wrong
-  registry.
-- upstream answered and has no such reference → **`404`**, naming the registry that was asked.
-- the upstream row was **deleted** while its cache stayed → **`404`** saying no upstream is
-  registered, so nothing can be fetched into the namespace. What is already cached keeps serving.
-
-Never a `500`: a network miss is not this service failing.
-
-Four behaviour keys, and no key naming an upstream — that is what the table is for:
-
-| key | default | what it bounds |
-|---|---|---|
-| `qits.artifacts.oci.mirror.tag-ttl` | `PT1H` | how long a cached tag is served without asking |
-| `qits.artifacts.oci.mirror.manifest-timeout` | `PT30S` | one manifest `GET`/`HEAD`, including the token hop |
-| `qits.artifacts.oci.mirror.blob-timeout` | `PT10M` | one blob transfer |
-| `qits.artifacts.oci.mirror.endpoint-override` | *(blank)* | dial every upstream here instead of at its domain — the test seam; blank in every deployment |
-
-Every upstream wait carries one of those timeouts and there are no retries. This is the platform's
-first hard runtime dependency on the public internet **inside a request**, and after the `FROM`
-rewrite it sits under every service build, so a hung upstream must never pin a worker thread. Layer
-size is capped by the existing `qits.artifacts.oci.max-layer-size` (1G), which is the first knob to
-check if an upstream layer ever exceeds it.
-
-Upstreams that challenge for a token get the anonymous bearer dance — a `401` carrying a
-`WWW-Authenticate: Bearer` realm is answered with a plain token `GET` and the request is retried,
-once. Docker Hub demands this even for public images; quay.io and Red Hat mostly do not, so the
-client sends every request bare first and only pays the hop when challenged. Tokens are cached in
-memory per scope, which is per repository — a twelve-layer pull costs **one** token request.
-
-Managing upstreams is four routes under the JSON API, writes token-guarded like every other write
-here:
-
-```
-GET    /artifacts/api/mirror-upstreams            every upstream, by namespace
-GET    /artifacts/api/mirror-upstreams/{domain}    one of them
-PUT    /artifacts/api/mirror-upstreams/{domain}    {"slug":"quay"} — idempotent; creates the namespace too
-DELETE /artifacts/api/mirror-upstreams/{domain}    stop mirroring; THE CACHE STAYS
-```
-
-`PUT` writes both rows in one transaction — the upstream and the `oci-mirror` repository its
-namespace resolves to — because either alone is useless: a repository row with no upstream is a
-namespace nothing can be fetched into, and an upstream with no repository row is a namespace nothing
-resolves to. Re-pointing a registered upstream at another namespace is `400`: content is cached under
-the old name, so moving it is a delete and a create, where an operator can see what happens to the
-cache.
-
-`DELETE` removes **only** the upstream row. The namespace and every cached byte under it stay,
-which is the append-only posture this store has everywhere — what ends is the future, not the past.
-
-Credentials are out of scope until an upstream needs one, and the reason is worth stating because
-the intuition is natural and wrong: a client's `docker login` does **not** travel through a
-pull-through hop. The daemon authenticates to the registry it dials — this one — and the mirror
-dials upstream as itself, so a private upstream needs a *server-side* credential, which becomes an
-additive column pair on the upstream row the day it is needed. Every upstream above is anonymous.
+- **The hosted half refuses nothing new.** `/v2` here accepts, serves and conforms exactly as it did.
+  What left is a second *kind* of namespace, not a restriction on this one.
+- **`oci-mirror` is an unclaimed type here, and V7 still prefills three rows of it.**
+  `quarkus.arc.exclude-types` drops `OciMirrorProfile` from bean discovery, so `{"type":"oci-mirror"}`
+  on the ensure endpoint is a `400` naming the types that *are* registered — and the `hub`, `quay`
+  and `redhat` rows the migration left behind are **omitted from the explorer listing and from the GC
+  plan** rather than reported with figures nothing here can compute. The lineage is carried through
+  the split byte for byte, so removing those rows is a cutover data question rather than a migration.
+- **Excluding the profile does not unregister the wire code, and that is a leftover rather than a
+  feature.** `RegistryRoutes` injects `MirrorUpstream` outright and `resolveForPull` matches the type
+  by string, so a V7-prefilled namespace still resolves for a `GET` and a first segment naming no
+  repository row still remaps into `hub`. A pull aimed here can therefore still reach docker.io.
+  Point dockerd's `registry-mirrors`, every rewritten `FROM` and every other client at
+  qits-platform-mirror's address instead: nothing should arrive here for an image this platform did
+  not push, and the day those rows go the path goes with them.
 
 ### Reaching it from a client
 
@@ -324,6 +235,10 @@ insecure = true
 
 `localhost` is special-cased as insecure by both, so a same-host smoke test needs neither — and a
 test that only ever uses `localhost` proves nothing about a real deployment.
+
+A client that also pulls third-party images needs a **second** entry, for qits-platform-mirror's
+address. That is the whole client-side cost of the split on this format, and there is no
+`registry-mirrors` line here: a daemon-configured mirror belongs at the mirror.
 
 Through qits-gateway the registry is reached at the same `/v2` on the gateway's port. The gateway
 routes it from the **artifacts** `proxy-hosts` entry (there is no `…_V2` key) and allow-lists
@@ -449,34 +364,32 @@ either the registry is wrong, or a capability declaration above is.
 
 ## The npm registry
 
-> **Both halves of this format ship in `qits-registries-npm`, and this service wires only the hosted one.** The pull-through cache half — its repository type, its upstream configuration and its eviction GC — is qits-platform-mirror's, and the paragraphs below that describe it describe code this deployment does not register.
+> **Both halves of this format ship in `qits-registries-npm`, and this service registers only the hosted one.** The pull-through cache half — its repository type, its upstream configuration and its eviction GC — is qits-platform-mirror's; "The proxy" below is what is left at the seam.
 
-`NpmRoutes` serves the npm registry API at `/artifacts/npm/<repository>/…`. Two repository types
-share those routes, and which one a repository is decides what it will do:
+`NpmRoutes` serves the npm registry API at `/artifacts/npm/<repository>/…`. One repository type is
+registered here, and it is the hosted one:
 
 | Type | Wire name | Seeded row | What it is |
 |---|---|---|---|
 | `NPM_PACKAGES` | `npm-packages` | `npm` | hosted — accepts publishes |
-| `NPM_PROXY` | `npm-proxy` | `npmjs` | a pull-through cache of an upstream registry; a `PUT` is `405` |
 
 Unlike `/v2` the mount point is an ordinary choice: npm accepts a registry URL of any depth, so
 there is no second root-level segment and no gateway change — this lives inside the `/artifacts`
 prefix like everything else. The segment is still a literal in the code, and `NpmRegistryTest` is
 the only thing that would notice it drifting.
 
-Cached upstream content and published content **never share a namespace**, which is the same rule
-the OCI mirror settled, and it is enforced by the type rather than by configuration: a repository's
-type is immutable once chosen, so a mirror cannot become a publish target by editing a setting.
-Consumers need no merged "group" view because npm does the routing client-side — one `.npmrc`:
+Cached upstream content and published content **never share a namespace**. That used to be a rule
+about types and is now a fact about deployments: the cache is another service. Consumers still need
+no merged "group" view, because npm does the routing client-side — one `.npmrc`, two addresses:
 
 ```ini
-registry=http://qits-platform-artifacts:8080/artifacts/npm/npmjs/     # everything, through the cache
+registry=http://qits-platform-mirror:8080/artifacts/npm/npmjs/         # everything, through the cache
 @qits:registry=http://qits-platform-artifacts:8080/artifacts/npm/npm/  # ours, from the hosted repo
 ```
 
-Both rows are seeded at startup alongside `qits`, so a fresh deployment needs no manual step.
-Additional npm repositories are created with the ordinary ensure endpoint, `{"type":"npm-packages"}`
-or `{"type":"npm-proxy"}`.
+The `npm` row is seeded at startup alongside `qits`, `maven`, `daemons` and `docs`, so a fresh
+deployment needs no manual step. Additional repositories are created with the ordinary ensure
+endpoint, `{"type":"npm-packages"}`.
 
 ### The wire
 
@@ -529,38 +442,17 @@ while a configured value would be right for one caller and quietly wrong for the
 
 ### The proxy
 
-A `npm-proxy` repository fronts `qits.artifacts.npm.proxy.upstream` (default
-`https://registry.npmjs.org`), so npmjs is hit once per tarball rather than once per CI run. The two
-documents get opposite treatment, which is the whole design:
+It is not here. The `npm-proxy` type, the `qits.artifacts.npm.proxy.*` keys, the packument TTL with
+its `ETag` revalidation and its serve-stale behaviour, and the tarball miss path are
+**qits-platform-mirror**'s, at its own address and in its own README. The `npmjs` row is seeded
+there.
 
-- **Packuments mutate** — a new version appears upstream with nothing here changing — so they are
-  cached with a TTL (`qits.artifacts.npm.proxy.packument-ttl`, default `PT5M`) and revalidated with
-  `ETag`/`If-None-Match` on expiry, which costs a `304` rather than a document. Upstream's document
-  is stored **verbatim** and every `dist.tarball` is rewritten at *serve* time, not at store time:
-  the rewrite target depends on the request, and the original URLs are what the tarball miss path
-  fetches from. When upstream is unreachable the stale copy is served anyway — CI keeps installing
-  through an npmjs outage, which is half of why this exists.
-- **Tarballs are immutable**, so a hit is `sendFile` and a miss streams from upstream through
-  `BlobStore.stage()` (hashing while streaming, for free), promotes, and serves. A proxied version
-  gets its `npm_version` row written lazily on that first pull, which is what keeps the tarball
-  route one code path for both types.
-
-`integrity` is re-emitted **unmodified**, and nothing here verifies it. That is the safety argument
-rather than a gap: the client verifies the bytes end to end against a hash this service never
-computed, so the proxy cannot silently corrupt a package even in principle — while a mid-flight
-check would only add a way for a stale-but-correct upstream document to break an install.
-
-Growth is unbounded, exactly like the OCI mirror's; `artifact-access-tracking.md` is the
-prerequisite for cleanup and now has two more clients.
-
-**The upstream client is a plain JDK `HttpClient`** — no extension, no reflection registration, no
-new dependency — and it is the first outbound TLS in this process. The suite cannot exercise real
-TLS by construction (clone-alone, no network: `StubNpmRegistry` is an in-process upstream), so
-**a deployment gets one manual smoke against real npmjs**, once, on the native binary:
-
-```
-curl -s http://<host>/artifacts/npm/npmjs/left-pad | head -c 200
-```
+What this side guarantees: the hosted registry above is unchanged, `NpmProxyProfile` is excluded
+from bean discovery so `{"type":"npm-proxy"}` is a `400` naming the registered types, and — unlike
+the OCI mirror — **no `npm-proxy` row was ever prefilled by a migration**. So there is nothing left
+behind to omit from a listing, and no path through this service dials npmjs: `NpmUpstream` still
+rides in on the shared jar, and reaching it needs a repository row of a type that cannot be
+created.
 
 ### No login here either
 
@@ -588,14 +480,14 @@ publish-if-absent is the versioning convention, so a tag only ever moves as part
 
 ## The maven repository
 
-> **Both halves of this format ship in `qits-registries-maven`, and this service wires only the hosted one.** The pull-through cache half — its repository type, its upstream configuration and its eviction GC — is qits-platform-mirror's, and the paragraphs below that describe it describe code this deployment does not register.
+> **Both halves of this format ship in `qits-registries-maven`, and this service registers only the hosted one.** The pull-through cache half — its repository type, its upstream configuration and its eviction GC — is qits-platform-mirror's; "The pull-through cache" below is what is left at the seam.
 
 `MavenRoutes` serves a maven repository at `/artifacts/maven/<repository>/<path…>`, the npm shape
 verbatim: npm lives at `/artifacts/npm/npm/<pkg>`, so the platform's own library deploys to
 `/artifacts/maven/maven/eu/wohlben/qits/qits-eventstream/1.0.0/qits-eventstream-1.0.0.jar`. The
-first segment is the `artifact_repository` row; `maven` (type `maven-packages`, hosted) and
-`central` (type `maven-proxy`, a pull-through cache of Maven Central) are both seeded at startup,
-alongside `npm` and `npmjs`. Maven accepts a repository URL of any depth, so — like npm and unlike
+first segment is the `artifact_repository` row; `maven` (type `maven-packages`, hosted) is seeded at
+startup alongside `qits`, `npm`, `daemons` and `docs`. Maven accepts a repository URL of any depth,
+so — like npm and unlike
 `/v2` — there is no root-level segment, no gateway change, and no client-side routing story beyond
 declaring the repository.
 
@@ -644,56 +536,22 @@ The deploy `PUT` streams rather than buffers, capped by `qits.artifacts.maven.ma
 
 ### The pull-through cache
 
-A `maven-proxy` repository fronts `qits.artifacts.maven.proxy.upstream` (default
-`https://repo1.maven.org/maven2`), so Central is hit once per file rather than once per build. It
-runs on the routes above and **inverts two of the three derivations**, because nothing it holds is
-ours:
+It is not here. The `maven-proxy` type, the `qits.artifacts.maven.proxy.*` keys, the
+cached-rather-than-derived `maven-metadata.xml` with its TTL and revalidation, the pulled-through
+upstream checksums and the `central` row are **qits-platform-mirror**'s, at its own address and in
+its own README.
 
-- **`maven-metadata.xml` is cached, not derived.** It is the one maven document that mutates — it
-  lists the versions upstream has — so it is cached with a TTL
-  (`qits.artifacts.maven.proxy.metadata-ttl`, default `PT1H`) and revalidated on expiry with
-  `If-None-Match`, or `If-Modified-Since` for an upstream too old to answer an etag. Deriving it
-  from the cached rows the way the hosted side does would answer with the versions this cache
-  happens to hold, and a resolver told a subset stops looking. When upstream is unreachable the
-  stale copy is served anyway — a build keeps resolving through a Central outage, which is half of
-  why this exists.
-- **A file's checksums are upstream's own, cached.** `.sha1`/`.md5`/`.sha256`/`.sha512` beside an
-  artifact are immutable paths like any other and are pulled through unchanged, so the maven client
-  verifies the jar end to end against a hash this service never computed. Deriving them here would
-  be worse than useless: a hash computed from bytes this service downloaded agrees with itself
-  whatever arrived, which removes the client's check while looking like it kept it.
-- **The metadata's own checksum siblings ARE derived**, and that is the exception the rule needs.
-  Upstream's `maven-metadata.xml.sha1` is a hash of whatever its document says *now*, which is a
-  different document from the one inside our TTL the moment a version is released — so proxying it
-  would hand every client a checksum that does not match the bytes beside it. Deriving it from the
-  cached document makes the two consistent by construction.
-- **Everything else is an immutable path**: a hit is `sendFile`, a miss streams from upstream
-  through `BlobStore.stage()` (hashing while streaming, for free), promotes, and writes an ordinary
-  `maven_artifact` row. That row is what keeps the serve path **one** code path for both maven
-  types, and what the census, the explorer and the collector all read without a line of new code.
-
-**A `PUT` is `405`, refused by type** — the rule `npm-proxy` and `oci-mirror` settled: cached
-upstream content and deployed content must never share a namespace, and no repository can drift from
-one meaning to the other because a type is immutable.
-
-SNAPSHOT paths need no special handling: Central hosts no snapshots, so they miss upstream and 404
-honestly.
-
-**The upstream client is a plain JDK `HttpClient`**, `NpmUpstream`'s shape verbatim — no extension,
-no reflection registration, no new dependency. Two bounded timeouts (30 s for a document, 10 minutes
-for an artifact) and **no retries**: this sits inside a request on a worker thread, so a hung
-upstream must cost one bounded wait. The suite cannot exercise real TLS by construction
-(clone-alone, no network: `StubMavenRepository` is an in-process upstream), so a deployment gets one
-manual smoke against real Central, once, on the native binary:
-
-```
-curl -sI http://<host>/artifacts/maven/central/org/slf4j/slf4j-api/2.0.13/slf4j-api-2.0.13.jar
-```
+What this side guarantees: the hosted repository above is unchanged — the derived metadata, the
+derived checksums and the three path classes are exactly as described. `MavenProxyProfile` is
+excluded from bean discovery, so `{"type":"maven-proxy"}` is a `400` naming the registered types,
+and no `maven-proxy` row was ever prefilled by a migration, so nothing is left behind to omit from a
+listing and no path through this service dials Central. A build resolving third-party jars declares
+the mirror as its repository; `distributionManagement` still names this one.
 
 ## The daemon binaries
 
 `DaemonRoutes` serves the platform's own executables at `/artifacts/daemons/<name>/<version>`.
-`daemons` (type `daemon-binaries`) is seeded at startup alongside `npm`, `npmjs` and `maven`.
+`daemons` (type `daemon-binaries`) is seeded at startup alongside `qits`, `npm` and `maven`.
 
 ```
 PUT      /artifacts/daemons/<name>/<version>      publish — streams; 201 with the computed digest
@@ -747,7 +605,7 @@ while passing every test small enough to be quick.
 ## The documentation bundles
 
 `DocsRoutes` serves published documentation sites at `/artifacts/docs/<repository>/<site>/-/<version>`.
-`docs` (type `docs`) is seeded at startup alongside `npm`, `npmjs`, `maven` and `daemons`.
+`docs` (type `docs`) is seeded at startup alongside `qits`, `npm`, `maven` and `daemons`.
 
 ```
 PUT  /artifacts/docs/<repo>/<site>/-/<version>          publish one bundle — a streamed .tar.gz
@@ -818,14 +676,16 @@ operation carries `@Operation(hidden = true)` as everything here does, so `docs/
 
 ```
 GET /artifacts/api/repositories                                    every repository
-GET /artifacts/api/repositories/{repo}/images                      an OCI repository, hosted or mirror
+GET /artifacts/api/repositories/{repo}/images                      an OCI repository
 GET /artifacts/api/repositories/{repo}/images/{image}/tags         one image's tags
 GET /artifacts/api/repositories/{repo}/images/{image}/manifests    every manifest, tagged or not
-GET /artifacts/api/repositories/{repo}/packages                    an npm repository, either type
+GET /artifacts/api/repositories/{repo}/packages                    an npm repository
 GET /artifacts/api/repositories/{repo}/packages/{package}/versions one package's versions
 GET /artifacts/api/store/summary                                   the whole store, ten ways
-GET /artifacts/api/mirror-upstreams                                the registries this one mirrors
 ```
+
+`GET /artifacts/api/mirror-upstreams` was a fifth route and is gone with its controller — which
+public registry is mirrored is qits-platform-mirror's question, and it answers it.
 
 | Route | Body |
 |---|---|
@@ -836,7 +696,11 @@ GET /artifacts/api/mirror-upstreams                                the registrie
 | `packages` | `{"packages":[{"name","versionCount","latest"}]}` |
 | `versions` | `{"versions":[{"version","tarballSizeBytes","publishedAt","accessedAt","distTags"}]}` |
 | `store/summary` | `{"ociPerImageSumBytes","ociUnionBytes","ociMirrorBytes","orphanBytes","npmPublishedBytes","npmProxyTarballBytes","npmProxyPackumentBytes","mavenPublishedBytes","mavenProxyBytes","daemonBinaryBytes","diskTotalBytes"}` |
-| `mirror-upstreams` | `{"upstreams":[{"domain","slug","createdAt","cachedImages"}]}` |
+
+**The summary's four cache figures are structurally zero**, and they keep their places in the record
+rather than being removed: this service registers no cache type, so no repository row can carry one
+and the census has nothing to attribute — but "nothing cached" is an answer a reader needs, whereas a
+missing field reads as a figure someone forgot. qits-platform-mirror reports its own.
 
 Details a client trips over if it does not know them:
 
@@ -851,9 +715,8 @@ Details a client trips over if it does not know them:
   Layer blobs remain untracked because a globally deduplicated blob cannot be attributed to one
   manifest or tag from its request.
 - The three protocol tables track the same way (V11), on the same hour, so the settled GC can reason
-  about every type it is configured for. An npm tarball `GET`/`HEAD` touches its `npm_version` row —
-  one rule for both npm types, since a proxied version is an ordinary row there, and the proxy
-  packument's `fetchedAt` stays a different fact (document revalidation, not byte demand). A maven
+  about every type it is configured for. An npm tarball `GET`/`HEAD` touches its `npm_version` row.
+  A maven
   `GET`/`HEAD` of a stored file touches its `maven_artifact` row; derived `maven-metadata.xml` and
   derived checksums touch nothing, because they are not that row's bytes. A daemon `GET`/`HEAD`
   touches its `daemon_binary` row. **The digest-addressed daemon download on `/v2` is deliberately
@@ -862,16 +725,16 @@ Details a client trips over if it does not know them:
   never an access timestamp.
 
 - **`itemCount` means something different per type**, on purpose: images for `oci-images`, packages
-  for either npm type, deployed files for `maven-packages`, published versions for
+  for `npm-packages`, deployed files for `maven-packages`, published versions for
   `daemon-binaries`, `artifact_record` rows for the two CI
   types. One number with a type-dependent meaning beats five that are always null.
+- **A repository whose type no profile here claims is not listed at all**, and `itemCount` refuses
+  it rather than answering zero. That is the `oci-mirror` rows V7 prefills: counting them would mean
+  answering "how many things are in it" about a type this service cannot read, and reporting zero
+  would read as an empty repository rather than as somebody else's.
 - **404 is an unknown repository; 400 is a repository of the wrong type.** An npm repository has no
   images and never will, and reporting that as an empty list would read as an image registry that
-  lost its images. Both OCI types answer the image routes: a mirror namespace holds the same rows,
-  so it browses like any other, and `cachedImages` on an upstream is that same count.
-- **`ociMirrorBytes` is counted apart from `ociUnionBytes`**, because the two answer different
-  questions: what this platform published, and what it cached from three public registries and could
-  re-fetch.
+  lost its images.
 - **An unknown *image* is `200` with an empty list**, not a 404 — an image is not a row, so there is
   nothing to be absent. The same answer `tags/list` gives.
 - **`{image}` and `{package}` may contain slashes**, and both spellings resolve: `build-images%2Fci-base`
@@ -882,12 +745,6 @@ Details a client trips over if it does not know them:
 - **`createdAt` on a tag is `oci_tag.updated_at`**, when the tag last came to name that digest. A tag
   is the registry's one movable pointer and has no other timestamp; for a tag that never moves —
   which is every commit-sha tag this platform pushes — it is when the image was pushed.
-- **`latest` is null for every proxied package**, and `distTags` is empty for every proxied version.
-  A proxy caches tarballs and documents and stores no dist-tag rows.
-- **A proxied package appears only once its tarball has been pulled.** The listing comes from
-  `npm_version`, not from `npm_proxy_packument`, whose only index is its primary key — listing that
-  table is a full scan of hundreds of CLOBs. The cost is that a cached document with no cached bytes
-  is missing from the list, which is the honest thing for a store view to omit.
 - **`tarballSizeBytes` may be null.** There is no size column on `npm_version`; the figure is the
   file's size on disk, and a row can outlive its bytes. Zero would read as an empty tarball.
 
@@ -930,16 +787,11 @@ layers and configs get none by design, and `oci_manifest.size_bytes` is the size
   recomputed from the manifest rows on every request. That is a few thousand map merges over an
   index scan, and it is cheaper than being wrong after a push.
 - The **disk index is invalidated by the write.** Every byte this service stores lands through
-  `BlobStore.promote` — the registry's layers, npm's tarballs and publishes, the proxy's
-  pull-throughs, the JSON API's uploads — so that one call is the complete set of events that can
+  `BlobStore.promote` — the registry's layers, npm's tarballs and publishes, maven's deploys, the
+  daemon and docs uploads, the JSON API's — so that one call is the complete set of events that can
   make a directory listing stale, and it is where `invalidate()` is called from. A 60-second age
   ceiling is a second belt for what a process cannot see: a volume restored under it, or a sibling
   writing the same directory. A test that wipes the directory says so explicitly.
-
-`npmProxyPackumentBytes` is the one figure that comes from neither: it is
-`sum(length(npm_proxy_packument.doc))`, summed in SQL rather than in the JVM because those documents
-total ~650 MB — **85% of the H2 file**, and 3.8× the tarballs they index. A UI reporting only the
-proxy's disk usage is off by nearly 4×. It is counted in characters; the documents are ASCII JSON.
 
 The eleven figures reconcile in exactly one way, which is the panel's whole claim:
 
@@ -950,6 +802,13 @@ diskTotalBytes = ociUnionBytes + npmPublishedBytes + npmProxyTarballBytes
 
 `ociPerImageSumBytes` sits above `ociUnionBytes` by whatever images share, and
 `npmProxyPackumentBytes` is outside the identity because those bytes are rows, not files.
+
+**The four cache terms are structurally zero here** — no cache type is registered, so nothing can be
+attributed to one. The identity therefore has one known hole, and it is the split's leftover rather
+than a bug in the arithmetic: bytes cached under the `oci-mirror` rows V7 prefills are still reached
+by their surviving `oci_manifest` rows, so the census does not call them orphans, while
+`ociMirrorBytes` reports `0`. They are in no term. Reclaiming those rows is the cutover action that
+closes it.
 
 **`orphanBytes` is not a rounding error, and it is the figure `daemon-binaries` exists to empty.**
 This store holds 124 MiB in three ELF binaries — the ci-daemon — uploaded through the OCI
@@ -1030,12 +889,12 @@ one is not a special ceremony, it is the ordinary one performed while nobody yet
    nothing runs on a timer; the plan it executes is computed inside that request.
 4. **Verify four things, in this order:**
    - `GET /artifacts/api/store/summary` — the identity still balances
-     (`diskTotal = ociUnion + npmPublished + npmProxyTarballs + mavenPublished + mavenProxy +
-     orphans`), which is the census and the disk agreeing after a delete;
+     (`diskTotal = ociUnion + npmPublished + mavenPublished + daemonBinaries + orphans`, the cache
+     terms being zero here), which is the census and the disk agreeing after a delete;
    - a **qits-cd restart still pulls** — restart one deployed application and watch it come back
      from its pinned sha, which is the pins section proved against reality;
-   - an **evicted proxy package re-caches** — install something the run evicted and watch it come
-     back from upstream, which is what "a cache holds re-fetchable content" means when it is true;
+   - a **kept release still installs** — install one of the last two versions of a package the run
+     touched, which is the release belt proved rather than assumed;
    - the receipt's `withheldByGraceWindow` — a young store withholds everything, and that no-op is
      the mechanism working rather than a failure to investigate.
 
@@ -1076,8 +935,9 @@ not one bespoke rule per type, mapped onto the types by configuration.**
 
 - **`CacheEvictionStrategy`** — a pull-through cache holds somebody else's re-fetchable content, so
   everything unaccessed past the window goes and a live pin is the only thing that stays regardless.
-  It has no release rule on purpose: keeping a mirrored tag because *upstream* calls it a release is
-  how a mirror never shrinks.
+  **It is not on this classpath any more**: it went to qits-platform-mirror with the three types it
+  collected. The doctrine is named here because the other engine is one half of a pair, and because
+  a `cache` value on the mapping key below is still what a deployment would be refused for.
 - **`OwnArtifactsStrategy`** — the platform's own artifacts keep the **last 2 released versions per
   identity group** whatever their age, plus everything a live pin names; the rest ages out. Anything
   older survives on *use* — an old release someone still installs is accessed — rather than on
@@ -1107,22 +967,26 @@ public interface GcTypeAdapter {
 first access, so something cached or published an hour ago reads as young rather than never-read.
 The adapter folds that in; an engine only compares it.
 
-The mapping is `qits.artifacts.gc.type.<wire-name>.strategy` (`cache`, `own`, `excluded`) and
+The mapping is `qits.artifacts.gc.type.<wire-name>.strategy` (`own` or `excluded` here) and
 `….window` (ISO-8601), shipped in the `gc` jar's own `META-INF/microprofile-config.properties`.
-Every `RepositoryType` must have an entry — a type with none is **refused**, not defaulted, because
-a type nobody configured is a decision nobody took.
+Every **registered** `RepositoryType` must have an entry — a type with none is **refused**, not
+defaulted, because a type nobody configured is a decision nobody took. The three cache lines left
+with the engine, which is consistent: their profiles are not registered either, so no row can carry
+one.
 
 | type | strategy | window |
 |---|---|---|
-| `oci-mirror`, `npm-proxy` | `cache` | `P30D` |
-| `maven-proxy` | `cache` | `P90D` (a library is resolved when something builds against it, which is `maven-packages`' sentence and does not stop being true because the jar is somebody else's) |
 | `oci-images`, `npm-packages` | `own` | `P30D` |
-| `maven-packages`, `daemon-binaries` | `own` | `P90D` |
+| `maven-packages`, `daemon-binaries`, `docs` | `own` | `P90D` |
 | `ci-screenshots`, `ci-videos` | `excluded` | — (a window beside a type nobody collects reads as a running rule) |
 
-**Both engines are live over every configured type**, which is the first change to what dies on
-this platform: six types used to condemn nothing between them. What each one condemns, in one line
-each — the sections below carry the reasoning:
+`maven-packages`, `daemon-binaries` and `docs` get the longer window for one reason in three
+spellings: a library is resolved when something builds against it, a daemon binary when a runner
+starts, and a version's documentation while somebody is on that version — and none of those
+cadences is a month.
+
+**The own engine is live over every configured type**, which is the first change to what dies on
+this platform. What each one condemns, in one line each — the sections below carry the reasoning:
 
 | type | engine, window | identity that dies | what keeps it | liveness expression |
 |---|---|---|---|---|
@@ -1130,11 +994,9 @@ each — the sections below carry the reasoning:
 | `npm-packages` | `own`, `P30D` | a published version | the last 2 releases by semver; anything a dist-tag names; anything installed inside the window | `npm_version.tarball_blob_id` of survivors |
 | `maven-packages` | `own`, `P90D` | a **coordinate** — one version's whole file set | the last 2 release versions; the newest deployable set of every snapshot line; anything resolved inside the window | `maven_artifact.blob_id`, sized from the row |
 | `daemon-binaries` | `own`, `P90D` | a `daemon_binary` row | the last 2 versions; both rungs qits-ci names; a pinned digest's bytes; anything downloaded inside the window | `daemon_binary.blob_id`, sized from the row |
-| `oci-mirror` | `cache`, `P30D` | a cached tag, or a manifest no tag names | anything pulled inside the window; anything a live pin names by digest | manifest closure over survivors |
-| `npm-proxy` | `cache`, `P30D` | a cached version, or a cached packument | anything installed inside the window; anything a live pin names by digest | `npm_version.tarball_blob_id` of survivors |
-| `maven-proxy` | `cache`, `P90D` | a cached **file** — a path, not a coordinate — or a cached `maven-metadata.xml` | anything resolved inside the window; anything a live pin names by digest | `maven_artifact.blob_id`, sized from the row |
+| `docs` | `own`, `P90D` | a published **version** of a site — never a file, because `docs_file` cascades | the last 2 versions of every site; anything read inside the window | `docs_file.blob_id` of surviving versions |
 | `ci-screenshots`, `ci-videos` | `excluded` | **nothing** — no engine is configured, so nothing of them is ever deleted | everything | `artifact_record.blob_id`, reported live |
-| git host (not an `artifact_repository` type) | none | superseded pack descriptions after a repack | every ref, current packs | `PackCatalog.list` per repo — its own later workstream |
+| `oci-mirror`, `npm-proxy`, `maven-proxy` | none here | **nothing** — no profile claims them, so `GcPlanner` omits them rather than reporting zeros | everything | qits-platform-mirror's, with the cache engine |
 
 `GcTypeConfigTest` is the guard over that table and is edited **deliberately, once per workstream**:
 a type whose dead set moves has its new set written out there, and every other type stays
@@ -1326,10 +1188,11 @@ a newer main build existed and now dies only when cold — which loosens the rul
 A version that does not parse as semver is never a release (it cannot be ordered, so it cannot be
 one of the last two of anything) and is not thereby condemned either: the window decides.
 
-`npm-proxy` shares the `npm_version` table and is collected by a **different engine over the same
-table**: the hosted rows by the rules above, the cached ones by eviction (`NpmProxyGcStrategy`, its
-own section below). The scope is filtered by the repository row's *type*, and asserted in both
-suites, because a leak in either direction is the one mistake these two types can make.
+**The adapter still filters `npm_version` by the repository row's type**, although no `npm-proxy`
+row can exist here any more. It is one line and it stays: the table is shared with the cache half in
+the `qits-registries-npm` jar, a deployment carrying leftover rows would otherwise have them
+collected under the hosted rules, and a filter removed because the other type is elsewhere is a
+filter nobody restores when it comes back.
 
 **The tombstone is npm's alone, and docker needs nothing like it.** Version immutability is enforced
 by looking for the row (publish over an existing version is `403`), so deleting a row would quietly
@@ -1349,92 +1212,34 @@ only through the `NpmRegistryCollection` facade, and its one caller is
 was never a step someone had to remember, and both guarantees live in the mechanism where no path
 around them exists.
 
-### The three caches — the first types that ever deleted something
+### The three caches — gone with the engine that collected them
 
-`oci-mirror`, `npm-proxy` and `maven-proxy` run one engine (`CacheEvictionStrategy`) over one rule:
-**everything unaccessed for longer than the configured window is evicted, and a live pin outranks
-the window.** The first two used to condemn nothing — the mirror said `append-only pending access
-tracking` out loud, npm-proxy was unclaimed — and both conditions are discharged: access tracking
-shipped (V9 for the OCI tables, V11 for `npm_version` and `maven_artifact`) and the settlement
-configured them as `cache`. `maven-proxy` arrived with its type already on the engine, which is what
-a settled mapping is for.
+`oci-mirror`, `npm-proxy` and `maven-proxy` ran one engine (`CacheEvictionStrategy`) over one rule:
+everything unaccessed for longer than the configured window is evicted, a live pin outranks the
+window, and eviction writes no tombstone because re-fetching is what a cache is for. All of it — the
+engine, the three adapters, the proxy eviction doors on the npm and maven registry services, and the
+windows that mapped the types onto it — went to **qits-platform-mirror** with the types it collected.
+Its README carries the rules this section used to.
 
-What each one calls an identity, and what deleting it costs:
+What is left here is the seam, and it is three sentences:
 
-| | identity | effective access | eviction costs |
-|---|---|---|---|
-| `oci-mirror` | a cached tag; a manifest **no tag names** (an index's child, or a manifest an upstream tag moved off) | `max(updated_at/created_at, accessed_at)` | one upstream pull, per architecture actually asked for |
-| `npm-proxy` | a cached version (`npm_version` row, proxy repositories only); a cached packument (`npm_proxy_packument` row) | version: `max(created_at, accessed_at)`; packument: `max(fetched_at, the newest access among that package's versions)` | one upstream request per document and per tarball |
-| `maven-proxy` | a cached **file** (`maven_artifact` row, proxy repositories only); a cached document (`maven_proxy_metadata` row) | file: `max(created_at, accessed_at)`; document: `max(fetched_at, the newest access among the files cached under its directory)` | one upstream request per file and per document |
+- **The `gc` jar's type mapping has no line for any of the three.** `GcTypeConfig.of` refuses a
+  registered type with no configuration rather than defaulting it, and the three cache lines left
+  with the engine — which is consistent, because their profiles are not registered either.
+- **A repository row whose type no profile claims is not planned.** The `oci-mirror` rows V7
+  prefills are exactly that: `GcPlanner` omits them, so a plan says nothing about them rather than
+  reporting zeros that read as a rule that ran and found nothing. The same rule keeps them out of
+  the explorer listing.
+- **Their cached bytes are not orphans, and no sweep can reach them.** A blob becomes a candidate
+  only by *losing* its last identity row to a strategy's own deletion, and nothing here deletes a
+  cached `oci_manifest` or `oci_tag` row — so those blobs stay held by rows the census still walks.
+  The store summary's four cache figures are **structurally zero** (this service registers no cache
+  type), so leftover cached bytes are counted in no term of the reconciliation above either.
+  Reclaiming them is a cutover action, by hand, once.
 
-Five things are load-bearing and each one is a way this could have gone wrong:
-
-- **A manifest a tag names is never a candidate of its own** — its tag is its identity. A child of a
-  *kept* index is, though, and evicting one is not corruption: a mirror pull binds an index first and
-  fetches children lazily, so an index referencing a child with no local row is the normal state of a
-  partially-pulled image. Its bytes survive regardless, because the surviving index still reaches
-  them in the census's closure.
-- **A packument is judged with its versions' access folded in.** `fetched_at` says when the
-  *document* was last revalidated upstream, which a TTL moves on its own; a package whose tarballs
-  are being installed weekly is in use whatever its document's timestamp says.
-- **A cached `maven-metadata.xml` is judged the same way**, with the access of the files cached
-  under its directory folded in. Same argument, same failure without it: an artifact something
-  builds against weekly is in use whatever its document's timestamp says.
-- **Proxy eviction writes no tombstone, and goes through the cache's own doors.** A tombstone
-  records "this version's name is spent forever", which is what a hosted registry owes its consumers
-  and the exact opposite of what a cache owes: the content is upstream's and re-fetching it is the
-  point. So each proxy has doors of its own —
-  `NpmRegistryCollection.evictProxiedVersion`/`evictProxiedPackument` and
-  `MavenRegistryCollection.evictProxiedArtifact`/`evictProxiedMetadata` — which refuse any
-  repository that is not of the cache's type, because in both cases **one table holds both kinds of
-  row**. That type check is what makes "no tombstone" safe to say out loud, and it is asserted from
-  both sides.
-- **`maven-proxy`'s identity is a PATH, where `maven-packages`' is a coordinate.** The hosted type
-  folds a version's files into one identity because half a published version is a broken resolve
-  nothing can repair. A cache repairs itself on the next request, so there is no half-version to
-  prevent — and making a coordinate the unit here would withhold files nothing has asked for in
-  months because one sibling is warm.
-
-Mirrors stay a **separate type** for the reason they always were: `jdk-25` and `9.6` are neither
-calver releases nor build shas, so under docker's rules every mirrored tag would land on the
-unclassified-means-keep backstop. The engines sharpen it — own-ness earns version protection, and a
-cache has none of ours to protect. A mirrored `jdk-25` is *upstream's* release, and keeping it
-forever on that basis is how a mirror never shrinks.
-
-The mirror's tag eviction also clears the tag's `oci_mirror_tag_check` row, **inside
-`OciRegistryService.collectTag`** rather than in the caller: a freshness row for a tag that no longer
-exists is a row nothing would ever read or delete again, and a funnel is the only place a rule like
-that cannot be forgotten by a second caller. The same funnel serves `oci-images`; nothing in it
-reads a repository's type, so no widening was needed to let the mirror through — only that one extra
-line.
-
-#### Reclaiming the H2 file after a sweep (ops)
-
-**Evicting a packument frees no disk, and the report says so on every run.** The documents are CLOBs
-inside the H2 file (660 MB of an 747 MB database, measured 2026-08-01), so a delete returns their
-pages to H2's own free list and the file stays exactly the size it was. `reclaimableBytes` on the
-`npm-proxy` line therefore counts tarball blobs and nothing else, and the type's `note` carries the
-character figure beside that zero. `maven-proxy` carries the same note for the same reason over its
-own `maven_proxy_metadata` documents, which are kilobytes rather than the packuments' hundreds of
-megabytes and are in no store-summary figure at all — without it a run that condemned a hundred documents reads as a
-run that did nothing.
-
-The file shrinks only under `SHUTDOWN COMPACT`, which closes the database, so **nothing in this
-service runs it** — a GC route may not take the platform's store offline. It is a maintenance
-restart, in this order:
-
-1. Run the sweep and read the receipt. Compacting before the rows are gone compacts nothing.
-2. Stop qits-platform-artifacts (the H2 file is embedded; a live process holds it open).
-3. Open the file with the H2 shell — the same JDBC url the service uses, from the same jar:
-   `java -cp h2.jar org.h2.tools.Shell -url "jdbc:h2:file:<data-dir>/artifacts" -user … -sql "SHUTDOWN COMPACT"`.
-   It rewrites the file and exits; the runtime is roughly linear in *live* data, and on the measured
-   747 MB file it is a matter of minutes, not seconds.
-4. Start qits-platform-artifacts and check `GET /artifacts/api/store/summary` — the blob figures are unchanged
-   (this touches no blob), and the database file on the volume is the number that moved.
-
-Take a copy of the file first, as with any offline database operation. A compaction that is
-interrupted leaves the old file behind, which is recoverable; a compaction nobody has a copy of is
-not something to find out about during one.
+The H2-compaction procedure that used to sit here went with the caches as well: it existed because
+evicting a cached packument frees no disk, those documents being CLOBs rather than files, and no
+type this service collects has that shape.
 
 ### `maven-packages`, on the own engine — the one type whose identity is not a row
 
@@ -1470,8 +1275,8 @@ exactly the half-version the identity model exists to prevent.
 Deletion goes through `MavenRegistryCollection` → `MavenRegistryService.collect`, one file at a time
 with the collector removing a whole coordinate's set. No tombstone: a collected release path is a
 coordinate the repository no longer serves at all, and a re-deploy there is a fresh deploy rather
-than a mutation of a live one. `maven-proxy` is the cache beside it — a `cache` in the settlement's
-mapping, with an adapter of its own and no rule of its own; see "The three caches" above.
+than a mutation of a live one. `maven-proxy` was the cache beside it, sharing `maven_artifact`; the
+type-filter on this adapter outlives it for `npm-packages`' reason above.
 
 ### `daemon-binaries`, on the own engine — the type the platform *executes*
 
@@ -1520,10 +1325,9 @@ answer to them is an ops action, once, by hand.
       "ci-videos (excluded): excluded by configuration, so nothing of it is ever deleted — a decision, not a gap — stub: the golden-diff loop has never produced a video.",
       "oci-images (own, P30D): 12 identities condemned, 28 kept, 9 blobs freed, 384.0 MiB reclaimable",
       "npm-packages (own, P30D): 1 identities condemned, 4 kept, 1 blobs freed, 17.5 KiB reclaimable",
-      "npm-proxy (cache, P30D): 2 identities condemned, 2 kept, 1 blobs freed, 20.0 KiB reclaimable — cached packuments are H2 CLOBs, not files: 660287820 characters are cached as this report was produced.",
-      "oci-mirror (cache, P30D): 2 identities condemned, 0 kept, 9 blobs freed, 18.7 MiB reclaimable",
       "maven-packages (own, P90D): 1 identities condemned, 6 kept, 2 blobs freed, 40.3 KiB reclaimable",
-      "daemon-binaries (own, P90D): 1 identities condemned, 2 kept, 1 blobs freed, 41.1 MiB reclaimable"
+      "daemon-binaries (own, P90D): 1 identities condemned, 2 kept, 1 blobs freed, 41.1 MiB reclaimable",
+      "docs (own, P90D): 1 identities condemned, 4 kept, 6 blobs freed, 1.2 MiB reclaimable"
     ]
   },
   "generatedAt": "2026-08-01T12:00:00Z",
@@ -1543,7 +1347,7 @@ answer to them is an ops action, once, by hand.
       "pinCount": 2,
       "keeps": ["blob 9f2c…", "qits-ci-daemon@2026.802.40", "qits-ci-daemon@9f2c…"] }
   ],
-  "types": [                            // all eight, always — including the ones nobody collects
+  "types": [                            // every REGISTERED type, always — including the ones nobody collects
     { "type": "oci-images", "strategy": "OciImageGcStrategy",
       "note": null, "error": null,
       "dead": [{ "repository": "qits", "identity": "qits-ci:3ff84c05…",
@@ -1572,23 +1376,13 @@ answer to them is an ops action, once, by hand.
       "kept": [{ "repository": "maven", "identity": "eu.wohlben.qits:qits-eventstream:1.0.1-20260802.123456-3",
                  "rule": "the newest deployable set of this snapshot version — what the derived maven-metadata.xml resolves to, so a resolver would 404 without it" }],
       "blobsReleased": 2, "blobsSweepable": 2, "reclaimableBytes": 41216 },
-    { "type": "oci-mirror", "strategy": "OciMirrorGcStrategy",
+    { "type": "docs", "strategy": "DocsGcStrategy",
       "note": null, "error": null,
-      "dead": [{ "repository": "hub", "identity": "library/node@sha256:9f2c…",
-                 "rule": "cached content unaccessed for longer than P30D" }],
-      "kept": [{ "repository": "quay", "identity": "quarkus/ubi9-quarkus-mandrel-builder-image:jdk-25",
-                 "rule": "accessed inside the P30D window" }],
-      "blobsReleased": 12, "blobsSweepable": 9, "reclaimableBytes": 402653184 },
-    { "type": "npm-proxy", "strategy": "NpmProxyGcStrategy",
-      "note": "cached packuments are H2 CLOBs, not files: 660287820 characters are cached as this report was produced. Evicting one … reclaims 0 bytes on disk … SHUTDOWN COMPACT …",
-      "error": null,
-      "dead": [{ "repository": "npmjs", "identity": "left-pad (packument)",
-                 "rule": "cached content unaccessed for longer than P30D" },
-               { "repository": "npmjs", "identity": "left-pad@1.3.0",
-                 "rule": "cached content unaccessed for longer than P30D" }],
-      "kept": [{ "repository": "npmjs", "identity": "chalk@5.3.0",
-                 "rule": "accessed inside the P30D window" }],
-      "blobsReleased": 1, "blobsSweepable": 1, "reclaimableBytes": 20480 },
+      "dead": [{ "repository": "docs", "identity": "qits-eventstream@2026.601.10",
+                 "rule": "superseded and unaccessed for longer than P90D" }],
+      "kept": [{ "repository": "docs", "identity": "qits-eventstream@2026.802.40",
+                 "rule": "among the last 2 released versions of this identity group — releases are kept by policy, not by access" }],
+      "blobsReleased": 6, "blobsSweepable": 6, "reclaimableBytes": 1258291 },
     { "type": "ci-screenshots", "strategy": "CiScreenshotsGcStrategy",
       "note": "excluded by configuration: no engine is configured for this type, so nothing of it is ever deleted — a decision, not a gap. stub: the golden-diff loop has never produced a screenshot. The intended rule is branch-scoped …",
       "error": null, "dead": [], "kept": [],
@@ -1684,11 +1478,11 @@ app's `application.properties` overrides them.
 | `qits.artifacts.gc.pins.cd-timeout` | `PT10S` | per-request timeout on that fetch. **Renamed** from `qits.artifacts.gc.oci.cd-timeout` |
 | `qits.artifacts.gc.pins.ci-base-url` | `http://qits-ci:8080/ci/api` | where a run reads the daemon pin ladder (`GET /ci/api/daemon`) |
 | `qits.artifacts.gc.pins.ci-timeout` | `PT10S` | per-request timeout on that fetch |
-| `qits.artifacts.gc.type.<wire-name>.strategy` | per type, see "The settlement" | which engine collects a repository type: `cache`, `own` or `excluded`. Every type must have one — a missing entry is refused, not defaulted |
+| `qits.artifacts.gc.type.<wire-name>.strategy` | per type, see "The settlement" | which engine collects a repository type: `own` or `excluded` here — the `cache` engine is qits-platform-mirror's. Every registered type must have one, and a missing entry is refused, not defaulted |
 | `qits.artifacts.gc.type.<wire-name>.window` | `P30D` / `P90D` per type | how long an identity may sit unaccessed before it is eligible, ISO-8601. Absent for an `excluded` type |
 | `qits.auth.machine.required` | `false` | the machine-token rollout gate. Off, the JSON admin write surface is open — network trust. On, its writes need a bearer with `aud=qits-platform-artifacts` |
 | `qits.auth.machine.audience` | `qits-platform-artifacts` | this service's own id, and the `aud` its tokens must carry |
-| `qits.artifacts.startup-seed.enabled` | `true` | self-seed `ci-screenshots` + `ci-videos` + the `qits` image repository + the two npm roots (`npm`, `npmjs`) |
+| `qits.artifacts.startup-seed.enabled` | `true` | self-seed the hosted roots: `ci-screenshots`, `ci-videos`, `qits`, `npm`, `maven`, `daemons`, `docs`. No cache root — those are qits-platform-mirror's |
 | `qits.ci.intake-url` | `http://localhost:8080/ci/api/events/post-receive` | post-receive delivery |
 | `qits.projects.intake-url` | `http://localhost:8080/projects/api/events/post-receive` | the same event again, where it triggers the repository's backup push to GitHub. No credential, and `-o qits.no-ci` does not suppress it |
 | `qits.projects.name-resolver-url` | **unset** | where `HttpRepositoryNameResolver` turns `(projectId, repoName)` into a repo id, up to but not including `/{projectId}`. Unset — the shipped state — means the port answers nothing and `/artifacts/git/:projectId/:repoName` 404s, exactly as before the adapter existed. A deployment sets `http://prod-qits-projects:8080/projects/api/projects` |
@@ -1699,20 +1493,9 @@ app's `application.properties` overrides them.
 | `qits.artifacts.oci.max-manifest-size` | `4M` | manifests are buffered whole to be digested and parsed |
 | `qits.artifacts.oci.upload-session-ttl` | `PT30M` | in-memory upload sessions; lost on restart, by design |
 | `qits.artifacts.oci.upload-idle-timeout` | `PT1M` | wait for the *next* chunk, not for the whole upload |
-| `qits.artifacts.oci.mirror.tag-ttl` | `PT1H` | how long a mirrored tag serves before a `HEAD` revalidation |
-| `qits.artifacts.oci.mirror.manifest-timeout` | `PT30S` | the bound on one upstream manifest request |
-| `qits.artifacts.oci.mirror.blob-timeout` | `PT10M` | the bound on one upstream blob transfer |
-| `qits.artifacts.oci.mirror.endpoint-override` | blank | dial every upstream here rather than at its own domain — the suite's stub seam, blank in a deployment |
 | `qits.artifacts.npm.max-publish-size` | `32M` | the largest npm tarball, in either direction — see below |
 | `qits.artifacts.maven.max-artifact-size` | `128M` | the largest maven artifact, in either direction — jars are megabytes at most; the deploy PUT streams, so the knob is the only bound |
 | `qits.artifacts.daemon.max-binary-size` | `256M` | the largest daemon binary, in either direction. The measured ci-daemon is 43 MB, so this is headroom rather than a snug fit; the publish PUT streams, so the knob is the only bound a chunked upload has |
-| `qits.artifacts.npm.proxy.upstream` | `https://registry.npmjs.org` | what an `npm-proxy` repository caches |
-| `qits.artifacts.npm.proxy.packument-ttl` | `PT5M` | how long a cached packument serves before revalidation |
-| `qits.artifacts.maven.proxy.upstream` | `https://repo1.maven.org/maven2` | what a `maven-proxy` repository caches |
-| `qits.artifacts.maven.proxy.metadata-ttl` | `PT1H` | how long a cached `maven-metadata.xml` serves before revalidation. An hour rather than npm's five minutes because a maven build pins exact versions and reads this document only to resolve a range or `LATEST`; a release nobody sees for an hour costs nothing, a document refetched per resolve costs every build |
-| `qits.repositories.git.max-pack-size` | `64M` | the git host's `BodyHandler` limit |
-| `qits.repositories.git.protect-default-branch` | `false` | refuse a direct update/delete of a repo's default branch — see "The default branch's seatbelt" |
-| `qits.repositories.git.push-token` | **unset** | the value `-o qits.token=<value>` must equal; unset and empty both match nothing |
 | `quarkus.http.limits.max-body-size` | `1088M` | **global**; above the largest upload cap |
 | `quarkus.http.enable-compression` | `true` | gzip on the way out — **build-time fixed**, see below |
 
@@ -1730,16 +1513,20 @@ connection reset instead of the spec's error envelope. It must also never drop b
 tradeoff, the mechanism, and what an operator can actually do about it are in
 `docs/issues/2026-07-19_artifacts-global-max-body-size-widens-public-ingest-dos.md`.
 
-`qits.repositories.git.max-pack-size` is separate on purpose: a pack goes through a `BodyHandler`
-into memory, so it must not inherit a ceiling sized for something that streams to disk.
-
-`qits.artifacts.npm.max-publish-size` is the same kind of number for a third route, and stating it
+`qits.artifacts.npm.max-publish-size` is the same kind of number for a second route, and stating it
 is not optional: `BodyHandler.create()` defaults to 10 MiB, and an npm publish document carries the
-tarball **base64-inflated by 4/3** inside JSON, so 32M here is roughly a 24M tarball ceiling. One
-knob covers both directions — it also caps a tarball streamed in from upstream by the proxy —
-because it answers one question, how large an npm tarball this deployment is willing to hold. A
-deployment that pulls large prebuilt binaries (the `@next/swc-*` shape of package) raises it once
-and both paths follow.
+tarball **base64-inflated by 4/3** inside JSON, so 32M here is roughly a 24M tarball ceiling. It
+answers one question — how large an npm tarball this deployment is willing to hold — and the shared
+jar applies it to a cache's inbound stream as well, which is qits-platform-mirror's copy of the knob
+rather than a second meaning for this one.
+
+**Two families of key are absent from that table and still resolve**, because their defaults ship in
+jars this service consumes: the cache keys (`qits.artifacts.oci.mirror.*`,
+`qits.artifacts.npm.proxy.*`, `qits.artifacts.maven.proxy.*`) and the git host's
+(`qits.repositories.git.*`). Neither is this deployment's to set — the caches are
+qits-platform-mirror's and the host is qits-githost's — and setting one here changes nothing this
+service can reach, with the single exception named under "The pull-through mirror": the OCI mirror's
+TTL and timeouts are still read by wire code the excluded profile does not unregister.
 
 `quarkus.http.enable-compression` is in the shipped `application.properties` and **cannot be moved to
 a deployment's environment**: it is `BUILD_AND_RUN_TIME_FIXED`, so an env var on the container is
