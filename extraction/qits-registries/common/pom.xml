@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>eu.wohlben.qits</groupId>
+        <artifactId>qits-registries</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <!-- What more than one format needs and no format owns. Today that is exactly one class:
+         `eu.wohlben.qits.registry.OciRequestBody`, the bounded streaming read of a Vert.x request
+         body. It is named for the registry because that is where it was written, and the package it
+         lives in is kept verbatim so nothing has to be re-imported — but maven's deploy PUT reads
+         through it too (and so do the daemon and docs wires that stay in qits-artifacts). Putting it
+         here is what keeps `maven` from depending on `oci` for a body reader.
+
+         RepositoryType is NOT here: it is the type column of `artifact_repository`, so it travels
+         with the entity, in qits-blobstore. -->
+    <artifactId>qits-registries-common</artifactId>
+    <name>qits-registries :: common</name>
+
+    <dependencies>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-arc</artifactId>
+        </dependency>
+        <dependency>
+            <!-- VertxInputStream and RoutingContext — the request-body plumbing itself. -->
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-vertx-http</artifactId>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <artifactId>maven-compiler-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <artifactId>maven-surefire-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <groupId>io.smallrye</groupId>
+                <artifactId>jandex-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>
