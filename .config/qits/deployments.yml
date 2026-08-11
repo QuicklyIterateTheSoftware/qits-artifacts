@@ -7,11 +7,14 @@
 # (`qits.workspaces.release.entry-branch`). `deploy_branches` used to name that branch here, in
 # thirteen copies of one platform-wide answer, and a release pushed onto every entry it named.
 #
-# PLATFORM service: this is the one store every environment publishes to and pulls from, so one
-# instance exists rather than one per tier. It deploys from the PLATFORM ENVIRONMENT's branch
-# and no other tier's — which tier that is, is `pd_environment.platform` in the deployer, set by
-# the bootstrap's --platform-env.
-deployment_target: platform
+# ENVIRONMENT service since the byte-plane split: one hosted store per tier, and the wire alias
+# carries the tier (dev-qits-artifacts). The platform-wide pieces this repo used to bundle live
+# in services of their own now — the third-party cache is qits-platform-mirror, git is
+# qits-githost. The old `deployment_target: platform` outlived the split here and cost a
+# measured deployment: the deployer ran the platform plane, its predecessor search could not
+# match the tier-named seed container, and the successor died binding the port the seed still
+# held.
+deployment_target: environment
 
 # The convention would derive the health path from the repository name, but the route path
 # deliberately did not move with the rename — the service still serves /artifacts. Without this line
