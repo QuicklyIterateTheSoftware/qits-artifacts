@@ -9,10 +9,13 @@
 #   2. build this repo's docker/Dockerfile, whose builder stage packages that already-built bundle
 #      and never runs an install.
 #
-# The Docker build joins qits-net and Maven resolves qits-auth-core from the artifacts store, whose
-# address arrives as $QITS_MAVEN_REGISTRY_URL because the store is an environment service whose
-# alias carries the tier. The frontend also builds in this step container because its npm registry
-# uses that service alias. it needs node, npm and git for half one and the docker CLI for half two.
+# The Docker build runs on HOST networking and Maven resolves qits-auth-core from the artifacts
+# store at its host-published address. NOT a custom network: buildkit — the builder format the
+# platform targets, because a swarm cannot assume the legacy builder — refuses custom networks on a
+# build. The address is still derived rather than spelled, from the same injected $QITS_REGISTRY the
+# image tag uses. The frontend builds in this step container, which sits on qits-net and reaches the
+# npm registry by that service alias; the step needs node, npm and git for half one and the docker
+# CLI for half two.
 # The same split, for the same reason, as qits-gateway's pipeline and every webui-carrying sibling's
 # — they should keep matching.
 #
@@ -117,8 +120,8 @@ steps:
       cd -
 
       ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-artifacts:$QITS_CI_SHA"
-      docker build --network qits-net \
-        --build-arg QITS_MAVEN_REPOSITORY_URL="$QITS_MAVEN_REGISTRY_URL" \
+      docker build --network host \
+        --build-arg QITS_MAVEN_REPOSITORY_URL="http://$QITS_REGISTRY/artifacts/maven/maven" \
         -t "$ref" -f docker/Dockerfile .
       docker push "$ref"
       docker rmi "$ref" || true
