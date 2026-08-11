@@ -112,7 +112,7 @@ steps:
       cd -
 
       # --- half two: the image ------------------------------------------------------------------
-      ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-platform-artifacts:$QITS_CI_SHA"
+      ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-artifacts:$QITS_CI_SHA"
       docker build --network qits-net \
         --build-arg QITS_MAVEN_REPOSITORY_URL="$QITS_MAVEN_REGISTRY_URL" \
         -t "$ref" -f docker/Dockerfile .
