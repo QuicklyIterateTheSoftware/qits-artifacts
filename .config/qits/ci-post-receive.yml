@@ -2,7 +2,7 @@
 #
 # One step, two halves, and the split between them is the whole point:
 #
-#   1. build the artifacts client (service/src/main/webui = the qits-platform-spa-artifacts
+#   1. build the artifacts client (service/src/main/webui = the qits-spa-artifacts
 #      submodule) HERE, in the step container, which sits on qits-net and can therefore reach the
 #      platform's own npm registry — where @qits/ui-components lives and where nothing else can
 #      reach it from;
@@ -49,19 +49,26 @@ steps:
       # exist and never will.
       set -eu
 
-      # The daemon's clone is `--depth 50` and does not recurse, so the qits-platform-spa-artifacts
-      # submodule at service/src/main/webui arrives as an empty directory — and Quinoa fails the
-      # image build on exactly that (`No package.json found in Web UI directory`). Initialising it
-      # here rather than asking the daemon to clone differently keeps the submodule this repo's
-      # business: it is a public GitHub repo needing no credentials, and one shallow fetch.
-      frontend_url="${QITS_CI_REPOSITORY_URL%/*}/qits-platform-spa-artifacts"
+      # The daemon's clone is `--depth 50` and does not recurse, so the qits-spa-artifacts submodule
+      # at service/src/main/webui arrives as an empty directory — and Quinoa fails the image build on
+      # exactly that (`No package.json found in Web UI directory`). Initialising it here rather than
+      # asking the daemon to clone differently keeps the submodule this repo's business: it is a
+      # public GitHub repo needing no credentials, and one shallow fetch.
+      #
+      # THE REPOSITORY IS NAMED qits-spa-artifacts. It was qits-platform-spa-artifacts; the wrapper
+      # renamed it, and a fresh git host serves the new name only — so the old spelling here was a
+      # 404 on every run. Measured 2026-08-12, on the proving rebootstrap. The .gitmodules ENTRY is
+      # still called qits-platform-spa-artifacts, which is why the `-c` key below still is: that name
+      # is what `submodule.<name>.url` is written under, and renaming it would move the module
+      # directory of every existing checkout.
+      frontend_url="${QITS_CI_REPOSITORY_URL%/*}/qits-spa-artifacts"
       git -c submodule.qits-platform-spa-artifacts.url="$frontend_url" submodule update --init service/src/main/webui
 
       # THE LOCKFILE is the one file this step edits, and npm leaves no alternative. Same problem
-      # and same fix as qits-platform-spa-artifacts' own pipeline — that repo's recipe is where this
+      # and same fix as qits-spa-artifacts' own pipeline — that repo's recipe is where this
       # pattern is maintained, and the two should keep matching.
       #
-      # npm pins a full resolved URL per package, and qits-platform-spa-artifacts' lockfile is
+      # npm pins a full resolved URL per package, and qits-spa-artifacts' lockfile is
       # generated on the deployment host, so every entry names a localhost port — an address that
       # does not exist in this container. `npm ci` fetches tarballs by that URL and never asks the
       # configured registry for them, so the environment below does not reach them: without this
@@ -91,7 +98,7 @@ steps:
       # 404s. Measured on npm 10.9.4.
       #
       # Every address is derived from the injected env rather than spelled here: no repository
-      # states a deployment's addresses, and the two qits-platform-spa-artifacts does state
+      # states a deployment's addresses, and the two qits-spa-artifacts does state
       # (localhost:8081 for the @qits scope and localhost:8082 for npmjs, in its .npmrc, for a
       # developer on the host) are the ones being replaced.
       cd service/src/main/webui
@@ -103,7 +110,7 @@ steps:
         -e "s#(\"resolved\": \")https?://[^/\"]+($npm_hosted_path)#\1$npm_hosted_origin\2#" \
         package-lock.json
 
-      # ENVIRONMENT, not a file. qits-platform-spa-artifacts COMMITS an .npmrc (localhost:8081 for
+      # ENVIRONMENT, not a file. qits-spa-artifacts COMMITS an .npmrc (localhost:8081 for
       # @qits and localhost:8082 for npmjs, right for a developer on the host), and npm ranks a
       # project .npmrc ABOVE ~/.npmrc — so a `cat > ~/.npmrc` preamble would be written and silently
       # ignored. `npm_config_*` environment outranks both files, so it wins without touching the
@@ -114,7 +121,7 @@ steps:
 
       # dist/qits-platform-spa-artifacts/browser — the bundle the image build consumes (it is
       # quarkus.quinoa.build-dir in service/src/main/resources/application.properties), and the ONE
-      # artifact this half exists to produce. Lint and test are qits-platform-spa-artifacts' own
+      # artifact this half exists to produce. Lint and test are qits-spa-artifacts' own
       # pipeline's job; repeating them here would only make this repo red for someone else's commit.
       npm run build
       cd -
