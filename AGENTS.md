@@ -8,8 +8,8 @@ config surface. This file is the working conventions on top of it.
 **Git hosting is not here.** The smart-HTTP host, its DFS storage over blobs and its post-receive
 fan-out are **qits-githost**'s. No `eu.wohlben.qits.githost` package, no `git-storage` module and no
 JGit dependency remain in this tree, so anything below that names a git route, a pack table or a
-push hook is a fact about that repository and not about this one. The lineage still *creates* the
-git host's three tables (V4/V5) — see "Schema changes".
+push hook is a fact about that repository and not about this one. The lineage no longer *creates*
+its three tables either — the PostgreSQL baseline dropped them; see "Schema changes".
 
 ## The two rules that shape everything
 
@@ -58,7 +58,7 @@ one in is the library's, not this repository's.
 | `maven/MavenUpstream` | the `HttpClient` is an instance field, not static | same as above; the sixth outbound client, and the rule has still not changed. It reads and writes only `String`/`byte[]` and needs nothing else declared — the maven stack, like `registry` and `npm`, still adds zero native-image configuration |
 | `gc/CdHttpDeploymentPins`, `gc/CiHttpDaemonPins` | the `HttpClient` is an instance field, not static | same as above; the third and fifth outbound clients, and the rule has not changed. It moved with the class when GC became its own module — the rule travels with the client, not with the package |
 | `registry/MirrorUpstream` | the `HttpClient` is an instance field, not static — and so is `MirrorBearerTokens`' `ObjectMapper`, which is reachable from one | same as above; the fourth outbound client, and the rule still has not changed |
-| artifacts' `microprofile-config.properties` | H2 url with no `AUTO_SERVER` | the binary dies at boot on `ClassNotFoundException: org.h2.server.TcpServer` |
+| artifacts' `microprofile-config.properties` | the `QITS_RESOURCE_DB_*` triple with **no defaults** | nothing — and that is the point: an unset variable dies at Flyway naming the missing one, rather than opening a fallback store. It replaced an H2 file url that resolved `${user.home}` through `getpwuid` and came out as `jdbc:h2:file:?/…` under UID 1001 |
 | `registry/MirrorUpstream`'s config | `endpoint-override` injected as `Optional<String>`, not `String` | the binary dies at boot on `Failed to load config value of type java.lang.String` — SmallRye reads a **configured-empty** value as absent, and that key ships blank. `defaultValue = ""` does not help. Invisible to `mvn verify`, where every test sets a real value |
 
 The `HttpClient` rows are build-time failures. The rest are green builds that fail in production,
@@ -210,67 +210,66 @@ world by **string metadata**, and whatever they name is in a different database.
 
 ## Schema changes
 
-`artifacts/src/main/resources/db/artifacts/migration/`, hand-written, its own lineage on its own
-named datasource. This lineage is the original one from the monorepo, carried over **unsquashed** —
-do not renumber it, and do not treat `V1__init.sql` as a squash baseline. Never touch the monorepo's
-`db/migration`; that is a different database.
+`artifacts/src/main/resources/db/artifacts/postgresql/`, hand-written, its own lineage on its own
+named datasource. **PostgreSQL only.** The H2 chain that used to live at `db/artifacts/migration`
+went with the H2 driver in the postgres-blobs campaign; git history keeps its fourteen migrations,
+and the one-time H2+disk → PostgreSQL copy is an ops tool that ships this schema rather than
+replaying them. A new location as well as a new file, so a deployment carrying an H2
+`flyway_schema_history` cannot half-apply the baseline. Never touch the monorepo's `db/migration`;
+that is a different database.
 
-**The lineage is carried through the byte-plane split unchanged, so it still creates the cache
-tables** for types this service registers no profile for. That is not a reason to rewrite history,
-and the descriptions below stay because the migrations do.
+**V1 is a fresh baseline and it IS the retired chain's end state.** Translation was mechanical where
+it could be (`clob` → `text`, `timestamp(6) with time zone` → `timestamptz`) and every named foreign
+key, index and check kept its name, because those names are what the suite's refusal assertions
+read. Four decisions are departures from a literal translation, and the file's header carries the
+argument for each:
 
-**V14 is what settled the data half.** V7's prefill — three `oci-mirror` repository rows and their
-upstreams — kept the mirror path formally reachable here long after the code left, because
-`resolveForPull` matches the type by string and the wire code ships on the `qits-registries-oci` jar
-regardless. V14 deletes those rows, plus any `npm-proxy`/`maven-proxy` row a deployment carried
-through the split. It **drops no table**: `OciMirrorUpstreamRepository` and
-`OciMirrorTagCheckRepository` are live beans here, read on the pull path and inside the hosted
-`collectTag` funnel, so a dropped table would be a runtime missing-table error no build shows. And
-its repository delete is **guarded** — a cache row with content still cached under it is left
-standing, because taking it would strand the blobs row-less and this store's GC cannot reach those.
+1. **The three git-host tables are gone** — `git_pack`, `git_pack_file` and
+   `git_repository_protection`. They survived in the H2 chain only because applied history cannot be
+   rewritten; qits-githost owns that data in its own database, and a fresh baseline is the one place
+   they could go.
+2. **The four cache tables stay, and stay empty** — `oci_mirror_upstream`, `oci_mirror_tag_check`,
+   `npm_proxy_packument`, `maven_proxy_metadata`. The caches went to qits-platform-mirror, but their
+   repositories are live beans on the qits-registries jars: excluding a profile from bean discovery
+   does not unregister a DAO. `OciRegistryService.resolveForPull` reads the upstream table on every
+   pull whose first segment names no repository row, and `collectTag` deletes a freshness row for
+   HOSTED tags too. Dropping either turns an unknown-image pull into a `500` where the client needs
+   `404 NAME_UNKNOWN`. That was the retired V14's lesson and it is not re-learnable cheaply.
+3. **No prefill of any kind.** The old V7 wrote three `oci-mirror` rows and their upstreams and V14
+   took them out again, because a standing row is what kept the mirror path reachable after the code
+   left. Every repository row this service needs comes from `ArtifactsRepositorySeeder` at startup,
+   and no migration may embed a live-platform digest.
+4. **`ck_artifact_repository_type` lists the SEVEN types this service registers**, not the ten the
+   carried chain accepted. This is where the set the code enforces and the set the database accepts
+   became one set: `RepositoryTypeProfiles` indexes exactly these seven, `ArtifactRepositoryService
+   .ensure` refuses anything else with a 400, and the constraint says the same thing one layer down.
+   A migration copying rows in from a pre-split H2 store must **skip cache-type repositories**.
 
-The OCI mirror owns two (V7): `oci_mirror_upstream`, whose slug is a foreign key into
-`artifact_repository` because every upstream is paired with the `oci-mirror` row its namespace
-resolves to, and `oci_mirror_tag_check`, which the miss path writes — one row per mirrored tag,
-moved both by a fetch and by a `HEAD` that found the digest unchanged, and deliberately **not**
-moved when the upstream could not be reached (a failed check that touched it would suppress the
-next attempt for a whole TTL). The maven repository owns one (V8): `maven_artifact`, path-keyed
-with its `size_bytes` beside the blob id — and the pull-through cache (V13) adds **no second
-artifact table**, because a cached file is an ordinary `maven_artifact` row under a `maven-proxy`
-repository and every reader already attributes by the repository row's type. V13's one table is
-`maven_proxy_metadata`, the cached `maven-metadata.xml` with its two validators and `fetched_at`:
-the one maven document that mutates, and the one thing that could not be an immutable path or a
-derivation over the cached rows. The daemon-binaries type owns one (V10): `daemon_binary`,
-keyed `(repository, name, version)` with its `size_bytes` beside the blob id too — those two are the
-protocol tables the census sizes without a disk read. The docs type owns two (V12): `docs_site`, keyed
-`(repository, name, version)`, and `docs_file`, whose key is that plus the path and whose foreign
-key **cascades** — that cascade is what makes a *version* the unit of eviction at the schema level,
-so no sweep, bug or hand-written query can leave a site half-collected and serving 404s from a
-version that still lists itself. `daemon_binary` deliberately holds **no
-prefill**: adopting the ELF blobs already on a deployment's volume is an ops action, because the
-lineage must not embed live-platform digests and a migration cannot verify one against the running
-store. Access tracking owns two: V9 put a nullable `accessed_at` on `artifact_record`,
-`oci_manifest` and `oci_tag`, and V11 put the same column on `npm_version`, `maven_artifact` and
-`daemon_binary` — **neither backfills**, because null has to keep meaning "never read" for a sweep
-to tell it apart from "read long ago". **A plan reserves no migration number**: three workstreams were
-widening this lineage at once, and the rule they share is "take the next free V at land time, and re-enumerate
-`ck_artifact_repository_type` from the `RepositoryType` enum as it stands in the tree"
-(proxy-pulling-normal-images.md §4). `MigrationLineageTest` pins that with the ten keys spelled out —
-it owns a private file-H2 under `target/` and runs Flyway over the real directory, because every
-`@QuarkusTest` here wipes the tables, so what the chain leaves behind is invisible to all of them.
-That is the only place V14's deletions are provable too.
+Widening the constraint is still a one-liner (drop by name, re-add naming every key) and the rule is
+unchanged: re-enumerate the whole list from the profiles as they stand in the tree, never append.
+`MigrationLineageTest` pins all four decisions plus the constraint's two directions — it owns a
+database of its own on the suite's embedded postgres and runs Flyway over the real directory,
+because every `@QuarkusTest` here wipes the tables, so what the chain leaves behind is invisible to
+all of them.
 
-**Three tables in this lineage are the git host's, and they are orphans.** `git_pack`,
-`git_pack_file` (V4) and `git_repository_protection` (V5) were created here while the host was, and
-the chain is carried through the byte-plane split byte for byte, so they are still created on every
-fresh database. Nothing in this tree reads or writes them, and the entities that did left with the
-host. They are a cutover data question, like the cache rows V14 settled; do not renumber the chain
-to make them go away.
+**The blob store's three tables are in this lineage too** (`blob`, `blob_content`, `blob_chunk`),
+copied verbatim from qits-blobstore's `src/main/resources/db/blobstore-tables.sql` — which is what
+that library tells its consumers to do, and which its own suite applies unedited so the DDL is
+exercised on every build of the jar. Keep the text identical, so a later diff between the two is
+readable. `qits.artifacts.blobs-datasource=artifacts` is what points the store at them.
 
 The persistence unit is the artifacts jar's own: `quarkus.hibernate-orm.artifacts.packages` names
 `eu.wohlben.qits.artifacts.entity` in that jar's `microprofile-config.properties`, and `service`
 no longer overrides it — the override existed only to add the git host's entity package, and it
 **replaces** rather than extends, so re-adding one means spelling both.
+
+**`@Lob` is banned on every entity this service maps.** On H2 it was a clob and everything agreed;
+on PostgreSQL it means a LARGE OBJECT, which Hibernate binds as an oid and the driver refuses to
+read outside a transaction — so serving a cached document would 500 with "Large Objects may not be
+used in auto-commit mode". The library entities that carry one are already bound with
+`@JdbcTypeCode(SqlTypes.LONGVARCHAR)`; no entity in this tree has one, and V1's columns are `text`
+to match.
+
 
 ## Garbage collection
 
@@ -499,8 +498,8 @@ that stays although no cache row can exist here: both tables are shared with the
 from the hosted side by `NpmPackagesGcStrategyTest` and `MavenPackagesGcAdapterTest`.
 
 `BlobStore.delete` is package-private for the same reason `promote` is the one write funnel: the
-constraints (grace window off the file mtime, the pre-unlink guard inside the write lock `promote`
-also takes, `BlobDiskIndex` invalidation) only hold if there is one way in. Adding a second caller,
+constraints (the grace window off the blob's `stored_at` column, and the pre-unlink guard taken
+under the same advisory lock `promote` takes) only hold if there is one way in. Adding a second caller,
 or widening it to public, removes them without failing anything. The `gc` module reaches it through
 `BlobReclaim`, and its two siblings `OciRegistryCollection` and `NpmRegistryCollection` do the same
 for the registries' collect funnels — three named doors with one documented owner each, which is why
@@ -522,9 +521,23 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 
 ## Tests
 
-- `mvn verify` runs 222 tests (35 in `artifacts/`, 98 in `gc/`, 89 in `service/`) in about a
-  minute — counted from the surefire reports, which the previous figure here was not: it claimed 580
-  across four modules, two of which had left with the byte-plane split. The registry, npm and maven
+- `mvn verify` runs 225 tests (38 in `artifacts/`, 98 in `gc/`, 89 in `service/`) in about a
+  minute — counted from the surefire reports.
+- **Every module's suite runs on a REAL PostgreSQL**, spawned as a child process from zonky binaries
+  that resolve as ordinary Maven artifacts. Not a container: the clone-alone rule forbids one, and
+  the store's only engine is postgres now — `bytea`, an advisory lock, a partial index and an
+  on-conflict promote exist on no other, and the lineage is a PostgreSQL lineage. Each module owns a
+  copy of `testdb/EmbeddedPg` + `EmbeddedPgConfigSource` (registered through `META-INF/services`,
+  the only hook that runs before Quarkus reads config) and its own database name — `artifacts_test`,
+  `artifacts_gc_test`, `artifacts_svc_test`, plus `artifacts_lineage_test` for the lineage suite and
+  `artifacts_it` / `artifacts_conformance_it` for the two ITs. Copies rather than a shared class,
+  because the modules share no test classpath; distinct databases, because two suites in one build
+  must not wipe each other's rows. The url is never written down — the instance takes a free port,
+  so the config source supplies it at ordinal 500, over the unresolvable `QITS_RESOURCE_DB_*` the
+  shipped config carries.
+- **`quarkus.http.test-port=0` in every module.** Port 8081 is the platform's own npm registry on
+  these hosts, so a fixed test port fails with "Port already bound: 8081" against a service that has
+  nothing to do with the build. The registry, npm and maven
   wire suites went to the qits-registries jars with the code they drive, so what runs here is the
   hosted docs and daemon wires, the explorer, GC and the JAX-RS boundary. Nothing here
   needs docker — and that is the constraint that shapes the registry suite: `docker`, `podman` and
@@ -559,11 +572,15 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   It costs one line and it is the only thing standing between this suite and the internet.
   `src/test/resources/application.properties` points it at `http://localhost:1`, and
   `PackagedProcessIT` passes the same value to the launched binary.
-- **Fixture content must be unique per RUN, not merely per test.** `clean-at-start` wipes the
-  tables once per run, but nothing ever wipes `target/artifacts-svc-test-blobs`, and blobs dedupe
-  globally and content-addressed. Reuse an earlier run's image content and its layer is already on
-  disk — a blob-store hit, so any count over stored bytes comes out one short with nothing in the
-  failure to say why. It is the one thing to check first if a count is off by one.
+- **Fixture content must be unique per RUN, not merely per test**, and the reason narrowed rather
+  than disappeared when blobs moved into the database. `ArtifactsTestSupport.reset` and `GcFixture
+  .reset` now wipe `blob` and `blob_content` per test (in that order — the identity row points at
+  the content, and the content cascades to its chunks), so the `service` module is the one left
+  without a blob wipe. Blobs dedupe globally and content-addressed: reuse an earlier case's image
+  content there and its layer is already stored, so any count over stored bytes comes out one short
+  with nothing in the failure to say why. It is the one thing to check first if a count is off by
+  one. `backdate` moves the blob's `stored_at` column, which is the same clock a production sweep
+  reads.
 - `mvn verify -Dnative` runs those, then `PackagedProcessIT` against the compiled binary.
   It is the only suite that starts a **process** rather than an in-JVM Quarkus, so it is where the
   route stacks are proved to coexist and where the binary is proved to boot at all.
@@ -572,10 +589,16 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   `@QuarkusTest` asserting anything about `/artifacts/` passes against a process that has no client
   in it. Two of them are that, and they are the guard on
   `quarkus.quinoa.ignored-path-prefixes`.
-  Its `@TestProfile` points the datasource and the blobs dir under `target/`,
-  passed to the launched binary as `-D` flags; it uses a **file** H2 of the same shape the
-  deployment runs, not the unit suite's in-memory one, because the file/embedded shape is the thing
-  that broke. Do not add a build-time property there — an IT cannot re-augment.
+  Its `@TestProfile` hands the launched process a database, because the shipped config deliberately
+  has none: the `QITS_RESOURCE_DB_*` expressions are unresolvable outside a deployment, so without
+  the profile the binary dies at Flyway. It passes the suite's own embedded-postgres url, username
+  and password as `-D` flags. That works across the **two classloaders** a `QuarkusTestProfile` is
+  instantiated in because `EmbeddedPg` publishes its port to a system property, which the two copies
+  of that class share; a static field alone would start a second postgres. Do not add a build-time
+  property there — an IT cannot re-augment, which is also why `db-kind` stays what the jar ships and
+  only url/username/password move.
+  **`mvn verify` is not the gate for datasource config; the binary is.** That rule predates the
+  postgres move and survived it.
 - `OciConformanceIT` runs the **upstream** OCI distribution-spec suite against the packaged process,
   and it is the only test here that can falsify this repo's own reading of the spec — `RegistryTest`
   and `PackagedProcessIT` drive a client written from that same reading. It is gated on
@@ -642,6 +665,25 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
     make the wire 413 preempt the application 413, and the client gets an empty body and a reset
     connection instead of the OCI error envelope. It must also never drop below 64M, or `ci-videos`
     breaks silently.
+- **`quarkus.vertx.worker-pool-size=40` is sized for BLOB DOWNLOADS, not for request concurrency.**
+  Serving a blob pulls its chunks on the calling worker thread (`BlobSender`, in the
+  qits-registries common jar) where `sendFile` handed a file region to Netty and released the thread
+  at once. Every blob route is a `blockingHandler`, so a pull holds a worker for the whole transfer
+  and one connection's **pipelined requests serialize** — a named trade-off, not an oversight. The
+  alternatives were a second copy of every blob on disk (two sources of truth) or an event-loop pump
+  (which would still hold a connection out of a pool of the same size). It moves with
+  `quarkus.datasource.artifacts.jdbc.max-size=20` in the artifacts jar, which is what queues a burst.
+- **`quarkus.datasource.health.enabled=true` is spelled out, and it departs from the platform's
+  "readiness independent of external dependencies" stance on purpose.** PostgreSQL is not an external
+  dependency of this service, it is the store — both the rows and the bytes — so a process that
+  cannot reach it serves 500 to everything. A ready-but-storeless container is one the deployer's
+  health gate would cut over onto, swapping the registry every build and every deploy pulls from for
+  one that answers nothing.
+- **The docs publish stages into a `ScratchBlob`, and `openRead()` SEALS it.** Sealing flushes the
+  final short chunk, so it happens exactly once and after the last write — a short chunk in the
+  middle breaks the `seq = position / chunk_size` arithmetic every read depends on. Nothing promotes
+  that archive: a bundle is not a stored blob, only its entries are, so `close` discards it and the
+  try-with-resources is the only thing that does.
 - **`BodyHandler.create()` is not unlimited** — vertx-web defaults it to 10 MiB, and a route that
   takes the default silently 413s everything larger with nothing in the log to say which limit did
   it. Any new `BodyHandler` needs its limit stated. It must *not* be the global ceiling: a `BodyHandler`
@@ -660,8 +702,9 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   rather than letting the test one shadow it. So never re-declare an app-level setting
   (`quarkus.rest.path`, `quarkus.http.non-application-root-path`, the openapi settings, ...) in
   `src/test/resources`. A second copy only has to drift once for the suite to be green against a
-  value the packaged process never sees. That file is for genuine test-only overrides: in-memory H2,
-  `target/` data dirs, the closed-port intake url.
+  value the packaged process never sees. That file is for genuine test-only overrides: the Flyway
+  clean-at-start, the disabled dev services, the zero test port and the closed-port pin urls. The
+  datasource itself is not in it — it cannot be, because the port is chosen at run time.
 - `OpenApiSchemaExportTest` writes `docs/openapi.yml` from `/artifacts/q/openapi`
   (`./mvnw -pl service test -Dtest=OpenApiSchemaExportTest`). **`paths: {}` is correct output here**:
   every artifacts operation carries `@Operation(hidden = true)`, as in the monorepo's own document,
@@ -751,14 +794,13 @@ repository's sources.
   with no warning anywhere — the quietest kind of misconfiguration. And
   `quarkus.http.compress-media-types` must stay **unset**: setting it REPLACES Quarkus' default list
   rather than extending it, so naming one type silently stops compressing the other seven.
-- **The explorer's caches are two different things and only one of them is invalidated.**
-  `OciManifestFootprints` is keyed by `(repository, image, digest)` and is content-addressed, so an
-  entry can never become wrong and nothing clears it; the *aggregates* built from it are deliberately
-  not cached at all. `BlobDiskIndex` is the one that needs a write signal, and it gets it from
-  `BlobStore.promote` — the single funnel every stored byte passes through, which is why the call
-  sits there and not in each of the four write paths. Adding a fifth way to write a blob without
-  going through `promote` would break the summary silently; there is no such path today and there
-  should not be one.
+- **The explorer's one cache is content-addressed, and its other reading is not cached at all.**
+  `OciManifestFootprints` is keyed by `(repository, image, digest)`, so an entry can never become
+  wrong and nothing clears it; the *aggregates* built from it are deliberately not cached either.
+  `BlobDiskIndex` used to be the third thing here — a 60-second snapshot of a directory walk that
+  `BlobStore.promote` had to invalidate. It is one indexed query over `blob` now, so the snapshot
+  and its `invalidate()` are gone rather than ported, and the write-signal coupling went with them.
+  The name stayed; there is no disk.
 - **`NpmUpstream`'s `HttpClient` is an instance field, not a static one** — the constraint the
   Native table lists, and the reason it lists it. It is also this process'
   only outbound TLS, which no test can exercise (no network); a deployment smokes it once by hand.
