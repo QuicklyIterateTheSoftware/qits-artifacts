@@ -20,3 +20,11 @@ deployment_target: environment
 # deliberately did not move with the rename — the service still serves /artifacts. Without this line
 # the deployer probes a 404 and rolls every deployment back as unhealthy.
 health_path: /artifacts/q/health/ready
+
+# STOP-FIRST, because this deployment publishes a host port. Under start-first the successor
+# waits in Pending for a port the predecessor only frees by stopping — which start-first never
+# does — so a one-node swarm deadlocks on the first rolling update. A single binder cannot have
+# the lossless-rollback overlap; the deploy takes the brief gap instead. Measured live on
+# qits-platform-mirror's 2026.813.163303 deploy, the first host-port update since the swarm
+# cutover (2026-08-13).
+update_order: stop-first
