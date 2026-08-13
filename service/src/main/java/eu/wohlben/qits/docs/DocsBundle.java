@@ -7,8 +7,6 @@ import eu.wohlben.qits.artifacts.error.DocsException;
 import java.io.BufferedInputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -37,6 +35,11 @@ import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
  * never the archive in memory and never a whole file. {@code TarArchiveInputStream} reports
  * end-of-entry as {@code read() == -1}, which is exactly the contract {@code BlobStore.stage}
  * consumes, so each entry stages as though it were its own upload.
+ *
+ * <p><b>The archive arrives as a stream, not as a path.</b> It used to be a temp file in the blob
+ * store's staging directory; the store keeps its staging in {@code blob_chunk} rows now, so what the
+ * caller hands over is a read-back over those rows ({@code ScratchBlob.openRead}). Nothing here
+ * cares which it is — the class only ever read the archive forward.
  */
 final class DocsBundle {
 
@@ -51,16 +54,18 @@ final class DocsBundle {
   /**
    * Reads {@code archive}, staging and promoting every regular file into {@code blobStore}.
    *
+   * @param archive the gzipped tar, read forward exactly once. <b>This method closes it</b>, along
+   *     with the decompression chain over it — a caller closing again is harmless.
    * @param maxTotalBytes the cap on the <b>uncompressed</b> bundle, and on any single file in it
    * @return one entry per file, in archive order
    * @throws DocsException 400 for a malformed or hostile archive, 413 past the caps
    */
-  static List<BundleFile> stageAll(Path archive, BlobStore blobStore, long maxTotalBytes) {
+  static List<BundleFile> stageAll(InputStream archive, BlobStore blobStore, long maxTotalBytes) {
     List<BundleFile> staged = new ArrayList<>();
     Set<String> seen = new HashSet<>();
     long total = 0;
 
-    try (InputStream in = Files.newInputStream(archive);
+    try (InputStream in = archive;
         TarArchiveInputStream tar =
             new TarArchiveInputStream(new GZIPInputStream(new BufferedInputStream(in)))) {
 

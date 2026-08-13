@@ -4,6 +4,7 @@ import eu.wohlben.qits.artifacts.control.ArtifactsRepositorySeeder;
 import eu.wohlben.qits.artifacts.control.BlobStore;
 import eu.wohlben.qits.artifacts.control.DaemonRegistryService;
 import eu.wohlben.qits.artifacts.error.DaemonException;
+import eu.wohlben.qits.registry.BlobSender;
 import eu.wohlben.qits.registry.OciRequestBody;
 import io.quarkus.runtime.configuration.MemorySize;
 import io.vertx.core.Handler;
@@ -18,11 +19,8 @@ import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import java.io.IOException;
 import java.io.InputStream;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.time.Duration;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
-import org.jboss.logging.Logger;
 
 /**
  * The daemon-binaries wire, at {@code /artifacts/daemons/<name>/<version>}.
@@ -68,13 +66,12 @@ import org.jboss.logging.Logger;
 @ApplicationScoped
 public class DaemonRoutes {
 
-  private static final Logger LOG = Logger.getLogger(DaemonRoutes.class);
-
   /** Waits for the NEXT chunk, not the whole upload — the registry's idle-timeout shape. */
   private static final Duration UPLOAD_IDLE_TIMEOUT = Duration.ofMinutes(1);
 
   @Inject DaemonRegistryService registry;
   @Inject BlobStore blobStore;
+  @Inject BlobSender blobSender;
 
   /**
    * The one size answer for both directions a daemon binary can travel.
@@ -129,8 +126,8 @@ public class DaemonRoutes {
   // --- GET / HEAD -------------------------------------------------------------------------------
 
   /**
-   * {@code GET|HEAD /artifacts/daemons/<name>/<version>} — the version-addressed download, served
-   * zero-copy.
+   * {@code GET|HEAD /artifacts/daemons/<name>/<version>} — the version-addressed download, streamed
+   * from the store.
    *
    * <p>Anonymous, like every read in this service. Immutable on top and content-addressed
    * underneath, so the bytes behind this URL can never mean something else and the response says so
@@ -148,17 +145,15 @@ public class DaemonRoutes {
                 () ->
                     new DaemonException(
                         404, "no such daemon binary: " + name + " version " + version));
-    Path blob;
     long size;
     try {
-      blob = blobStore.locate(stored.blobId());
-      size = Files.size(blob);
+      size = blobStore.size(stored.blobId());
     } catch (Exception missing) {
       throw new DaemonException(
           404, "the bytes of " + name + " " + version + " are not stored");
     }
 
-    // Locate first, then touch — a row whose bytes are gone is a 404, not an access. HEAD counts,
+    // Size first, then touch — a row whose bytes are gone is a 404, not an access. HEAD counts,
     // the stance the OCI manifest route already takes. Only this spelling records anything: the
     // digest-addressed /v2 blob route carries no daemon identity, so it stays unattributed.
     registry.touchBinary(ArtifactsRepositorySeeder.DAEMONS, name, version);
@@ -174,25 +169,16 @@ public class DaemonRoutes {
             .putHeader("Docker-Content-Digest", "sha256:" + stored.blobId())
             .putHeader(HttpHeaders.CACHE_CONTROL, "public, max-age=31536000, immutable");
     if (!withBody) {
-      // HEAD must carry the same Content-Length as GET, and sendFile writes the file region
+      // HEAD must carry the same Content-Length as GET, and BlobSender writes a body
       // unconditionally, so it must not be reached here.
       response.end();
       return;
     }
-    response
-        .sendFile(blob.toString())
-        .onFailure(
-            thrown -> {
-              LOG.debugf(
-                  thrown,
-                  "daemons %s/%s: send aborted after %d bytes",
-                  name,
-                  version,
-                  response.bytesWritten());
-              if (!response.ended()) {
-                response.close();
-              }
-            });
+    // The binary's chunks, written under the client's backpressure on this worker thread. A daemon
+    // binary is 43 MB and every bootstrap curls one, so this is the route where the trade-off costs
+    // most — see quarkus.vertx.worker-pool-size in application.properties, which is what bounds how
+    // many of these can be in flight.
+    blobSender.send(response, stored.blobId(), "daemon " + name + " " + version);
   }
 
   // --- PUT --------------------------------------------------------------------------------------

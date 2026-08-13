@@ -4,7 +4,9 @@ import eu.wohlben.qits.artifacts.control.ArtifactsRepositorySeeder;
 import eu.wohlben.qits.artifacts.control.BlobStore;
 import eu.wohlben.qits.artifacts.control.DocsRegistryService;
 import eu.wohlben.qits.artifacts.control.DocsRegistryService.BundleFile;
+import eu.wohlben.qits.artifacts.control.ScratchBlob;
 import eu.wohlben.qits.artifacts.error.DocsException;
+import eu.wohlben.qits.registry.BlobSender;
 import eu.wohlben.qits.registry.OciRequestBody;
 import io.quarkus.runtime.configuration.MemorySize;
 import io.vertx.core.Handler;
@@ -20,20 +22,16 @@ import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStream;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
-import org.jboss.logging.Logger;
 
 /**
  * The docs wire, at {@code /artifacts/docs/<repository>/<site>/-/<version>[/<path>]}.
  *
  * <p>Two verbs and one idea, the daemon wire's shape with a bundle where it has a file: a streaming
  * {@code PUT} that publishes a whole version, and a {@code GET} that serves one file of one version
- * zero-copy.
+ * straight out of the blob store.
  *
  * <p><b>The publish is atomic across fifty-odd files.</b> Every entry is staged and promoted before
  * a single row is written, and then {@code DocsRegistryService.publish} writes the site and all of
@@ -58,7 +56,7 @@ import org.jboss.logging.Logger;
  * <p><b>No {@code BodyHandler}, anywhere in this class.</b> {@code BodyHandler.create()} defaults to
  * 10 MiB — the measured Storybook bundle is 9.7 MB uncompressed and the next one will not be, so it
  * would 413 real publishes on a threshold nobody chose. The {@code PUT} streams through {@code
- * OciRequestBody} to a temp file instead. Note what bounds it: {@code
+ * OciRequestBody} into a scratch blob instead. Note what bounds it: {@code
  * qits.artifacts.docs.max-bundle-size} is checked against the <b>uncompressed</b> total inside
  * {@link DocsBundle}, because a compressed archive makes {@code Content-Length} a measure of the
  * wrong number.
@@ -66,13 +64,18 @@ import org.jboss.logging.Logger;
 @ApplicationScoped
 public class DocsRoutes {
 
-  private static final Logger LOG = Logger.getLogger(DocsRoutes.class);
-
   /** Waits for the NEXT chunk, not the whole upload — the registry's idle-timeout shape. */
   private static final Duration UPLOAD_IDLE_TIMEOUT = Duration.ofMinutes(1);
 
+  /**
+   * How much of the upload is moved into the scratch blob per write. The scratch buffers a whole
+   * chunk internally and flushes on the boundary, so this only bounds how often it is asked to.
+   */
+  private static final int BUNDLE_COPY_BUFFER = 64 * 1024;
+
   @Inject DocsRegistryService registry;
   @Inject BlobStore blobStore;
+  @Inject BlobSender blobSender;
 
   /**
    * The cap on an unpacked bundle, and on any single file in one.
@@ -130,7 +133,8 @@ public class DocsRoutes {
   // --- GET / HEAD -------------------------------------------------------------------------------
 
   /**
-   * {@code GET|HEAD …/-/<version>/<path>} — one file of one published version, served zero-copy.
+   * {@code GET|HEAD …/-/<version>/<path>} — one file of one published version, streamed from the
+   * store.
    *
    * <p>Anonymous, like every read in this service. Immutable on top and content-addressed
    * underneath, so the bytes behind this URL can never mean something else and the response says so
@@ -151,17 +155,15 @@ public class DocsRoutes {
                 () ->
                     new DocsException(
                         404, "no such file in " + name + "@" + version + ": " + path));
-    Path blob;
     long size;
     try {
-      blob = blobStore.locate(stored.blobId());
-      size = Files.size(blob);
+      size = blobStore.size(stored.blobId());
     } catch (Exception missing) {
       throw new DocsException(
           404, "the bytes of " + path + " in " + name + "@" + version + " are not stored");
     }
 
-    // Locate first, then touch — a row whose bytes are gone is a 404, not an access. HEAD counts,
+    // Size first, then touch — a row whose bytes are gone is a 404, not an access. HEAD counts,
     // the stance the OCI manifest route already takes. The row moved is the SITE's: the version is
     // what ages out, so the version is what records being wanted.
     registry.touchSite(repository, name, version);
@@ -173,26 +175,15 @@ public class DocsRoutes {
             .putHeader(HttpHeaders.ETAG, "\"" + stored.blobId() + "\"")
             .putHeader(HttpHeaders.CACHE_CONTROL, "public, max-age=31536000, immutable");
     if (!withBody) {
-      // HEAD must carry the same Content-Length as GET, and sendFile writes the file region
+      // HEAD must carry the same Content-Length as GET, and BlobSender writes a body
       // unconditionally, so it must not be reached here.
       response.end();
       return;
     }
-    response
-        .sendFile(blob.toString())
-        .onFailure(
-            thrown -> {
-              LOG.debugf(
-                  thrown,
-                  "docs %s@%s/%s: send aborted after %d bytes",
-                  name,
-                  version,
-                  path,
-                  response.bytesWritten());
-              if (!response.ended()) {
-                response.close();
-              }
-            });
+    // The file's chunks, written under the client's backpressure on this worker thread. A docs page
+    // is small and there are many of them per view, which is the shape the worker pool is sized for
+    // — see quarkus.vertx.worker-pool-size in application.properties.
+    blobSender.send(response, stored.blobId(), "docs " + name + "@" + version + "/" + path);
   }
 
   /** {@code GET …/-/<version>} — what this version is, without listing every file in it. */
@@ -262,10 +253,17 @@ public class DocsRoutes {
    * {@code PUT …/-/<version>} — the publish. Stream the archive down, stage every file in it, then
    * write the rows.
    *
-   * <p>The archive is staged to a temp file rather than read from the socket, because the tar has to
-   * be walked and a socket cannot be rewound if the walk fails halfway. It is this store's own temp
-   * area — {@code BlobStore.newStagingFile} — and this method owns it: the {@code finally} is the
-   * only thing that deletes it, which is why the whole body is inside the {@code try}.
+   * <p>The archive is staged rather than read straight off the socket, because the tar has to be
+   * walked and a socket cannot be rewound if the walk fails halfway. The staging area is a {@link
+   * ScratchBlob} — {@code blob_chunk} rows under a {@code STAGING} content id, which is what
+   * replaced the store's temp file when blobs stopped being files. It is readable back while it
+   * fills, which is the one thing an ordinary stage cannot do and the whole reason this type of
+   * staging exists.
+   *
+   * <p><b>{@code openRead()} SEALS the scratch</b> — it flushes the final short chunk, so it has to
+   * happen exactly once and after the last write. Nothing here promotes the archive: a docs bundle
+   * is not itself a stored blob, only its entries are, so {@code close} discards it. The
+   * try-with-resources is the only thing that does, which is why the whole body is inside it.
    *
    * <p>The 409 is thrown inside {@code DocsRegistryService.publish}'s transaction, so a re-publish
    * never half-lands. The promoted blobs survive it, which costs nothing: they are content-addressed,
@@ -278,12 +276,15 @@ public class DocsRoutes {
     String version = rc.pathParam("version");
     registry.requireDocsRepository(repository);
 
-    Path archive = blobStore.newStagingFile();
-    try {
-      long received;
-      try (InputStream body = OciRequestBody.open(rc, UPLOAD_IDLE_TIMEOUT.toMillis());
-          OutputStream out = Files.newOutputStream(archive)) {
-        received = body.transferTo(out);
+    try (ScratchBlob archive = blobStore.stageScratch()) {
+      long received = 0;
+      try (InputStream body = OciRequestBody.open(rc, UPLOAD_IDLE_TIMEOUT.toMillis())) {
+        byte[] buffer = new byte[BUNDLE_COPY_BUFFER];
+        int read;
+        while ((read = body.read(buffer)) != -1) {
+          archive.write(buffer, 0, read);
+          received += read;
+        }
       } catch (IOException e) {
         throw new DocsException(400, "the upload stream failed: " + e.getMessage());
       }
@@ -291,8 +292,9 @@ public class DocsRoutes {
         throw new DocsException(400, "an empty body is not a docs bundle");
       }
 
+      // Sealing and reading back in one call, and never a write after it.
       List<BundleFile> bundle =
-          DocsBundle.stageAll(archive, blobStore, maxBundleSize.asLongValue());
+          DocsBundle.stageAll(archive.openRead(), blobStore, maxBundleSize.asLongValue());
       DocsRegistryService.StoredSite published =
           registry.publish(repository, name, version, bundle);
 
@@ -300,8 +302,6 @@ public class DocsRoutes {
       // native-image build, so this stack adds zero reflection configuration — the rule registry,
       // npm, maven and daemon all follow.
       respond(rc, 201, describe(published));
-    } finally {
-      deleteQuietly(archive);
     }
   }
 
@@ -321,15 +321,6 @@ public class DocsRoutes {
         .putHeader(HttpHeaders.CONTENT_TYPE, "application/json; charset=utf-8")
         .putHeader(HttpHeaders.CONTENT_LENGTH, Integer.toString(bytes.length))
         .end(io.vertx.core.buffer.Buffer.buffer(bytes));
-  }
-
-  /** The archive is scratch: a failure to remove it must not become the client's error. */
-  private static void deleteQuietly(Path path) {
-    try {
-      Files.deleteIfExists(path);
-    } catch (IOException e) {
-      LOG.warnf(e, "docs: could not remove the staged bundle %s", path);
-    }
   }
 
   /**
