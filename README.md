@@ -29,12 +29,16 @@ shared jars and both services answer the same paths.
 is carried through the split byte for byte: the libraries ship no migrations by design, each
 consuming service owns its own, and this one's is the original chain. That leaves orphaned tables
 behind — the git host's `git_pack`/`git_pack_file`/`git_repository_protection` (V4/V5) and the proxy
-tables — which is a cutover data question rather than a reason to rewrite history. The one visible
-consequence: V7 still **prefills three `oci-mirror` repository rows**, and rows of a type this
-service registers no profile for are omitted from the explorer listing and from the GC plan rather
-than reported with numbers nothing here can compute. There is a second consequence, less visible and
-worth knowing before reading further: excluding a profile does not unregister the wire code that
-ships beside it, so those three namespaces still answer a pull. See "The pull-through mirror".
+tables — which is a cutover data question rather than a reason to rewrite history.
+
+**The orphaned data was a second question, and V14 answered it.** V7 prefilled three `oci-mirror`
+repository rows on every fresh database, and rows of a type this service registers no profile for
+are omitted from the explorer listing and from the GC plan rather than reported with numbers nothing
+here can compute — but they were not merely untidy. Excluding a profile does not unregister the wire
+code that ships beside it, so while those rows stood the three namespaces still answered a pull.
+V14 deletes them, and any `npm-proxy`/`maven-proxy` row a deployment carried through the split, and
+that is what closes the path rather than merely disclaiming it. It drops no table, because two of
+the mirror's DAOs are live beans here. See "The pull-through mirror".
 
 ## Layout
 
@@ -202,19 +206,21 @@ Three things about the seam, none of them visible from either README alone:
 
 - **The hosted half refuses nothing new.** `/v2` here accepts, serves and conforms exactly as it did.
   What left is a second *kind* of namespace, not a restriction on this one.
-- **`oci-mirror` is an unclaimed type here, and V7 still prefills three rows of it.**
+- **`oci-mirror` is an unclaimed type here, and V14 took the last rows of it away.**
   `quarkus.arc.exclude-types` drops `OciMirrorProfile` from bean discovery, so `{"type":"oci-mirror"}`
-  on the ensure endpoint is a `400` naming the types that *are* registered — and the `hub`, `quay`
-  and `redhat` rows the migration left behind are **omitted from the explorer listing and from the GC
-  plan** rather than reported with figures nothing here can compute. The lineage is carried through
-  the split byte for byte, so removing those rows is a cutover data question rather than a migration.
-- **Excluding the profile does not unregister the wire code, and that is a leftover rather than a
-  feature.** `RegistryRoutes` injects `MirrorUpstream` outright and `resolveForPull` matches the type
-  by string, so a V7-prefilled namespace still resolves for a `GET` and a first segment naming no
-  repository row still remaps into `hub`. A pull aimed here can therefore still reach docker.io.
+  on the ensure endpoint is a `400` naming the types that *are* registered. V7's `hub`, `quay` and
+  `redhat` rows survived the split in the lineage, which is carried through byte for byte; V14 is
+  the migration that deletes them, along with any `npm-proxy`/`maven-proxy` row a deployment brought
+  with it. A cache row that still has content cached under it is left standing, because deleting it
+  would strand the blobs.
+- **Excluding the profile does not unregister the wire code, which is why the rows had to go.**
+  `RegistryRoutes` injects `MirrorUpstream` outright and `resolveForPull` matches the type by string,
+  so while a prefilled namespace stood it still resolved for a `GET` — and a first segment naming no
+  repository row still remapped into `hub`, so a pull aimed here could reach docker.io. With no row
+  and no upstream, `resolveForPull` answers `404 NAME_UNKNOWN` and `mirrors.hub()` answers nothing.
   Point dockerd's `registry-mirrors`, every rewritten `FROM` and every other client at
-  qits-platform-mirror's address instead: nothing should arrive here for an image this platform did
-  not push, and the day those rows go the path goes with them.
+  qits-platform-mirror's address regardless: nothing should arrive here for an image this platform
+  did not push.
 
 ### Reaching it from a client
 
@@ -449,7 +455,8 @@ there.
 
 What this side guarantees: the hosted registry above is unchanged, `NpmProxyProfile` is excluded
 from bean discovery so `{"type":"npm-proxy"}` is a `400` naming the registered types, and — unlike
-the OCI mirror — **no `npm-proxy` row was ever prefilled by a migration**. So there is nothing left
+the OCI mirror — **no `npm-proxy` row was ever prefilled by a migration**, so a fresh database never
+had one and V14 has taken out whatever a carried-over deployment brought. So there is nothing left
 behind to omit from a listing, and no path through this service dials npmjs: `NpmUpstream` still
 rides in on the shared jar, and reaching it needs a repository row of a type that cannot be
 created.
@@ -544,7 +551,8 @@ its own README.
 What this side guarantees: the hosted repository above is unchanged — the derived metadata, the
 derived checksums and the three path classes are exactly as described. `MavenProxyProfile` is
 excluded from bean discovery, so `{"type":"maven-proxy"}` is a `400` naming the registered types,
-and no `maven-proxy` row was ever prefilled by a migration, so nothing is left behind to omit from a
+and no `maven-proxy` row was ever prefilled by a migration — V14 takes out whatever a carried-over
+deployment brought — so nothing is left behind to omit from a
 listing and no path through this service dials Central. A build resolving third-party jars declares
 the mirror as its repository; `distributionManagement` still names this one.
 
@@ -729,9 +737,11 @@ Details a client trips over if it does not know them:
   `daemon-binaries`, `artifact_record` rows for the two CI
   types. One number with a type-dependent meaning beats five that are always null.
 - **A repository whose type no profile here claims is not listed at all**, and `itemCount` refuses
-  it rather than answering zero. That is the `oci-mirror` rows V7 prefills: counting them would mean
-  answering "how many things are in it" about a type this service cannot read, and reporting zero
-  would read as an empty repository rather than as somebody else's.
+  it rather than answering zero. Since V14 no such row should exist — that rule covered V7's
+  `oci-mirror` prefill and now covers only a cache row a deployment kept because content is still
+  cached under it. Counting one would mean answering "how many things are in it" about a type this
+  service cannot read, and reporting zero would read as an empty repository rather than as somebody
+  else's.
 - **404 is an unknown repository; 400 is a repository of the wrong type.** An npm repository has no
   images and never will, and reporting that as an empty list would read as an image registry that
   lost its images.
@@ -804,11 +814,12 @@ diskTotalBytes = ociUnionBytes + npmPublishedBytes + npmProxyTarballBytes
 `npmProxyPackumentBytes` is outside the identity because those bytes are rows, not files.
 
 **The four cache terms are structurally zero here** — no cache type is registered, so nothing can be
-attributed to one. The identity therefore has one known hole, and it is the split's leftover rather
-than a bug in the arithmetic: bytes cached under the `oci-mirror` rows V7 prefills are still reached
-by their surviving `oci_manifest` rows, so the census does not call them orphans, while
-`ociMirrorBytes` reports `0`. They are in no term. Reclaiming those rows is the cutover action that
-closes it.
+attributed to one. The identity had one known hole, and it was the split's leftover rather than a
+bug in the arithmetic: bytes cached under a mirror row are still reached by their surviving
+`oci_manifest` rows, so the census does not call them orphans, while `ociMirrorBytes` reports `0`.
+They are in no term. V14 closed it for every deployment that cached nothing, which is all of them
+that were bootstrapped fresh; where bytes really were cached the row is deliberately left standing,
+because deleting it would strand them, and reclaiming those is an ops action.
 
 **`orphanBytes` is not a rounding error, and it is the figure `daemon-binaries` exists to empty.**
 This store holds 124 MiB in three ELF binaries — the ci-daemon — uploaded through the OCI
@@ -1226,9 +1237,10 @@ What is left here is the seam, and it is three sentences:
 - **The `gc` jar's type mapping has no line for any of the three.** `GcTypeConfig.of` refuses a
   registered type with no configuration rather than defaulting it, and the three cache lines left
   with the engine — which is consistent, because their profiles are not registered either.
-- **A repository row whose type no profile claims is not planned.** The `oci-mirror` rows V7
-  prefills are exactly that: `GcPlanner` omits them, so a plan says nothing about them rather than
-  reporting zeros that read as a rule that ran and found nothing. The same rule keeps them out of
+- **A repository row whose type no profile claims is not planned.** V7's `oci-mirror` rows were
+  exactly that until V14 deleted them, and the rule still guards the one case V14 leaves alone —
+  a cache row with content under it: `GcPlanner` omits it, so a plan says nothing about it rather
+  than reporting zeros that read as a rule that ran and found nothing. The same rule keeps it out of
   the explorer listing.
 - **Their cached bytes are not orphans, and no sweep can reach them.** A blob becomes a candidate
   only by *losing* its last identity row to a strategy's own deletion, and nothing here deletes a

@@ -92,9 +92,10 @@ class PackagedProcessIT {
       // the binary.
       overrides.put("qits.artifacts.gc.pins.cd-base-url", "http://localhost:1/platform-deployments/api");
       overrides.put("qits.artifacts.gc.pins.ci-base-url", "http://localhost:1/ci/api");
-      // The mirror upstream override stays although nothing here mirrors: the oci jar carries both
-      // halves of its format, the shipped upstream defaults name real public registries, and a
-      // closed port is what keeps a stray miss from dialling quay.io or Docker Hub.
+      // The mirror upstream override stays although nothing here mirrors. V14 took V7's three
+      // prefilled upstream rows out, so this binary resolves no mirror namespace at all — but the
+      // oci jar still carries the miss path, and a closed port is what keeps a row put back by
+      // accident from dialling quay.io or Docker Hub out of a test.
       overrides.put("qits.artifacts.oci.mirror.endpoint-override", "http://localhost:1");
       return overrides;
     }

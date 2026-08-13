@@ -303,9 +303,18 @@ do not renumber it, and do not treat `V1__init.sql` as a squash baseline. Never 
 `db/migration`; that is a different database.
 
 **The lineage is carried through the byte-plane split unchanged, so it still creates the cache
-tables and still runs V7's prefill** — three `oci-mirror` repository rows and their upstreams — for
-types this service registers no profile for. That is a cutover data question, not a reason to
-rewrite history, and the descriptions below stay because the migrations do.
+tables** for types this service registers no profile for. That is not a reason to rewrite history,
+and the descriptions below stay because the migrations do.
+
+**V14 is what settled the data half.** V7's prefill — three `oci-mirror` repository rows and their
+upstreams — kept the mirror path formally reachable here long after the code left, because
+`resolveForPull` matches the type by string and the wire code ships on the `qits-registries-oci` jar
+regardless. V14 deletes those rows, plus any `npm-proxy`/`maven-proxy` row a deployment carried
+through the split. It **drops no table**: `OciMirrorUpstreamRepository` and
+`OciMirrorTagCheckRepository` are live beans here, read on the pull path and inside the hosted
+`collectTag` funnel, so a dropped table would be a runtime missing-table error no build shows. And
+its repository delete is **guarded** — a cache row with content still cached under it is left
+standing, because taking it would strand the blobs row-less and this store's GC cannot reach those.
 
 The OCI mirror owns two (V7): `oci_mirror_upstream`, whose slug is a foreign key into
 `artifact_repository` because every upstream is paired with the `oci-mirror` row its namespace
@@ -333,9 +342,10 @@ store. Access tracking owns two: V9 put a nullable `accessed_at` on `artifact_re
 to tell it apart from "read long ago". **A plan reserves no migration number**: three workstreams were
 widening this lineage at once, and the rule they share is "take the next free V at land time, and re-enumerate
 `ck_artifact_repository_type` from the `RepositoryType` enum as it stands in the tree"
-(proxy-pulling-normal-images.md §4). `OciMirrorMigrationTest` pins that by looping over
-`values()` — it owns a private file-H2 under `target/` and runs Flyway over the real directory,
-because every `@QuarkusTest` here wipes the tables and a prefill is invisible to all of them.
+(proxy-pulling-normal-images.md §4). `MigrationLineageTest` pins that with the ten keys spelled out —
+it owns a private file-H2 under `target/` and runs Flyway over the real directory, because every
+`@QuarkusTest` here wipes the tables, so what the chain leaves behind is invisible to all of them.
+That is the only place V14's deletions are provable too.
 
 The git host owns **three** tables — `git_pack`, `git_pack_file` (V4) and `git_repository_protection`
 (V5) — in this same lineage, on this same datasource. It used to own none, and this file said so
@@ -651,11 +661,11 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   releases are immutable — a shared coordinate would be order-dependent in exactly the way the
   registry exists to refuse.
 - **`qits.artifacts.oci.mirror.endpoint-override` still ships pointed at a closed port in the test
-  config, and removing it would put the internet back under the suite.** V7 prefills three upstream
-  rows naming real public registries, the `qits-registries-oci` jar carries the miss path whether or
-  not this service registers the mirror profile, and `resolveForPull` matches the type by string. So
-  any test touching `/v2/quay/…` — or a bare name with a `hub` row present — would dial out without
-  that key. `src/test/resources/application.properties` points it at `http://localhost:1`, and
+  config, and V14 is not a reason to remove it.** The rows are gone, so nothing resolves into the
+  mirror path any more — but the `qits-registries-oci` jar still carries the miss path, and any test
+  or fixture that puts a mirror row back would dial a real public registry with no key in the way.
+  It costs one line and it is the only thing standing between this suite and the internet.
+  `src/test/resources/application.properties` points it at `http://localhost:1`, and
   `PackagedProcessIT` passes the same value to the launched binary.
 - **Fixture content must be unique per RUN, not merely per test.** `clean-at-start` wipes the
   tables once per run, but nothing ever wipes `target/artifacts-svc-test-blobs`, and blobs dedupe
@@ -852,8 +862,10 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 The five bullets that follow are about the OCI **mirror** path. It is not this service's feature any
 more — the type, the upstream admin API and the eviction went to qits-platform-mirror — but the code
 is on this classpath regardless, in the `qits-registries-oci` jar, and excluding a profile does not
-unregister a route's `@Inject`. V7 still prefills three upstream rows, so the path is reachable here
-until those rows go. Read them as constraints on the running binary, not as a description of this
+unregister a route's `@Inject`. **V14 took the rows away, which is what makes the path unreachable
+rather than merely unwanted** — no `oci-mirror` row resolves and `mirrors.hub()` answers nothing, so
+the remap never fires. The code is still there, so a row put back would arm it again. Read the
+bullets as constraints on the running binary, not as a description of this
 repository's sources.
 
 - **`/v2` has two resolution seams and they are not interchangeable.**

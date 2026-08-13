@@ -24,11 +24,11 @@ import org.junit.jupiter.api.Test;
 /**
  * The lineage itself, run from empty — the one thing a {@code @QuarkusTest} cannot show.
  *
- * <p>Every suite in this module starts by wiping the tables, so what the migrations <em>put</em>
- * there is invisible to all of them: the prefilled mirror rows would be gone before the first
- * assertion, and a prefill that quietly stopped running would look exactly like a passing build.
- * This test owns a private database, runs Flyway over the real migration directory, and reads what
- * is there.
+ * <p>Every suite in this module starts by wiping the tables, so what the chain <em>leaves</em> there
+ * is invisible to all of them: a row would be gone before the first assertion either way, so a
+ * prefill that came back — or one that never went — would look exactly like a passing build. This
+ * test owns a private database, runs Flyway over the real migration directory, and reads what is
+ * there.
  *
  * <p>It also pins the rule the constraint is maintained by: full re-enumeration. Every migration
  * that touches {@code ck_artifact_repository_type} re-declares it naming every key, so whichever
@@ -127,10 +127,16 @@ class MigrationLineageTest {
   }
 
   @Test
-  void theThreeUpstreamsArePrefilledAndPairedWithAMirrorRepositoryEach() throws SQLException {
-    // Static public domains, so they belong in the lineage rather than in a deployment's data: a
-    // fresh platform mirrors quay, Red Hat and Hub with no manual step, which is what makes a
-    // rewritten `FROM localhost:8081/quay/…` work on first boot.
+  void v7sMirrorPrefillIsRetiredByTheEndOfTheChain() throws SQLException {
+    // V7 prefilled three `oci-mirror` repository rows and their upstreams; V14 takes them out again.
+    // This is the assertion that has to be read from a migrated database rather than from a suite:
+    // every @QuarkusTest here wipes the tables, so a prefill that came back would be invisible to
+    // all of them.
+    //
+    // The rows mattered because the wire code outlived the profile. `resolveForPull` matches the
+    // repository's type by string and reads the upstream table, so while a row stood a pull aimed
+    // here still resolved into somebody else's registry — and a first segment naming no repository
+    // still remapped into `hub`. No row, no path.
     Map<String, String> slugsByDomain = new LinkedHashMap<>();
     try (Connection connection = dataSource.getConnection();
         Statement statement = connection.createStatement();
@@ -140,25 +146,24 @@ class MigrationLineageTest {
         slugsByDomain.put(rows.getString(1), rows.getString(2));
       }
     }
-    assertEquals(
-        Map.of(
-            "docker.io", "hub",
-            "quay.io", "quay",
-            "registry.access.redhat.com", "redhat"),
-        slugsByDomain);
+    assertEquals(Map.of(), slugsByDomain, "the upstream rows went with the code that read them");
 
     assertEquals(
-        3,
-        count(
-            "select count(*) from artifact_repository where type = 'OCI_MIRROR'"
-                + " and name in ('hub','quay','redhat')"),
-        "every upstream is paired with the repository row its namespace resolves to");
+        0,
+        count("select count(*) from artifact_repository where type in"
+            + " ('OCI_MIRROR','NPM_PROXY','MAVEN_PROXY')"),
+        "no cache type is registered here, so no row of one may stand");
   }
 
   @Test
-  void theTagFreshnessTableIsThereForTheMissPathToWrite() throws SQLException {
-    // Nothing writes it yet (workstream BX does). It ships with the rest so the lineage is not
-    // re-opened for one table, the same way the npm tombstone shipped ahead of its only writer.
+  void theTwoMirrorTablesSurviveTheirRowsBecauseLiveCodeStillReadsThem() throws SQLException {
+    // V14 empties both and drops neither, which is the half of it that looks like an oversight.
+    // `OciMirrorUpstreamRepository` and `OciMirrorTagCheckRepository` ride in on the
+    // qits-registries-oci jar and are live beans here — excluding a profile does not unregister a
+    // DAO. `resolveForPull` reads the upstream table on every pull whose first segment names no
+    // repository, and `collectTag` deletes a tag's freshness row for HOSTED tags too. A dropped
+    // table turns both into a missing-table error at runtime, which no build here would show.
+    assertEquals(0, count("select count(*) from oci_mirror_upstream"));
     assertEquals(0, count("select count(*) from oci_mirror_tag_check"));
   }
 
