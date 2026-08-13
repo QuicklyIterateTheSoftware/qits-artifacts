@@ -167,11 +167,14 @@ class PackagedProcessIT {
 
   @Test
   void theBlobStoreBootsItsOwnSchemaAndServesBytes() {
-    // Reaching a repository row at all means Flyway migrated this process' own H2 file, the
-    // startup seed wrote its rows through Panache, and Jackson serialised them back. `qits`, `npm`,
-    // `npmjs` and `maven` are in the set because a packaged process is the only thing here that runs
-    // the seed for real: they are what let a fresh deployment take a `docker push`, an `npm publish`
-    // and an `mvn deploy` with no manual ensure call.
+    // Reaching a repository row at all means Flyway migrated this process' own PostgreSQL schema,
+    // the startup seed wrote its rows through Panache, and Jackson serialised them back. `qits`,
+    // `npm`, `maven`, `daemons` and `docs` are in the set because a packaged process is the only
+    // thing here that runs the seed for real: they are what let a fresh deployment take a `docker
+    // push`, an `npm publish`, an `mvn deploy` and a docs publish with no manual ensure call.
+    //
+    // `npmjs` is NOT in the set and stopped being at the byte-plane split — it was a pull-through
+    // cache and it went to qits-platform-mirror with the seeding line that made it.
     given()
         .when()
         .get("/artifacts/api/repositories")
@@ -179,7 +182,8 @@ class PackagedProcessIT {
         .statusCode(200)
         .body(
             "repositories.name",
-            hasItems("ci-screenshots", "ci-videos", "qits", "npm", "npmjs", "maven"));
+            hasItems(
+                "ci-screenshots", "ci-videos", "qits", "npm", "maven", "daemons", "docs"));
 
     byte[] png = png(120, 80);
     String id =
@@ -497,7 +501,9 @@ class PackagedProcessIT {
     // nothing references. The store here holds blobs pushed by the cases above, so the row-less
     // figures are a real reading rather than a zero that would pass either way.
     //
-    // Every one of the ten types is claimed now. oci-images and daemon-binaries must name their
+    // Every one of the seven REGISTERED types is claimed. Seven, not ten: the three cache profiles
+    // are vetoed out of bean discovery here, so a plan that reported on them would be reporting on
+    // qits-platform-mirror's types. oci-images and daemon-binaries must name their
     // strategy — and, with no qits-platform-deployments and no qits-ci to answer, must report the refusal rather than
     // a plan. That
     // fail-closed path only exists in the binary if the JDK HttpClient survived the compile, so this
@@ -510,7 +516,7 @@ class PackagedProcessIT {
         .statusCode(200)
         .body("dryRun", equalTo(true))
         .body("graceWindow", equalTo("P7D"))
-        .body("types", hasSize(10))
+        .body("types", hasSize(7))
         .body("types.find { it.type == 'oci-images' }.strategy", equalTo("OciImageGcStrategy"))
         .body("types.find { it.type == 'oci-images' }.error", containsString("qits-platform-deployments"))
         .body("types.find { it.type == 'oci-images' }.dead", hasSize(0))
@@ -563,7 +569,7 @@ class PackagedProcessIT {
         .statusCode(200)
         .body("dryRun", equalTo(false))
         .body("graceWindow", equalTo("P7D"))
-        .body("types", hasSize(10))
+        .body("types", hasSize(7))
         .body("aborted", containsString("qits-platform-deployments"))
         .body("types.find { it.type == 'oci-images' }.error", containsString("qits-platform-deployments"))
         .body("types.find { it.type == 'npm-packages' }.deleted", hasSize(0))
