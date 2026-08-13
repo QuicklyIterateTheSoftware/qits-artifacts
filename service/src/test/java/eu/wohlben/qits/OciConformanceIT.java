@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
+import eu.wohlben.qits.testdb.EmbeddedPg;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusIntegrationTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
@@ -77,15 +78,21 @@ class OciConformanceIT {
 
     static final Path ROOT = Path.of(System.getProperty("user.dir"), "target", "oci-conformance-it");
 
+    /** Its own database too: each IT class owns the state it writes. */
+    private static final String DATABASE = "artifacts_conformance_it";
+
     @Override
     public Map<String, String> getConfigOverrides() {
       Map<String, String> overrides = new LinkedHashMap<>();
-      // The deployed shape (file H2, embedded, no AUTO_SERVER), only relocated — same reasoning as
-      // PackagedProcessIT. Runtime config, so it reaches the already-built artifact as -D flags.
-      overrides.put(
-          "quarkus.datasource.artifacts.jdbc.url", "jdbc:h2:file:" + ROOT.resolve("h2/artifacts"));
+      // The launched binary's whole datasource, not a relocated default: the shipped config carries
+      // unresolvable QITS_RESOURCE_DB_* expressions on purpose, so without these three the process
+      // dies at Flyway. Its own database on the suite's embedded postgres — see PackagedProcessIT's
+      // profile for why the url can be read here at all. Runtime config, so it reaches the
+      // already-built artifact as -D flags.
+      overrides.put("quarkus.datasource.artifacts.jdbc.url", EmbeddedPg.url(DATABASE));
+      overrides.put("quarkus.datasource.artifacts.username", EmbeddedPg.USER);
+      overrides.put("quarkus.datasource.artifacts.password", EmbeddedPg.PASSWORD);
       overrides.put("quarkus.flyway.artifacts.clean-at-start", "true");
-      overrides.put("qits.artifacts.blobs-dir", ROOT.resolve("blobs").toString());
       overrides.put("qits.ci.intake-url", "http://localhost:1/post-receive");
       return overrides;
     }

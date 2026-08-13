@@ -13,6 +13,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import eu.wohlben.qits.testdb.EmbeddedPg;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusIntegrationTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
@@ -63,29 +64,36 @@ import org.junit.jupiter.api.Test;
 class PackagedProcessIT {
 
   /**
-   * Points the process' two on-disk locations under {@code target/} instead of the {@code ~/.qits}
-   * home the shipped defaults name — a test must never write to the developer's real data
-   * directory, and a stale H2 file there would make this suite order-dependent.
+   * Gives the launched process a database, because the shipped config deliberately has none: the
+   * {@code QITS_RESOURCE_DB_*} expressions are unresolvable outside a deployment, which is the
+   * refuse-to-boot stance. So this is not a relocation of a default any more — it is the whole
+   * datasource, and the binary would die at Flyway without it.
+   *
+   * <p><b>The database is the suite's own embedded postgres, and the url arrives through a system
+   * property.</b> {@link EmbeddedPg} publishes the port it took into {@code
+   * qits.test.embedded-pg.port}, which is what makes this safe: Quarkus instantiates a {@code
+   * QuarkusTestProfile} in TWO classloaders, so the static field in a second copy of that class is
+   * a second copy — the system property is the one thing they share, and it is what keeps this at
+   * one postgres rather than one per classloader.
    *
    * <p>All of these are runtime config, so they reach the already-built artifact as {@code -D}
-   * flags; nothing here re-augments. The paths are absolute because the launched process' working
-   * directory is not this JVM's contract.
+   * flags; nothing here re-augments. That is also why the datasource can move at all: url, username
+   * and password are runtime keys, while {@code db-kind} is build-time and stays what the jar ships.
    */
   public static class TargetDirState implements QuarkusTestProfile {
 
     static final Path ROOT = Path.of(System.getProperty("user.dir"), "target", "packaged-it");
 
+    /** Its own database on the shared instance, so the unit suite's rows are not in the way. */
+    private static final String DATABASE = "artifacts_it";
+
     @Override
     public Map<String, String> getConfigOverrides() {
       Map<String, String> overrides = new LinkedHashMap<>();
-      // A FILE H2, not the in-memory one the unit suite uses, and embedded exactly as the shipped
-      // default is: the file/embedded shape is the one the deployment runs, and `;AUTO_SERVER=TRUE`
-      // is precisely what a native binary cannot open (see the artifacts jar's
-      // microprofile-config.properties). Only the location moves.
-      overrides.put(
-          "quarkus.datasource.artifacts.jdbc.url", "jdbc:h2:file:" + ROOT.resolve("h2/artifacts"));
+      overrides.put("quarkus.datasource.artifacts.jdbc.url", EmbeddedPg.url(DATABASE));
+      overrides.put("quarkus.datasource.artifacts.username", EmbeddedPg.USER);
+      overrides.put("quarkus.datasource.artifacts.password", EmbeddedPg.PASSWORD);
       overrides.put("quarkus.flyway.artifacts.clean-at-start", "true");
-      overrides.put("qits.artifacts.blobs-dir", ROOT.resolve("blobs").toString());
       // No qits-platform-deployments or qits-ci here either, and the shipped defaults name them by their qits-net
       // aliases — which on a build machine resolve to whatever the resolver feels like, or hang.
       // Closed ports make the refusal deterministic while still driving a real HttpClient inside

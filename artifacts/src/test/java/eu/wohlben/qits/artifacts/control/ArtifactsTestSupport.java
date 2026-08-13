@@ -11,21 +11,22 @@ import eu.wohlben.qits.artifacts.persistence.NpmVersionTombstoneRepository;
 import eu.wohlben.qits.artifacts.persistence.OciManifestRepository;
 import eu.wohlben.qits.artifacts.persistence.OciMirrorUpstreamRepository;
 import eu.wohlben.qits.artifacts.persistence.OciTagRepository;
+import io.agroal.api.AgroalDataSource;
+import io.quarkus.agroal.DataSource;
 import io.quarkus.narayana.jta.QuarkusTransaction;
 import jakarta.inject.Inject;
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.attribute.FileTime;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.Comparator;
+import java.time.ZoneOffset;
 import java.util.HashMap;
 import java.util.Map;
-import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.junit.jupiter.api.BeforeEach;
 
-/** Wipes the on-disk blobs and both tables before each test so every case starts empty. */
+/** Wipes the blobs and every table before each test so every case starts empty. */
 abstract class ArtifactsTestSupport {
 
   @Inject ArtifactRecordRepository records;
@@ -52,11 +53,17 @@ abstract class ArtifactsTestSupport {
 
   @Inject BlobDiskIndex diskIndex;
 
-  @ConfigProperty(name = "qits.artifacts.blobs-dir")
-  String blobsDir;
+  /**
+   * The blob tables live in the same database as everything else, so this is the SAME datasource the
+   * Panache repositories above use. Reached as JDBC rather than through an entity because the blob
+   * store has none — it speaks plain SQL, and so does anything that has to wipe or age its rows.
+   */
+  @Inject
+  @DataSource("artifacts")
+  AgroalDataSource blobs;
 
   @BeforeEach
-  void reset() throws IOException {
+  void reset() {
     QuarkusTransaction.requiringNew()
         .run(
             () -> {
@@ -76,29 +83,68 @@ abstract class ArtifactsTestSupport {
               mirrorUpstreams.deleteAll();
               repositories.deleteAll();
             });
-    Path dir = Path.of(blobsDir);
-    if (Files.exists(dir)) {
-      try (var walk = Files.walk(dir)) {
-        walk.sorted(Comparator.reverseOrder()).forEach(ArtifactsTestSupport::deleteQuietly);
-      }
-    }
-    // The disk index is invalidated by BlobStore.promote, which is every write the service makes —
-    // but this wipes the directory from outside it, which is exactly the out-of-band change its age
-    // ceiling exists for. Saying so here rather than waiting a minute for it.
-    diskIndex.invalidate();
+    // blob first, then blob_content: the identity row is what points at the content, and removing
+    // the content cascades to every chunk. Neither is tied to the entity tables by a foreign key —
+    // blobs address the world by string metadata — so the order inside the pair is the whole rule.
+    execute("delete from blob");
+    execute("delete from blob_content");
   }
 
   /**
-   * Ages a blob file past the sweep's grace window.
+   * Ages a stored blob past the sweep's grace window.
    *
-   * <p>The window is read off the file's mtime, and a test's blobs are always seconds old — so
+   * <p>The window is measured from {@code stored_at}, and a test's blobs are always seconds old — so
    * without this every GC case would assert on what was withheld rather than on the reconciliation.
-   * Backdating is also the honest way round: it exercises the same clock comparison production runs
+   * Backdating is the honest way round: it exercises the same clock comparison production runs,
    * instead of configuring the window away.
    */
-  void backdate(String blobId, Duration age) throws IOException {
-    Path path = Path.of(blobsDir, blobId.substring(0, 2), blobId);
-    Files.setLastModifiedTime(path, FileTime.from(Instant.now().minus(age)));
+  void backdate(String blobId, Duration age) {
+    update(
+        "update blob set stored_at = ? where id = ?",
+        statement -> {
+          statement.setObject(1, Instant.now().minus(age).atOffset(ZoneOffset.UTC));
+          statement.setString(2, blobId);
+        });
+  }
+
+  /** How many staging areas exist — the assertion that replaces counting temp files. */
+  long stagingCount() {
+    return count("select count(*) from blob_content where state = 'STAGING'");
+  }
+
+  long count(String sql) {
+    try (Connection connection = blobs.getConnection();
+        Statement statement = connection.createStatement();
+        var rows = statement.executeQuery(sql)) {
+      rows.next();
+      return rows.getLong(1);
+    } catch (SQLException e) {
+      throw new IllegalStateException(sql, e);
+    }
+  }
+
+  void execute(String sql) {
+    try (Connection connection = blobs.getConnection();
+        Statement statement = connection.createStatement()) {
+      statement.execute(sql);
+    } catch (SQLException e) {
+      throw new IllegalStateException(sql, e);
+    }
+  }
+
+  /** Fills in a prepared statement's parameters, the way JDBC makes you. */
+  interface Binding {
+    void bind(PreparedStatement statement) throws SQLException;
+  }
+
+  void update(String sql, Binding binding) {
+    try (Connection connection = blobs.getConnection();
+        PreparedStatement statement = connection.prepareStatement(sql)) {
+      binding.bind(statement);
+      statement.executeUpdate();
+    } catch (SQLException e) {
+      throw new IllegalStateException(sql, e);
+    }
   }
 
   /** The full required-key set for a ci-screenshots upload of the given dimensions. */
@@ -126,13 +172,5 @@ abstract class ArtifactsTestSupport {
     m.put("qits.diff.hash", "diffhash");
     m.put("media.resolution.length", "12");
     return m;
-  }
-
-  private static void deleteQuietly(Path p) {
-    try {
-      Files.deleteIfExists(p);
-    } catch (IOException ignored) {
-      // best effort
-    }
   }
 }
