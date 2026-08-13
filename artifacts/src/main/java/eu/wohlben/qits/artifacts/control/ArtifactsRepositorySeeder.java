@@ -13,9 +13,10 @@ import jakarta.inject.Inject;
  *
  * <p><b>Hosted types only.</b> The pull-through caches — {@code npmjs}, {@code central} and the
  * three OCI mirror namespaces with their upstream rows — went to qits-platform-mirror with the code
- * that serves them (byte-plane-split-plan.md phase 4). They are not merely unseeded here but
+ * that serves them, in phase 4 of the byte-plane split. They are not merely unseeded here but
  * unwritable: the cache profiles that ride in on the qits-registries jars are excluded from bean
- * discovery, so an attempt to ensure one is a 400 naming the types that ARE registered.
+ * discovery, so an attempt to ensure one is a 400 naming the types that ARE registered. V14 deleted
+ * the rows the old seeder and V7's prefill left behind.
  *
  * <p>Purely additive — re-running is a no-op via {@link ArtifactRepositoryService#ensure}, which
  * also makes a repository's type immutable, so a name that somehow arrived as the wrong type is an

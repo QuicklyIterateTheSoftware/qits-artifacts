@@ -1,9 +1,15 @@
-# qits-platform-artifacts — working notes
+# qits-artifacts — working notes
 
-Read `README.md` first: it defines what this repo owns (the blob store and the git host, plus the
-three protocol registries built on the blob store — OCI at `/v2`, npm at `/artifacts/npm` and maven
-at `/artifacts/maven`), the one
-port, and the config surface. This file is the working conventions on top of it.
+Read `README.md` first: it defines what this repo owns (the hosted byte plane — the OCI registry at
+`/v2`, the npm registry at `/artifacts/npm`, the maven repository at `/artifacts/maven`, the daemon
+binaries, the docs bundles and the CI media, plus the GC over all of them), the one port, and the
+config surface. This file is the working conventions on top of it.
+
+**Git hosting is not here.** The smart-HTTP host, its DFS storage over blobs and its post-receive
+fan-out are **qits-githost**'s. No `eu.wohlben.qits.githost` package, no `git-storage` module and no
+JGit dependency remain in this tree, so anything below that names a git route, a pack table or a
+push hook is a fact about that repository and not about this one. The lineage still *creates* the
+git host's three tables (V4/V5) — see "Schema changes".
 
 ## The two rules that shape everything
 
@@ -12,8 +18,8 @@ port, and the config surface. This file is the working conventions on top of it.
 not a tradeoff to weigh, it is the thing this repo exists to avoid.
 
 That is why: the poms duplicate versions instead of inheriting them, no pom declares a `eu.wohlben:*`
-dependency, and `GitHostTest` provisions its own origin through the git host itself instead of
-using the monorepo's antrun-derived `fixtures/testing-repo.git`.
+dependency it cannot resolve from the published registry, and every wire suite synthesises its own
+fixture content in memory instead of reaching for a checked-in one.
 
 **`service/` compiles to a GraalVM native image**, the same rule qits-workspace-daemon and
 qits-gateway carry, and it extends the clone-alone rule rather than qualifying it: `.sdkmanrc` names
@@ -29,8 +35,8 @@ Two consequences worth stating before you reach for a dependency:
   proxies, `ServiceLoader`, resource loading by computed name and JNI/JNA all need registering, and
   the failure lands at *runtime* in the binary while the JVM suite stays green. This repo has
   already paid that bill four times over — see "Native" below — so treat `PackagedProcessIT`, not
-  `mvn verify`, as the gate for anything that touches JGit, Jackson-serialised DTOs or the
-  datasource url.
+  `mvn verify`, as the gate for anything that touches an outbound `HttpClient`, Jackson-serialised
+  DTOs or the datasource url.
 
 ## Native
 
@@ -47,47 +53,36 @@ one in is the library's, not this repository's.
 
 | Where | What | Symptom without it |
 |---|---|---|
-| `application.properties` | `--initialize-at-run-time` for `jgit.util.FileUtils`, `jgit.lib.internal.WorkQueue`, `jgit.internal.storage.file.WindowCache` | build fails: a seeded `Random`, a started `JGit-WorkQueue` thread in the image heap |
-| `application.properties` | `--initialize-at-run-time` for `jgit.internal.storage.dfs.DfsBlockCache` | **nothing yet** — measured, see below |
-| `application.properties` | `WindowCache` **stays** although no repository is file-backed any more | unmeasured, and the failure mode is a silent 404 on every git route — `UploadPack`/`ReceivePack` pull JGit's file-storage classes in regardless |
-| `githost/JGitReflection` | `values()` on every enum `Config.getEnum` reads | **every** git route 404s — `FileRepositoryBuilder.build` throws `NoSuchMethodException` and `open()` returns null |
 | `dto/UploadResult` | `@RegisterForReflection` | every upload 500s: the type is behind a `Response` return, so nothing registers it |
-| `PostReceiveNotifier` | the `HttpClient` **and** the retry `ScheduledExecutorService` are instance fields, not static | build fails: an `HttpClientFacade` in the image heap, and a started thread pool beside it |
-| `npm/NpmUpstream` | the `HttpClient` is an instance field, not static | same as above — an `HttpClientFacade` frozen into the image heap |
+| `npm/NpmUpstream` | the `HttpClient` is an instance field, not static | build fails: an `HttpClientFacade` frozen into the image heap |
 | `maven/MavenUpstream` | the `HttpClient` is an instance field, not static | same as above; the sixth outbound client, and the rule has still not changed. It reads and writes only `String`/`byte[]` and needs nothing else declared — the maven stack, like `registry` and `npm`, still adds zero native-image configuration |
 | `gc/CdHttpDeploymentPins`, `gc/CiHttpDaemonPins` | the `HttpClient` is an instance field, not static | same as above; the third and fifth outbound clients, and the rule has not changed. It moved with the class when GC became its own module — the rule travels with the client, not with the package |
 | `registry/MirrorUpstream` | the `HttpClient` is an instance field, not static — and so is `MirrorBearerTokens`' `ObjectMapper`, which is reachable from one | same as above; the fourth outbound client, and the rule still has not changed |
-| `githost/HttpRepositoryNameResolver` | the `HttpClient` is an instance field, not static | same as above; the seventh outbound client, and the rule has still not changed — it travels with the client, not with the package, so it applies in `githost` exactly as in `gc`. It reads the answer as a `JsonNode` and needs nothing else declared |
 | artifacts' `microprofile-config.properties` | H2 url with no `AUTO_SERVER` | the binary dies at boot on `ClassNotFoundException: org.h2.server.TcpServer` |
 | `registry/MirrorUpstream`'s config | `endpoint-override` injected as `Optional<String>`, not `String` | the binary dies at boot on `Failed to load config value of type java.lang.String` — SmallRye reads a **configured-empty** value as absent, and that key ships blank. `defaultValue = ""` does not help. Invisible to `mvn verify`, where every test sets a real value |
 
-Only the first is a build-time failure. The rest are green builds that fail in production, which is
-why the IT exists and why it drives a real `git clone`/`push` rather than asserting a status code.
+The `HttpClient` rows are build-time failures. The rest are green builds that fail in production,
+which is why the IT exists and why it drives real pushes and pulls rather than asserting a status
+code.
 
-The git host's content reads (`blob`/`tree`) needed **nothing added** — `TreeWalk` and `RevWalk`
-read only config enums `JGitReflection` already names — but they reach JGit's object and tree
-parsing, which no other route here does, so `PackagedProcessIT.contentReadsSurviveTheCompile` is
-what says so rather than an assumption.
-
-`DfsBlockCache` is the one entry here that is **precautionary rather than earned**, and it is
-labelled so rather than quietly padding the list: the image builds green with and without it —
-measured, both ways — so nothing observed has needed it. It is the direct analogue of `WindowCache`
-above (a large static cache on the object-read path, one line below it in the same library) and it
-is the only DFS class in that shape, so it is cheaper to declare than to rediscover. Drop it if a
-later measurement shows it is dead weight; do not assume it earned its place.
+**`quarkus.native.additional-build-args` is gone, and the deletion is the entry worth knowing.** It
+carried nothing but `--initialize-at-run-time` flags for JGit statics that native-image refuses to
+freeze into the image heap — `FileUtils`, `WorkQueue`, `WindowCache`, `DfsBlockCache` — and JGit
+left with the git host. Nothing here needs the key today. Anything that brings a static cache or a
+started thread back onto the classpath needs it again, and the symptom is a *build* failure naming
+the class, which is the friendly half of this table.
 
 ## Paths
 
 Almost everything is served under the `/artifacts` gateway segment — `qits-gateway` routes verbatim
 by prefix, so an unprefixed route is normally unreachable, on `qits-net` as much as through the
-gateway. Five second-level segments and the segment itself, plus one root-level exception:
+gateway. Four second-level segments and the segment itself, plus one root-level exception:
 
 | Prefix | Machinery | Moves with |
 |---|---|---|
 | `/artifacts/` | the Angular SPA, built and served by Quinoa from the `src/main/webui` submodule | `quarkus.quinoa.ui-root-path` **and** the client's own `baseHref` |
 | `/artifacts/api/**` | JAX-RS | `quarkus.rest.path` |
 | `/artifacts/q/**` | Quarkus' non-application root (openapi, swagger-ui, health) | `quarkus.http.non-application-root-path` |
-| `/artifacts/git/**` | raw Vert.x routes in `GitHostRoutes` | **nothing** — the segment is a literal in the code |
 | `/artifacts/npm/**` | raw Vert.x routes in `NpmRoutes` (the npm registry; only the hosted type is registered here) | **nothing** — a literal, and `NpmPaths.BASE` is the only place it is spelled |
 | `/artifacts/maven/**` | raw Vert.x routes in `MavenRoutes` (the maven repository; only the hosted type is registered here) | **nothing** — a literal, and `MavenPaths.BASE` is the only place it is spelled |
 | `/artifacts/daemons/**` | raw Vert.x routes in `DaemonRoutes` (the platform's own daemon binaries) | **nothing** — a literal, and `DaemonPaths.BASE` is the only place it is spelled |
@@ -105,10 +100,10 @@ The SPA is the one that takes the *whole* segment, so it is the one that can swa
 Quinoa's SPA re-route is a catch-all at `/artifacts/*` registered near-last, so anything with a real
 route in front of it still wins — but a request matching **no** route is rerouted to `index.html` and
 answers `200 text/html`. `quarkus.quinoa.ignored-path-prefixes` is what stops that, and it is set
-explicitly (`/api,/q,/git,/npm,/maven,/daemons,/docs,/v2`) rather than left to Quinoa's derivation,
+explicitly (`/api,/q,/npm,/maven,/daemons,/docs,/v2`) rather than left to Quinoa's derivation,
 because the
 derivation reads `quarkus.rest.path` and `quarkus.http.non-application-root-path` and **nothing
-names `/git`, `/npm`, `/maven` or `/daemons`**. `/daemons` is the least forgiving omission of the
+names `/npm`, `/maven`, `/daemons` or `/docs`**. `/daemons` is the least forgiving omission of the
 four: a bootstrap script `curl`s a daemon binary and execs it, so `index.html` at 200 becomes an
 executable that is a web page.
 Setting the key REPLACES the derivation rather than extending it, and its values are relative to
@@ -136,61 +131,32 @@ reference against `<host>/v2/` and accept no path prefix. The gateway claims it 
 on its artifacts entry (`QitsService.ARTIFACTS("/v2")`) rather than as a service of its own, so a
 deployment still names one host and gets both.
 
-The last three lines are the ones that bite: no config key moves those routes, and no JAX-RS test
-covers them. `GitHostTest`, `RegistryTest`, `NpmRegistryTest`, `MavenRegistryTest` and `DaemonRegistryTest`
-are the only things that would catch them drifting, which is why all five spell their paths out
-absolutely.
+The last four lines are the ones that bite: no config key moves those routes, and no JAX-RS test
+covers them. `RegistryTest`, `NpmRegistryTest`, `MavenRegistryTest`, `DaemonRegistryTest` and
+`DocsRegistryTest` are the only things that would catch them drifting, which is why they all spell
+their paths out absolutely.
 
-Two outbound/inbound addresses are contracts other repos hold:
-
-- `/artifacts/git/<repoId>` and `/artifacts/git/<projectId>/<repoName>` — dialled by qits-ci and by
-  qits-workspace-daemon's `Provisioner`.
-- `/artifacts/git/<repoId>/blob/<rev>/<path>` and `/artifacts/git/<repoId>/tree/<rev>[/<path>]` —
-  the content reads qits-ci's pipeline-config reader uses instead of a local mirror. Both answer
-  the resolved commit in a `Git-Commit-Sha` header, **not** an `X-Qits-*` one: the gateway strips
-  that prefix unconditionally. `blob`/`tree` are literal second segments and the routes are
-  registered ahead of the name-addressed scheme; a clone of a repository *called* blob or tree is
-  the one overlap, and the handler `next()`s it back to the router rather than answering it.
-- `qits.ci.intake-url` → `/ci/api/events/post-receive` — qits-ci's path, not ours. The notifier
-  retries a failed delivery on the `qits.post-receive.retry-delays` schedule and then logs the loss
-  at **WARN**, so a wrong value here says so in the log after about three minutes and CI never runs.
-  It carries a bearer for `aud=qits-ci` when this deployment has client credentials, and nothing
-  when it does not — re-fetched per attempt, so a retry never presents a token an idp cutover has
-  invalidated.
-- `qits.projects.intake-url` → `/projects/api/events/post-receive` — the same event, same body,
-  qits-projects' path. It answers by pushing the repository to its GitHub sync target, so a wrong
-  value here is a backup that never happens, announced by the same WARN. It carries no credential,
-  and — the one difference from the ci delivery — `-o qits.no-ci` does **not** suppress it: a backup
-  is owed even for a push CI ignores. Tags are excluded from both; the tag side of a backup is
-  projects' own sweep.
-- **The delivery is retried, and that was paid for.** Both consumers get up to five attempts, at
-  roughly 5s/15s/45s/2m (`qits.post-receive.retry-delays`, one entry per retry). Any 2xx is success;
-  a refused connection and any non-2xx are both retried, because during a bootstrap they are the
-  same outage a second apart. Measured twice on two consecutive from-scratch bootstraps: the
-  database container is redeployed one phase before the next push, qits-ci's pool is severed
-  (`FATAL: terminating connection due to administrator command`), the intake 500s, and with one
-  fire-and-forget attempt swallowed at debug the bootstrap then hung an hour on a build nothing had
-  queued. Every attempt is off-thread — the hook fires inside `ReceivePack.receive()` before the push
-  response is written, so nothing here may block or throw, and that constraint outranks the retry.
+**The post-receive fan-out is not an address this service holds any more.** `qits.ci.intake-url`,
+`qits.projects.intake-url` and `qits.post-receive.retry-delays` went to qits-githost with the hook
+that fired them, and there they are durable domain events rather than an HTTP call. Setting any of
+them on a deployment of this service does nothing.
 
 ## Package and module conventions
 
-Two top-level packages, deliberately kept apart:
+One top-level package with a subpackage kept deliberately apart from it, plus the wire stacks:
 
 - `eu.wohlben.qits.artifacts.*` — the blob store. `artifacts/` holds `entity`, `persistence`, `dto`,
   `mapper`, `control`, `error`; `service/` holds only `api`. Entities are Panache active-record with
   public fields; mappers are MapStruct `@Mapper(componentModel = "jakarta")`.
   - `eu.wohlben.qits.artifacts.gc` and `.gc.dto` (module `gc`) are **garbage collection** — a
-    process modelled from within qits-platform-artifacts rather than artifacts domain
-    (`artifacts-gc-plan.md`, settlement). A subpackage rather than a sibling top-level name, and
+    process modelled from within this service rather than artifacts domain (the 2026-08-05 GC
+    settlement). A subpackage rather than a sibling top-level name, and
     deliberately **not** `artifacts.control` in a second jar: adapters sharing a package with the
     code they extend is the split package Quarkus' `SplitPackageProcessor` warns about on every
-    build, the same trap `githost.persistence` avoids.
+    build.
   - **The dependency runs one way: `gc` → `artifacts`, never back.** `artifacts` does not know a
-    collector exists, which is the property that keeps a retention rule out of the write path. `gc`
-    does not depend on `git-storage` either — pack blobs are row-less to the census and structurally
-    unreachable by any sweep. `service` depends on all three and hosts GC's only web surface,
-    `api/GcPlanController`.
+    collector exists, which is the property that keeps a retention rule out of the write path.
+    `service` depends on both and hosts GC's only web surface, `api/GcPlanController`.
   - Where a strategy needs one of the store's package-private funnels, `artifacts` opens a **narrow
     public door** — `BlobReclaim` (over `BlobStore.delete`/`lastWrittenAt`/`blobGracePeriod`),
     `OciRegistryCollection` (`collectTag`/`collectManifest`), `NpmRegistryCollection` (`collect`) —
@@ -201,82 +167,30 @@ Two top-level packages, deliberately kept apart:
     one — `collect` for the hosted type, `evictProxiedArtifact`/`evictProxiedMetadata` for the
     cache — and the split is the point: one table holds both maven types' rows, so the doors differ
     by which repository type they refuse.
-- `eu.wohlben.qits.githost` — the git host. Mostly `service/`, plus `eu.wohlben.qits.githost.storage`
-  in the `git-storage` module. It is **not** folded into `artifacts`: it shares no code with the blob
-  store, and keeping the package separate keeps a future second split cheap. It now shares the
-  datasource and the Flyway lineage (see "Schema changes"), which is the one part of that sentence
-  that changed.
-  - `githost.storage` (module `git-storage`) is the DFS storage **engine** and its two declared
-    ports. Its only compile dependency is JGit.
-  - `githost.persistence` (module `service`) is where those ports are **implemented**, plus the git
-    host's entities. It is a separate package name from `githost.storage` on purpose: putting the
-    adapters in the same package as the ports makes a split package across two jars, which Quarkus'
-    `SplitPackageProcessor` warns about on every build and which buys nothing — nothing here needs
-    package-private access.
-  - The adapters can only live in `service`. `git-storage` may not depend on
-    `qits-artifacts-artifacts` and `artifacts` may not depend on `git-storage` — they are different
-    contexts — and `service` is the one module that already depends on both.
-- `eu.wohlben.qits.registry`, `eu.wohlben.qits.npm`, `eu.wohlben.qits.maven` and
-  `eu.wohlben.qits.daemon` — the four protocol
-  wire stacks, `service/` only. Unlike the git host these *do* share the blob store, so the split is
-  by layer rather than by context: every byte and every row goes through `artifacts/control`
+- `eu.wohlben.qits.registry`, `eu.wohlben.qits.npm`, `eu.wohlben.qits.maven`,
+  `eu.wohlben.qits.daemon` and `eu.wohlben.qits.docs` — the protocol
+  wire stacks. Only the last two are written here; the first three arrive as beans on the
+  qits-registries jars and register their own routes. They all *share* the blob store, so the split
+  is by layer rather than by context: every byte and every row goes through a control-layer service
   (`OciRegistryService`, `NpmRegistryService`, `MavenRegistryService`, `DaemonRegistryService`,
-  `BlobStore`), and the
-  `service/` package holds routes, error envelopes and — for npm and maven — the outbound upstream
+  `DocsRegistryService`, `BlobStore`), and the
+  wire package holds routes, error envelopes and — for npm and maven — the outbound upstream
   client. A wire package that touched a Panache repository directly would be the drift to watch for.
 
 `artifacts` carries its own `error/` package (`ArtifactsException` and the four status-carrying
 subtypes) rather than the monorepo's `domain/error/*`. It always did — this is one of the few
 places where the duplicate-now register in `migration-plan.md` §5 was already satisfied at import.
 
-## The git host's storage
-
-A repository is a JGit `DfsRepository`: its packs, pack indexes, refs and reftables are blobs in
-this service's own content-addressed store, listed by `git_pack`/`git_pack_file`. Nothing is on
-disk as a repository, and there is no key to pick anything else.
-
-`DfsGitRepositoryProvider` is the one implementation of `GitRepositoryProvider`, and
-`GitHostRoutes.open` is the **whole** seam — one method. `infoRefs` and `service` take a
-`Repository` and never learn where it came from.
-
-A second backend — bare origins at `<qits.repositories.data-dir>/<repoId>/origin`, on a volume
-qits-projects and qits-workspaces also mounted — ran beside this one for a release cycle, selected
-by `qits.repositories.git.storage`. Both it and the volume are gone: the property, the data-dir
-property, `FileGitRepositoryProvider` and `GitRepositoryBackend` no longer exist, and neither does
-the two-way volume contract the Dockerfile used to carry.
-
-Three things about DFS storage that are not obvious and cost time to rediscover:
-
-- **The git CLI cannot open one.** No directory to point `--git-dir` at, no worktree to add, no
-  config file to write. Every operation is the wire protocol or in-process JGit — which is the point,
-  not a limitation: receive-pack becomes the only writer, so no ref moves without firing
-  `post-receive`.
-- **`getConfig()` does not persist.** That is why `[qits] protectDefaultBranch` is a row rather than
-  a line in a repository's config: the config write is a no-op, so the old read would have answered
-  the platform default for every repository with no symptom anywhere.
-- **Existence is answered by the ref database, not by a table.** A repository that has been created
-  has a reftable in the catalog; one that has not reads empty and is a 404. There is deliberately no
-  `git_repository` row to keep in step.
-
 ## Adding a dependency on another context
 
 Don't. Declare a port in the package that needs it, inject it as `Instance<T>`, and make absent a
 supported configuration with a documented behaviour — see the table in the README.
-`RepositoryNameResolver` is the only one, and it is optional because the id-addressed git scheme
-predates the name-addressed one and remains the daemon's fallback.
 
-It now ships an adapter of its own, `HttpRepositoryNameResolver`, and that does **not** make it a
-third pin-port-style exception: absent is still a supported configuration with the documented
-behaviour. Unset `qits.projects.name-resolver-url` returns empty without a call, which is the same
-404 an absent bean gives; and the adapter **never throws**, because `GitHostRoutes` has no exception
-clause on this port. `@DefaultBean` is what keeps a consuming application — and the test suite's
-`FakeRepositoryNameResolver` — able to implement the port instead.
-
-**The two GC pin ports are the exception, and they break the rule in both halves on purpose.**
+**The two GC pin ports are the only ones left, and they break the rule in both halves on purpose.**
 `CdDeploymentPins` (`GET /cd/api/pins`) and `CiDaemonPins` (`GET /ci/api/daemon`) are ports this repo
 also implements, as plain GETs on qits-net, and absent is *not* a supported configuration: they
 throw, and a run that cannot read a pin deletes nothing at all. Both halves were decided rather than
-drifted into (`artifacts-gc-plan.md` ⚖4 and the settlement), and both live in the `gc` module, which
+drifted into (the GC settlement's ⚖4), and both live in the `gc` module, which
 narrows the exception rather than removing it: the `artifacts` library dials nothing and is
 domain-blind again, and the two outbound calls belong to the process that needs them. The keep-sets
 are "which image shas would a restart or a rollback pull" and "which daemon would a run launch";
@@ -292,8 +206,7 @@ an `ACTIVE(A) / FAILED(C) / DECOMMISSIONED(B)` history pinned an attempt that ne
 dropped the sha a rollback restores. A keep-set defined twice is a keep-set waiting to disagree.
 
 Never add a JPA relation to another context's entity, and never a foreign key. Blobs address the
-world by **string metadata**; the git host addresses it by **repo id string**. Both are in a
-different database from whatever they name.
+world by **string metadata**, and whatever they name is in a different database.
 
 ## Schema changes
 
@@ -347,40 +260,17 @@ it owns a private file-H2 under `target/` and runs Flyway over the real director
 `@QuarkusTest` here wipes the tables, so what the chain leaves behind is invisible to all of them.
 That is the only place V14's deletions are provable too.
 
-The git host owns **three** tables — `git_pack`, `git_pack_file` (V4) and `git_repository_protection`
-(V5) — in this same lineage, on this same datasource. It used to own none, and this file said so
-flatly; the sentence was amended rather than left standing when the second storage backend landed
-(`git-host-storage-unification-plan.md`, decision ⚖5). The alternative was a second named datasource
-with its own H2 file and its own Flyway config, for three tables that produce three rows per push
-against a 746 MB database. Nothing here is a foreign key into another context, and the rule above it
-is unchanged: the git host addresses the world by repo-id **string**.
+**Three tables in this lineage are the git host's, and they are orphans.** `git_pack`,
+`git_pack_file` (V4) and `git_repository_protection` (V5) were created here while the host was, and
+the chain is carried through the byte-plane split byte for byte, so they are still created on every
+fresh database. Nothing in this tree reads or writes them, and the entities that did left with the
+host. They are a cutover data question, like the cache rows V14 settled; do not renumber the chain
+to make them go away.
 
-Their entities live in `service`, under `eu.wohlben.qits.githost.persistence` — not in `artifacts/`.
-`service/src/main/resources/application.properties` names that package in
-`quarkus.hibernate-orm.artifacts.packages`, which **replaces** the value the artifacts jar ships
-rather than extending it, so `eu.wohlben.qits.artifacts.entity` is spelled there too. It is spelled
-in `service` and not in the jar's `microprofile-config.properties` because that package is not on
-`artifacts/`'s classpath at all.
-
-### We do not garbage collect git
-
-Not "we have not got round to it" — a recorded decision with a number beside it
-(`git-host-storage-unification-plan.md`, ⚖2). Nothing frees a blob, so a repack does not reclaim
-space, it **duplicates**: `DfsGarbageCollector` writes the new pack, the packs it replaced lose their
-catalog rows, and their bytes stay forever. Measured on the platform's largest real repository, one
-run took it from **7.8 MB to 15 MB** — against 8.4 MB for the bare it replaced.
-
-The accepted cost instead is roughly three blobs and three rows per push: about **75 blobs per active
-repository per year** at the measured rate, against a blob store already past 5 GiB. It is written
-down because the one thing that must never happen is someone running a repack to save space. The
-posture is repeated in `V4__git_pack_catalog.sql`, in `GitPack`'s javadoc and in
-`git-storage/README.md`, and `GarbageCollectionTest` asserts the amplification rather than hiding it.
-
-`BlobStore` **now has a delete, and the sweep now calls it** — only behind
-`POST /artifacts/api/gc/sweep` (see "Garbage collection" below) — and this paragraph still holds,
-which is worth being precise about: a repack still duplicates, the measured 7.8 MB → 15 MB stands,
-and the git pack blobs are row-less to the census and therefore untouchable — no sweep can reach
-them. Pack GC is its own later workstream and needs the DFS migration first.
+The persistence unit is the artifacts jar's own: `quarkus.hibernate-orm.artifacts.packages` names
+`eu.wohlben.qits.artifacts.entity` in that jar's `microprofile-config.properties`, and `service`
+no longer overrides it — the override existed only to add the git host's entity package, and it
+**replaces** rather than extends, so re-adding one means spelling both.
 
 ## Garbage collection
 
@@ -429,12 +319,13 @@ collection" section is the contract; these are the rules that get "helpfully" re
   is not an allowlist and must not become one: 124 MiB of this store has no row, and one of those
   blobs is the CI daemon binary every build downloads by digest.
 - **Two engines, and this supersedes the "no shared policy" rule.** Settled by user decision
-  2026-08-05 (`artifacts-gc-plan.md`, "Settlement"). The rules live in `CacheEvictionStrategy` (a
+  2026-08-05 (the GC settlement; history in the superproject's git). The rules live in
+  `CacheEvictionStrategy` (a
   cache holds re-fetchable content, so everything unaccessed past the window goes) and
   `OwnArtifactsStrategy` (own artifacts keep the last 2 released versions per identity group, the
   rest ages out), mapped onto types by configuration. **Only `OwnArtifactsStrategy` is in this
   repository** — the cache engine and its three adapters went to qits-platform-mirror with the types
-  they collect (byte-plane-split-plan.md phase 4). The doctrine is stated in both halves anyway,
+  they collect, in phase 4 of the byte-plane split. The doctrine is stated in both halves anyway,
   because the rule below is what stops the surviving engine being re-split. **The superseded rule was "one bespoke
   strategy per type, no shared policy code, no retention-rule framework"** — it is history, and
   re-splitting an engine back into per-type rules is now the wrong change, in the same words the
@@ -474,8 +365,8 @@ collection" section is the contract; these are the rules that get "helpfully" re
   **sweep receipt carries the same section**, an aborted one included. Excluded types say
   `GcRules.EXCLUDED_NOTE` on their own line as well as in the configuration echo — `dead: []`
   beside a claimed strategy otherwise reads as a rule that ran and found nothing.
-- **The own engine is live over every configured type.** The settlement (`artifacts-gc-plan.md`,
-  2026-08-05) replaced the bespoke strategies with `CacheEvictionStrategy` + `OwnArtifactsStrategy`,
+- **The own engine is live over every configured type.** The settlement of 2026-08-05 replaced the
+  bespoke strategies with `CacheEvictionStrategy` + `OwnArtifactsStrategy`,
   mapped onto types by `qits.artifacts.gc.type.<wire-name>.strategy|window` (`GcTypeConfig`).
   Here: `oci-images`, `daemon-binaries`, `npm-packages`, `maven-packages` and `docs` run the own
   engine, and only the two CI types are `excluded` — a decision rather than a gap. **The three cache
@@ -631,10 +522,11 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 
 ## Tests
 
-- `mvn verify` runs 580 tests (116 in `artifacts/`, 18 in `git-storage/`, 135 in `gc/`, 311 in
-  `service/`) in about three minutes — counted from the surefire reports, which the previous figure
-  here was not: it claimed 617 with 157 in `artifacts/`, and that module has counted 116 for a while.
-  Nothing here
+- `mvn verify` runs 222 tests (35 in `artifacts/`, 98 in `gc/`, 89 in `service/`) in about a
+  minute — counted from the surefire reports, which the previous figure here was not: it claimed 580
+  across four modules, two of which had left with the byte-plane split. The registry, npm and maven
+  wire suites went to the qits-registries jars with the code they drive, so what runs here is the
+  hosted docs and daemon wires, the explorer, GC and the JAX-RS boundary. Nothing here
   needs docker — and that is the constraint that shapes the registry suite: `docker`, `podman` and
   `skopeo` may not be assumed present, so `registry/OciClient` + `registry/TinyImage` synthesise a
   real image in memory and drive a full push/pull over the JDK `HttpClient`. It uses that rather than
@@ -672,16 +564,9 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   globally and content-addressed. Reuse an earlier run's image content and its layer is already on
   disk — a blob-store hit, so any count over stored bytes comes out one short with nothing in the
   failure to say why. It is the one thing to check first if a count is off by one.
-- `mvn verify -Dnative` runs those, then 23 more against the compiled binary: `PackagedProcessIT`
-  (21) and `ProtectedGitHostIT` (2). They are two classes because they are two process
-  configurations — `PackagedProcessIT` asserts the SHIPPED defaults leave the default branch
-  unprotected, and the seatbelt cases need it on — and `@TestProfile` is per class. The protection
-  cases used to turn it on per repository with one `git config` on the served bare; the override is
-  a row now, and a packaged process owns its H2 exclusively with `clean-at-start`, so no test
-  outside it can write that row. There is no HTTP verb for it (workstream AT's), which is why the
-  platform switch is what these two flip.
+- `mvn verify -Dnative` runs those, then `PackagedProcessIT` against the compiled binary.
   It is the only suite that starts a **process** rather than an in-JVM Quarkus, so it is where the
-  route stacks are proved to coexist and where JGit is proved to have survived the compile.
+  route stacks are proved to coexist and where the binary is proved to boot at all.
   It is also the **only** place the web UI can be tested at all: Quinoa logs "Quinoa is disabled by
   default in tests" and registers neither the static resources nor the SPA re-route, so a
   `@QuarkusTest` asserting anything about `/artifacts/` passes against a process that has no client
@@ -705,49 +590,6 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   `RegistryTest`, because that suite drives a client written from the same misreading. **The fixes are
   guarded by unit tests, not by this IT** — it is opt-in and needs Go, so anything it proves must also
   be provable by `mvn verify` alone or it is not actually guarded.
-- The git host's protection cases are **three** `@QuarkusTest` classes, not one, and the split is
-  forced: `qits.repositories.git.push-token` configured / configured-empty / unset are process
-  configurations, and a `@TestProfile` is per class. `GitHostTest` runs under the SHIPPED config
-  (protection off, token unset) and carries no profile at all; `GitHostPushTokenTest` and
-  `GitHostEmptyPushTokenTest` carry the token cases. `GitHostFixture` is the shared git CLI driver —
-  static, because the three classes cannot usefully share a base class. Note that SmallRye reads a
-  configured-empty value as *absent* for an `Optional<String>`, which is why the hook must treat
-  unset and empty identically rather than distinguishing them.
-  `GitHostTest` used to be an abstract `GitHostSuite` with one subclass per storage backend; there
-  is one backend, so it is one class again.
-- **`GitHostTest` reads no directory, and that constraint outlived the second backend.**
-  A repository is provisioned through `GitRepositoryProvider` and every fact about it is then asked
-  over the wire — `git ls-remote`, not `git rev-parse` in the served bare. There is no bare to read:
-  a `DfsRepository` has no directory for the git CLI to open, by design. Two consequences worth
-  knowing before extending it: protection is turned on through `RepositoryProtectionStore`, not by
-  writing a repository's config; and an annotated tag is proved annotated by the `<ref>^{}` line in
-  the advertisement rather than by `cat-file -t`. `ls-remote` **filters that peeled line out** when
-  the pattern is the exact ref name, because it matches patterns against ref names and `<ref>^{}` is
-  not one — the fixture globs.
-- **Tag pushes are measured, not assumed** (`GitHostTest`, the "tags" block, and one native case).
-  Four answers other repos build on:
-  - An annotated tag push is **accepted** with protection on and no push option. `ProtectedRefHook`
-    guards one ref name — the repository's `HEAD` — so a tag is just another ref to it.
-  - One `git push` with `HEAD:refs/heads/main` **and** `<tagobj>:refs/tags/<v>` arrives as **one**
-    receive-pack: one pre-receive, one post-receive, one set of push options. Asserted by counting
-    the POSTs under `GIT_CURL_VERBOSE`, which is the only way to tell it from two pushes.
-  - **`--atomic` works**, which JGit's file-backed ref store does not suggest: the advertisement
-    offers `atomic` and a branch the hook refuses takes the tag down with it. Without the flag the
-    tag lands anyway and outlives a release that never happened.
-  - A non-forced push over an **existing** tag ref is refused (`already exists`) — the version
-    uniqueness guarantee. The refusal is the git CLI's, off the advertisement: this host allows the
-    move under `--force`, because JGit's `receive.denyNonFastForwards` default is off. So a release
-    push must never pass `--force`, and it should pass `--atomic` — otherwise a duplicate version
-    rejects the tag while its merge commit lands on main.
-- `GitHostFixture.seedOrigin()` asks `GitRepositoryProvider` for an empty repository and pushes one
-  commit into it over the served endpoint. `PackagedProcessIT.seedOrigin()` does the same against
-  the binary through `PUT /artifacts/git/:repoId` — no in-JVM bean there — and both ITs read every
-  ref back with `ls-remote` rather than in a directory. Tests that need the name-addressed scheme
-  register the alias on `FakeRepositoryNameResolver`, a plain `@ApplicationScoped` bean in test
-  sources. It **overrides** the shipped `HttpRepositoryNameResolver`, which carries `@DefaultBean`,
-  so the test classpath still holds exactly one bean and no test dials qits-projects. The HTTP
-  adapter is proved on its own by `HttpRepositoryNameResolverTest` — plain JUnit against an
-  in-process `HttpServer`, because under CDI the Fake is what you would get.
 - `ArtifactsTestSupport` (in `artifacts/`) and `ArtifactsTestMedia` (in `service/`) are separate on
   purpose: the modules share no test classpath, the same way they do not in the monorepo. `gc/`'s
   `GcFixture` and `artifacts/`'s `SeededStoreFixture` are the same rule and the same seeding, copied
@@ -762,22 +604,6 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
   it. `ArtifactBrowseControllerTest` proves the two names in this service that contain a slash (an
   OCI image name, a scoped npm package) resolve in both spellings, encoded and literal, which is a
   property of the path templates and of nothing else. Both must hold; neither implies the other.
-- The suite points `qits.ci.intake-url` **and** `qits.projects.intake-url` at closed ports, so a
-  push test passes without a receiver; the notifier never blocks the push and the delivery is simply
-  lost. It also shortens `qits.post-receive.retry-delays` to a single 50 ms retry, and that is a
-  genuine test-only need rather than a drifting copy: the shipped schedule would leave three minutes
-  of pending timers per push in a suite that runs in three. Each lost delivery logs one WARN in a
-  green run — the change working, not a failure.
-  `PostReceiveNotifierTest`, `CiPostReceiveBearerTest`, `PostReceiveRetryTest`,
-  `GitHostNoCiOptionTest` and
-  `GitHostProjectsIntakeDownTest` are the five that do assert deliveries, against `StubIntake` —
-  which plays qits-ci's intake, qits-projects' intake and qits-platform-idp's token endpoint at once, counts
-  the two intakes separately (the fan-out's whole point is that the counts differ under
-  `-o qits.no-ci`), and passes everything it observed through system properties because a
-  `QuarkusTestProfile` is built in two classloaders. Either intake can be told to **refuse** its next
-  few requests, which is how `PostReceiveRetryTest` plays the outage: it counts attempts as well as
-  deliveries, because the claim is that an event survives an outage *exactly once* rather than
-  arriving twice.
 
 ## What not to "fix"
 
@@ -816,9 +642,9 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
     make the wire 413 preempt the application 413, and the client gets an empty body and a reset
     connection instead of the OCI error envelope. It must also never drop below 64M, or `ci-videos`
     breaks silently.
-- **`BodyHandler.create()` is not unlimited** — vertx-web defaults it to 10 MiB, which is why the git
-  host silently 413'd every push over 10 MB until `qits.repositories.git.max-pack-size` existed. Any
-  new `BodyHandler` needs its limit stated. It must *not* be the global ceiling: a `BodyHandler`
+- **`BodyHandler.create()` is not unlimited** — vertx-web defaults it to 10 MiB, and a route that
+  takes the default silently 413s everything larger with nothing in the log to say which limit did
+  it. Any new `BodyHandler` needs its limit stated. It must *not* be the global ceiling: a `BodyHandler`
   buffers into memory, so a route that uses one wants a much lower number than a route that streams
   to disk. The npm publish `PUT` is the third such route (`qits.artifacts.npm.max-publish-size`), and
   the one where the number is least obvious: a publish document carries its tarball
@@ -839,7 +665,7 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 - `OpenApiSchemaExportTest` writes `docs/openapi.yml` from `/artifacts/q/openapi`
   (`./mvnw -pl service test -Dtest=OpenApiSchemaExportTest`). **`paths: {}` is correct output here**:
   every artifacts operation carries `@Operation(hidden = true)`, as in the monorepo's own document,
-  and `/artifacts/git/**` is Vert.x so it appears in no OpenAPI document at all. Committed anyway so
+  and the wire routes are Vert.x, so they appear in no OpenAPI document at all. Committed anyway so
   unhiding an operation shows up as a diff.
 - A `Failed to start quarkus` / `Port already bound: 8081` failure is the known flake
   (`migration-plan.md` §9 item 14) — `@QuarkusTest` restarts racing for the test port. Re-run first.
@@ -906,30 +732,11 @@ repository's sources.
   seems to need some, something reflective has crept in.
 - **Wire handlers carry `@ActivateRequestContext`/`@Transactional` on `OciRegistryService`,
   `NpmRegistryService` and `MavenRegistryService`.** A raw Vert.x route has no CDI request context
-  and no transaction.
-  `GitHostRoutes` is no precedent — it touches no database. Drop an annotation and those routes fail
+  and no transaction. Drop an annotation and those routes fail
   with `ContextNotActiveException` at runtime only. The same fact has a test-side consequence worth
   knowing: inside a `@QuarkusTest` a request context is *already* active, so two of these calls in a
   row share one Hibernate session and a read after a bulk update can see the pre-update row. That is
   a property of the test, not of the service — but it will look like a lost write.
-- **Push options need `setAllowPushOptions(true)` on BOTH `ReceivePack` instances.** The one in
-  `GitHostRoutes.service(...)` receives the options; the one in `infoRefs(...)` *advertises the
-  capability*, and a client only sends `-o` if it was offered. Setting it on one and not the other
-  compiles, passes anything that does not drive a real client, and produces the confusing failure
-  where every option is silently never seen — so `ProtectedRefHook`'s two bypasses (`qits.release`,
-  `qits.token=`) would all refuse, and the post-receive hook's own option, `-o qits.no-ci` (skips the
-  CI intake POST for the push and only that one — the qits-projects backup event fires regardless;
-  it grants no write, unlike the other two, so it needs no gate), would
-  silently suppress nothing. The advertisement is asserted directly
-  (`theReceivePackAdvertisementOffersPushOptions`, and again in the native IT) precisely because it
-  has no other symptom.
-- **`ProtectedRefHook` ships inert and must stay that way in this repo.** `mvn verify` proves the
-  matrix, but the shipped value of `qits.repositories.git.protect-default-branch` is what decides
-  whether this service can still receive its own redeploy — qits-platform-artifacts is the git host that
-  serves the push that updates qits-platform-artifacts. `PackagedProcessIT`'s
-  `theShippedDefaultsLeaveTheDefaultBranchUnprotected` asserts it against the packaged binary with
-  no overrides; flipping the default
-  here rather than in a deployment's env would be the one change that can strand this repo.
 - **npm's `latest` dist-tag only moves forward**, by semver precedence
   (`NpmRegistryService.requireLatestMayMoveTo`, ordering in `NpmSemver`). A bare `npm publish` means
   `--tag latest`, so without this a main build publishing `<release>-main.g<sha>` would move
@@ -952,6 +759,6 @@ repository's sources.
   sits there and not in each of the four write paths. Adding a fifth way to write a blob without
   going through `promote` would break the summary silently; there is no such path today and there
   should not be one.
-- **`NpmUpstream`'s `HttpClient` is an instance field, not a static one** — the same constraint
-  `PostReceiveNotifier` carries, and the reason the table above lists it. It is also this process'
+- **`NpmUpstream`'s `HttpClient` is an instance field, not a static one** — the constraint the
+  Native table lists, and the reason it lists it. It is also this process'
   only outbound TLS, which no test can exercise (no network); a deployment smokes it once by hand.

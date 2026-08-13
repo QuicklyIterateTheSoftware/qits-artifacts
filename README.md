@@ -10,7 +10,7 @@ golden-diff loop produces — and the pin-based garbage collection over all of t
 ## What is NOT here, and where it went
 
 This repository was `qits-platform-artifacts` and held three things it no longer does
-(`byte-plane-split-plan.md` in the home repo, phase 4):
+(the byte-plane split, phase 4 — the plan's history is in the superproject's git):
 
 | Left | Went to | Why |
 |---|---|---|
@@ -157,7 +157,7 @@ podman run     <host>/qits/alpine:latest
 
 The mount point is not a choice. Docker and podman resolve a reference against `<host>/v2/` and
 accept no path prefix, so this cannot live under `quarkus.rest.path` the way the JSON API does — it
-is raw Vert.x at the host root, a literal in the code exactly as `/artifacts/git` is, and nothing in
+is raw Vert.x at the host root, a literal in the code exactly as `/artifacts/npm` is, and nothing in
 the JAX-RS configuration moves it. `RegistryTest` is the only thing that would notice if it drifted.
 
 The corollary is that `/artifacts/v2` must serve **nothing**, and since the SPA took the whole
@@ -833,9 +833,6 @@ a migration cannot verify one against the running store. Until then: report it; 
 
 ### Deliberately not here
 
-- **The git host.** It shares the blob store and the datasource with the registries and nothing
-  else: no `artifact_repository` entry, so its pack blobs are row-less to the census. Its refs are
-  readable only as pkt-line and its object counts need JGit calls nobody has written.
 - **Any link to a project.** Not one column in any of the six tables joins to one. `oci_manifest.repository`
   is `"qits"` for every row — that is the image namespace, equal to the project slug by naming
   accident — and `npm_version.package_name` does not even coincide. The one genuine cross-store link
@@ -930,7 +927,8 @@ type's rule can free a blob another type still needs.
 **One rule per type used to mean one rule *class* per type; it does not any more.** This section
 used to argue that docker's and npm's rules resemble each other by coincidence and must therefore
 never share code — no base class, no retention-rule framework, no reuse. **That rule is superseded
-by the user's decision of 2026-08-05** (`artifacts-gc-plan.md`, "Settlement"), which replaced the
+by the user's decision of 2026-08-05** (the GC settlement; its history is in the superproject's
+git), which replaced the
 bespoke strategies with two engines chosen per type in configuration. The design below is that
 decision; the argument above is history, and re-splitting an engine into per-type rules is now the
 change to refuse.
@@ -941,7 +939,7 @@ stay in that type's own adapter, and no engine may switch on `RepositoryType`.
 
 ### The settlement: two engines, configured per type
 
-The doctrine, settled by the user on 2026-08-05 (`artifacts-gc-plan.md`): **two generic strategies,
+The doctrine, settled by the user on 2026-08-05: **two generic strategies,
 not one bespoke rule per type, mapped onto the types by configuration.**
 
 - **`CacheEvictionStrategy`** — a pull-through cache holds somebody else's re-fetchable content, so
@@ -1078,9 +1076,6 @@ It is the most important rule here. The store's row-less pool is 124 MiB in thre
 through the OCI blob-upload session with no manifest — and one of them is the CI daemon binary every
 build downloads by digest. A sweep that deleted "everything no row references" would stop CI
 platform-wide. The plan lists the pool's digests so that fact is checkable rather than promised.
-
-The git host's DFS pack blobs are in that pool too, and are safe for the same reason. Git's own GC,
-when it lands, contributes them as a live set of its own; nothing about them needs a gate today.
 
 ### The delete primitive
 
@@ -1441,39 +1436,14 @@ construction — with the blank-token honesty stated at the top of this section 
 
 ## The boundary
 
-Everything this context needs from the rest of qits goes through a port it declares and the
-consuming application implements:
+Everything this context needs from the rest of qits goes through a port it declares. There used to
+be an optional one — `RepositoryNameResolver`, whose absence meant a 404 on one git route — and it
+left with the git host. Two ports remain, and both are exceptions rather than the pattern.
 
-| Port | Required? | Absent means |
-|---|---|---|
-| `RepositoryNameResolver` | no | `/artifacts/git/:projectId/:repoName` is 404; `/artifacts/git/:repoId` — the older scheme and the daemon's own fallback — still serves |
-
-That is the only one, and an application may still implement it. In the monorepo `GitHostRoutes`
-injected `domain.repository.persistence.RepositoryNameRepository` directly; that alias table belongs
-to the projects/repositories context, and this repo holds no foreign key into another context's
-schema. The inline `QuarkusTransaction.requiringNew()` around the lookup moved into the port's
-contract — the resolver is called on a Vert.x worker thread with no request context bound.
-
-**It now also ships an adapter of its own, and absent still means the same 404.**
-`HttpRepositoryNameResolver` asks qits-projects, which owns the alias table, over one
-`GET <qits.projects.name-resolver-url>/{projectId}/repositories/by-name/{repoName}` — `200` with
-`{"repositoryId": "<id>"}`, `404` for an unknown project or name. It carries `@DefaultBean`, so an
-application implementing the port itself still wins, and there is never a second bean to disambiguate.
-
-Two properties of it are the port's contract rather than this implementation's detail. **Unset config
-answers nothing**: with no url it returns empty without dialling anything, which is the same 404 an
-absent bean produces — so nothing changes anywhere the key is not set. And **it never throws**: a
-timeout, a refused connection, a non-200 or an unreadable body are logged at WARN and answered empty,
-because `GitHostRoutes` has no exception clause on this port and a throw would be a 500 where a 404
-is owed. That is the opposite of the two GC pin ports below. Nothing is cached, for the pin ports'
-reason turned around: a rename must not serve a stale id.
-
-`CdDeploymentPins` and `CiDaemonPins` are the exceptions that prove the shape, so they are named
-here rather than left to be discovered: both are declared **and** implemented inside this repo, over
-HTTP, dialling `qits-cd` and `qits-ci` for GC's live pins (see "Garbage collection"). Absent is not a
-supported configuration there, which is the difference that matters and the one the name resolver's
-adapter does *not* share: a pin source that cannot answer aborts the whole GC run instead of falling
-back.
+`CdDeploymentPins` and `CiDaemonPins` are declared **and** implemented inside this repo, over HTTP,
+dialling `qits-cd` and `qits-ci` for GC's live pins (see "Garbage collection"). Absent is **not** a
+supported configuration for either, which is the difference that matters: a pin source that cannot
+answer aborts the whole GC run instead of falling back.
 Both live in `gc/` with the process that needs them — the `artifacts` library dials nothing at all,
 which is the domain-blindness the module split gave back.
 
@@ -1495,12 +1465,7 @@ app's `application.properties` overrides them.
 | `qits.auth.machine.required` | `false` | the machine-token rollout gate. Off, the JSON admin write surface is open — network trust. On, its writes need a bearer with `aud=qits-platform-artifacts` |
 | `qits.auth.machine.audience` | `qits-platform-artifacts` | this service's own id, and the `aud` its tokens must carry |
 | `qits.artifacts.startup-seed.enabled` | `true` | self-seed the hosted roots: `ci-screenshots`, `ci-videos`, `qits`, `npm`, `maven`, `daemons`, `docs`. No cache root — those are qits-platform-mirror's |
-| `qits.ci.intake-url` | `http://localhost:8080/ci/api/events/post-receive` | post-receive delivery |
-| `qits.projects.intake-url` | `http://localhost:8080/projects/api/events/post-receive` | the same event again, where it triggers the repository's backup push to GitHub. No credential, and `-o qits.no-ci` does not suppress it |
-| `qits.projects.name-resolver-url` | **unset** | where `HttpRepositoryNameResolver` turns `(projectId, repoName)` into a repo id, up to but not including `/{projectId}`. Unset — the shipped state — means the port answers nothing and `/artifacts/git/:projectId/:repoName` 404s, exactly as before the adapter existed. A deployment sets `http://prod-qits-projects:8080/projects/api/projects` |
-| `qits.ci.token` | blank | `X-CI-Token` on those events |
-| `quarkus.oidc-client.client-enabled` | `false` | whether those events carry a bearer for `aud=qits-ci`. On needs `QITS_ARTIFACTS_CLIENT_SECRET`, or the boot fails |
-| `quarkus.oidc.auth-server-url` | `http://qits-platform-idp:8080/idp` | the idp, reached direct on qits-net. Both the validation above and the token fetch use it |
+| `quarkus.oidc.auth-server-url` | `http://qits-platform-idp:8080/idp` | the idp, reached direct on qits-net, for validating an inbound machine token |
 | `qits.artifacts.oci.max-layer-size` | `1G` | the registry's per-layer cap, enforced while streaming |
 | `qits.artifacts.oci.max-manifest-size` | `4M` | manifests are buffered whole to be digested and parsed |
 | `qits.artifacts.oci.upload-session-ttl` | `PT30M` | in-memory upload sessions; lost on restart, by design |
@@ -1532,13 +1497,16 @@ answers one question — how large an npm tarball this deployment is willing to 
 jar applies it to a cache's inbound stream as well, which is qits-platform-mirror's copy of the knob
 rather than a second meaning for this one.
 
-**Two families of key are absent from that table and still resolve**, because their defaults ship in
-jars this service consumes: the cache keys (`qits.artifacts.oci.mirror.*`,
-`qits.artifacts.npm.proxy.*`, `qits.artifacts.maven.proxy.*`) and the git host's
-(`qits.repositories.git.*`). Neither is this deployment's to set — the caches are
-qits-platform-mirror's and the host is qits-githost's — and setting one here changes nothing this
-service can reach, with the single exception named under "The pull-through mirror": the OCI mirror's
-TTL and timeouts are still read by wire code the excluded profile does not unregister.
+**One family of key is absent from that table and still resolves**, because its defaults ship in a
+jar this service consumes: the cache keys (`qits.artifacts.oci.mirror.*`,
+`qits.artifacts.npm.proxy.*`, `qits.artifacts.maven.proxy.*`). They are not this deployment's to
+set — the caches are qits-platform-mirror's — and setting one here changes nothing this service can
+reach, with the single exception named under "The pull-through mirror": the OCI mirror's TTL and
+timeouts are still read by wire code the excluded profile does not unregister.
+
+The git host's keys (`qits.repositories.git.*`, `qits.ci.intake-url`, `qits.projects.intake-url`,
+`qits.projects.name-resolver-url`) do not even resolve here any more — they left with qits-githost,
+along with the `quarkus.oidc-client` extension whose only user was the post-receive bearer.
 
 `quarkus.http.enable-compression` is in the shipped `application.properties` and **cannot be moved to
 a deployment's environment**: it is `BUILD_AND_RUN_TIME_FIXED`, so an env var on the container is
@@ -1557,21 +1525,16 @@ bytes served with `sendFile`, and re-compressing them would cost CPU to grow the
 `service/src/main/resources/application.properties`. The suite inherits that file rather than
 carrying a copy, so the absolute paths the tests assert are the ones the process serves.
 
-Neither intake url's **path** is ours either — `/ci/api/events/post-receive` is qits-ci's segment and
-`/projects/api/events/post-receive` is qits-projects', and only the host part of each is a deployment
-decision.
-
 ## What is deliberately *not* here
 
-- **The repositories/projects context.** Cloning, branches, commits, submodules, the alias table
-  itself. This repo provisions a repository over the wire and serves its bytes; what a caller does
-  with the history is not modelled here. **The GitHub backup too**: this host says a branch moved,
-  and [qits-projects](https://github.com/QuicklyIterateTheSoftware/qits-projects) owns the sync
-  target, the credential and the push.
-- **CI.** The post-receive event is delivered *to* ci over HTTP; pipelines, runners and the intake
-  live in [qits-ci](https://github.com/QuicklyIterateTheSoftware/qits-ci).
-- **`QitsGitServlet` / `QitsRepositoryResolver`.** The pre-Vert.x servlet implementation, deleted in
-  the monorepo long before the split. Their history is in this repo; their files are not.
+- **Git, in every sense.** Cloning, branches, commits, submodules, the smart-HTTP host and the
+  post-receive fan-out are **qits-githost**'s; the projects and repositories context, the GitHub
+  backup and the alias table are
+  [qits-projects](https://github.com/QuicklyIterateTheSoftware/qits-projects)'. This repo's git
+  history holds the host's files, which is the only trace left of it here.
+- **CI.** Pipelines, runners and the intake live in
+  [qits-ci](https://github.com/QuicklyIterateTheSoftware/qits-ci). It reaches this service as an
+  ordinary client — pushing images, publishing packages, downloading a daemon binary.
 - **Building images.** The registry stores and serves them; nothing here produces one. qits-ci step
   containers get no docker socket by design, so `docker build` inside a step fails today and keeps
   failing — consuming this registry works immediately, producing from within a step needs an
