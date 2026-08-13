@@ -4,22 +4,19 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import java.nio.file.Files;
-import java.nio.file.Path;
+import eu.wohlben.qits.artifacts.testdb.EmbeddedPg;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
-import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
-import java.util.UUID;
 import org.flywaydb.core.Flyway;
-import org.h2.jdbcx.JdbcDataSource;
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.postgresql.ds.PGSimpleDataSource;
 
 /**
  * The lineage itself, run from empty — the one thing a {@code @QuarkusTest} cannot show.
@@ -27,70 +24,63 @@ import org.junit.jupiter.api.Test;
  * <p>Every suite in this module starts by wiping the tables, so what the chain <em>leaves</em> there
  * is invisible to all of them: a row would be gone before the first assertion either way, so a
  * prefill that came back — or one that never went — would look exactly like a passing build. This
- * test owns a private database, runs Flyway over the real migration directory, and reads what is
- * there.
+ * test owns a database of its own on the embedded postgres, runs Flyway over the real migration
+ * directory, and reads what is there.
  *
- * <p>It also pins the rule the constraint is maintained by: full re-enumeration. Every migration
- * that touches {@code ck_artifact_repository_type} re-declares it naming every key, so whichever
- * migration lands second necessarily includes the first one's.
+ * <p>It is also where V1's four shape decisions are pinned, because a fresh baseline is the one
+ * place they could quietly be undone: no git-host tables, the four cache tables present and empty,
+ * no mirror prefill, and a type check listing the seven types this service registers rather than the
+ * ten the retired H2 chain accepted. See the header of {@code db/artifacts/postgresql/V1__init.sql}
+ * for the argument behind each.
+ *
+ * <p><b>Real postgres, not H2.</b> The lineage is a PostgreSQL lineage now — {@code timestamptz},
+ * {@code bytea}, a partial index and a regex check — so running it anywhere else would prove
+ * something about a schema this service never has.
  */
 class MigrationLineageTest {
 
-  private Path directory;
-  private JdbcDataSource dataSource;
+  /** Its own database on the shared instance, so no {@code @QuarkusTest} here can see this schema. */
+  private static final String DATABASE = "artifacts_lineage_test";
+
+  private PGSimpleDataSource dataSource;
 
   /**
-   * A <b>file</b> database under {@code target/}, not an in-memory one, and the reason is the suite
-   * around it: this class shares a JVM with the {@code @QuarkusTest} classes, whose applications stop
-   * between methods and take every in-memory H2 with them — a held connection then dies mid-test
-   * with "the database has been closed". On disk the schema outlives that, and every statement below
-   * opens its own connection.
+   * A clean database per test, by {@code clean} then {@code migrate} rather than a new database each
+   * time: dropping a postgres database needs every connection to it closed, and the pool behind the
+   * suite around this one is not this class's to manage. The result is the same — every method sees
+   * exactly what the chain builds from empty.
    */
   @BeforeEach
-  void migrate() throws Exception {
-    directory = Path.of("target", "migration-" + UUID.randomUUID());
-    dataSource = new JdbcDataSource();
-    dataSource.setURL("jdbc:h2:file:" + directory.toAbsolutePath().resolve("db"));
+  void migrate() {
+    dataSource = new PGSimpleDataSource();
+    dataSource.setUrl(EmbeddedPg.url(DATABASE));
+    dataSource.setUser(EmbeddedPg.USER);
+    dataSource.setPassword(EmbeddedPg.PASSWORD);
     Flyway.configure()
         .dataSource(dataSource)
-        .locations("classpath:db/artifacts/migration")
+        .locations("classpath:db/artifacts/postgresql")
+        .cleanDisabled(false)
+        .load()
+        .clean();
+    Flyway.configure()
+        .dataSource(dataSource)
+        .locations("classpath:db/artifacts/postgresql")
         .load()
         .migrate();
   }
 
-  @AfterEach
-  void drop() throws Exception {
-    try (Connection connection = dataSource.getConnection();
-        Statement statement = connection.createStatement()) {
-      statement.execute("shutdown");
-    } catch (SQLException alreadyGone) {
-      // Nothing to shut down is a fine state to tidy up from.
-    }
-    if (Files.exists(directory)) {
-      try (var walk = Files.walk(directory)) {
-        walk.sorted(Comparator.reverseOrder()).forEach(MigrationLineageTest::deleteQuietly);
-      }
-    }
-  }
-
-  private static void deleteQuietly(Path path) {
-    try {
-      Files.deleteIfExists(path);
-    } catch (Exception ignored) {
-      // best effort
-    }
-  }
-
   /**
-   * The ten keys the lineage's last re-enumeration (V13) declares, spelled out.
+   * The seven keys V1 declares, spelled out.
    *
-   * <p>It used to be {@code RepositoryType.values()}, which made "the constraint lists every type"
-   * a property rather than a list. There is no enum any more — types are registered as profile
-   * beans — and a list read from the CLASSPATH would prove the wrong thing: the constraint is a
-   * fact about the DATABASE, and this service registers seven of these while a mirror on its own
-   * schema registers three. The three cache keys stay listed because the chain is byte-untouched by
-   * the split and still accepts them; rows of those types are a cutover data question, not a schema
-   * one.
+   * <p>It used to be {@code RepositoryType.values()}, which made "the constraint lists every type" a
+   * property rather than a list. There is no enum any more — types are registered as profile beans —
+   * and a list read from the CLASSPATH would prove the wrong thing: the constraint is a fact about
+   * the DATABASE.
+   *
+   * <p><b>Seven, not the H2 chain's ten.</b> That chain was carried through the byte-plane split
+   * byte for byte and so kept accepting {@code NPM_PROXY}, {@code MAVEN_PROXY} and {@code
+   * OCI_MIRROR} long after nothing here could serve one. A fresh baseline is where the set the code
+   * enforces and the set the database accepts become one set.
    */
   private static final List<String> DECLARED_TYPES =
       List.of(
@@ -98,17 +88,18 @@ class MigrationLineageTest {
           "CI_VIDEOS",
           "OCI_IMAGES",
           "NPM_PACKAGES",
-          "NPM_PROXY",
-          "OCI_MIRROR",
           "MAVEN_PACKAGES",
-          "MAVEN_PROXY",
           "DAEMON_BINARIES",
           "DOCS");
+
+  /** The three cache keys V1 deliberately stopped accepting. */
+  private static final List<String> RETIRED_CACHE_TYPES =
+      List.of("NPM_PROXY", "MAVEN_PROXY", "OCI_MIRROR");
 
   @Test
   void theTypeCheckAcceptsEveryKeyTheLineageDeclares() throws SQLException {
     for (String type : DECLARED_TYPES) {
-      insertRepository("probe-" + type.toLowerCase(java.util.Locale.ROOT), type);
+      insertRepository("probe-" + type.toLowerCase(Locale.ROOT), type);
     }
     assertEquals(
         DECLARED_TYPES.size(),
@@ -122,21 +113,65 @@ class MigrationLineageTest {
     SQLException refused =
         assertThrows(SQLException.class, () -> insertRepository("maven-someday", "MAVEN_ARTIFACTS"));
     assertTrue(
-        refused.getMessage().toUpperCase(java.util.Locale.ROOT).contains("CK_ARTIFACT_REPOSITORY_TYPE"),
+        refused.getMessage().toUpperCase(Locale.ROOT).contains("CK_ARTIFACT_REPOSITORY_TYPE"),
         refused.getMessage());
   }
 
   @Test
-  void v7sMirrorPrefillIsRetiredByTheEndOfTheChain() throws SQLException {
-    // V7 prefilled three `oci-mirror` repository rows and their upstreams; V14 takes them out again.
-    // This is the assertion that has to be read from a migrated database rather than from a suite:
-    // every @QuarkusTest here wipes the tables, so a prefill that came back would be invisible to
-    // all of them.
-    //
-    // The rows mattered because the wire code outlived the profile. `resolveForPull` matches the
-    // repository's type by string and reads the upstream table, so while a row stood a pull aimed
-    // here still resolved into somebody else's registry — and a first segment naming no repository
-    // still remapped into `hub`. No row, no path.
+  void theThreeCacheTypesAreRefusedTooBecauseNothingHereServesThem() {
+    // Shape decision 4, as the assertion that would fail if somebody "restored" the H2 chain's list.
+    // The caches went to qits-platform-mirror; a repository row of one of these types here is dead
+    // data of exactly the kind the retired chain's last migration was written to remove.
+    for (String type : RETIRED_CACHE_TYPES) {
+      SQLException refused =
+          assertThrows(
+              SQLException.class,
+              () -> insertRepository("cache-" + type.toLowerCase(Locale.ROOT), type),
+              type);
+      assertTrue(
+          refused.getMessage().toUpperCase(Locale.ROOT).contains("CK_ARTIFACT_REPOSITORY_TYPE"),
+          refused.getMessage());
+    }
+  }
+
+  @Test
+  void theGitHostsThreeTablesAreNotCreatedAtAll() throws SQLException {
+    // Shape decision 1. `git_pack`, `git_pack_file` and `git_repository_protection` existed in the
+    // H2 chain only because applied history cannot be rewritten — qits-githost owns that data in a
+    // database of its own, and no code in this tree reads or writes them. A fresh baseline is the
+    // one place they could go, and this is what stops them coming back by copy-paste.
+    for (String table : List.of("git_pack", "git_pack_file", "git_repository_protection")) {
+      assertEquals(0, tableCount(table), table + " belongs to qits-githost, not to this schema");
+    }
+  }
+
+  @Test
+  void theFourCacheTablesExistAndAreEmpty() throws SQLException {
+    // Shape decision 2, and the half that looks like an oversight until it 500s. The cache
+    // REPOSITORIES are gone, but their repositories-in-the-DAO-sense are live beans that ride in on
+    // the qits-registries jars — excluding a profile does not unregister a DAO.
+    // `OciRegistryService.resolveForPull` reads the upstream table on every pull whose first segment
+    // names no repository, and `collectTag` deletes a freshness row for HOSTED tags too. A missing
+    // table turns an unknown-image pull into a 500 where a client needs a 404 NAME_UNKNOWN.
+    for (String table :
+        List.of(
+            "oci_mirror_upstream",
+            "oci_mirror_tag_check",
+            "npm_proxy_packument",
+            "maven_proxy_metadata")) {
+      assertEquals(1, tableCount(table), table + " is still read by a live bean on this classpath");
+      assertEquals(0, count("select count(*) from " + table), table + " ships empty");
+    }
+  }
+
+  @Test
+  void thereIsNoMirrorPrefillAndNoUpstreamRow() throws SQLException {
+    // Shape decision 3. The retired chain's V7 prefilled `hub`, `quay` and `redhat` and their
+    // upstreams, and its V14 took them out again — because a standing row is what kept the mirror
+    // path reachable here after the code left. A fresh baseline never writes them. This is the
+    // assertion that has to be read from a migrated database rather than from a suite: every
+    // @QuarkusTest here wipes the tables, so a prefill that came back would be invisible to all of
+    // them.
     Map<String, String> slugsByDomain = new LinkedHashMap<>();
     try (Connection connection = dataSource.getConnection();
         Statement statement = connection.createStatement();
@@ -147,111 +182,69 @@ class MigrationLineageTest {
       }
     }
     assertEquals(Map.of(), slugsByDomain, "the upstream rows went with the code that read them");
-
-    assertEquals(
-        0,
-        count("select count(*) from artifact_repository where type in"
-            + " ('OCI_MIRROR','NPM_PROXY','MAVEN_PROXY')"),
-        "no cache type is registered here, so no row of one may stand");
+    assertEquals(0, count("select count(*) from artifact_repository"), "nothing is prefilled");
   }
 
   @Test
-  void theTwoMirrorTablesSurviveTheirRowsBecauseLiveCodeStillReadsThem() throws SQLException {
-    // V14 empties both and drops neither, which is the half of it that looks like an oversight.
-    // `OciMirrorUpstreamRepository` and `OciMirrorTagCheckRepository` ride in on the
-    // qits-registries-oci jar and are live beans here — excluding a profile does not unregister a
-    // DAO. `resolveForPull` reads the upstream table on every pull whose first segment names no
-    // repository, and `collectTag` deletes a tag's freshness row for HOSTED tags too. A dropped
-    // table turns both into a missing-table error at runtime, which no build here would show.
-    assertEquals(0, count("select count(*) from oci_mirror_upstream"));
-    assertEquals(0, count("select count(*) from oci_mirror_tag_check"));
+  void theBlobTablesAreHereBecauseTheStoreIsInThisDatabaseNow() throws SQLException {
+    // The blob store's three tables, copied verbatim from qits-blobstore's own
+    // db/blobstore-tables.sql into V1. They are the half of this schema that used to be a directory,
+    // so a lineage that built every metadata table and none of these would leave a service that
+    // boots and then cannot store a byte.
+    for (String table : List.of("blob", "blob_content", "blob_chunk")) {
+      assertEquals(1, tableCount(table), table);
+      assertEquals(0, count("select count(*) from " + table), table + " starts empty");
+    }
+
+    // The content address is checked at the table as well as in code — the store's path-traversal
+    // defence, restated where nothing can route around it.
+    try (Connection connection = dataSource.getConnection();
+        Statement statement = connection.createStatement()) {
+      statement.executeUpdate(
+          "insert into blob_content (content_id, state, started_at) values"
+              + " ('00000000-0000-0000-0000-000000000001', 'PROMOTED', now())");
+    }
+    SQLException refused =
+        assertThrows(
+            SQLException.class,
+            () ->
+                execute(
+                    "insert into blob (id, content_id, size_bytes, chunk_size, stored_at) values"
+                        + " ('../etc/passwd', '00000000-0000-0000-0000-000000000001', 1, 1, now())"));
+    assertTrue(refused.getMessage().toUpperCase(Locale.ROOT).contains("BLOB"), refused.getMessage());
   }
 
   @Test
   void theMavenTableIsThereKeyedByRepositoryAndPath() throws SQLException {
-    // V8's one table, exercised the way the lineage pins everything else: insert a repository and a
+    // One table, exercised the way the lineage pins everything else: insert a repository and a
     // deployed file under it, and prove the foreign key does its half of the job.
     insertRepository("maven", "MAVEN_PACKAGES");
-    try (Connection connection = dataSource.getConnection();
-        Statement statement = connection.createStatement()) {
-      statement.executeUpdate(
-          "insert into maven_artifact (repository, path, blob_id, size_bytes, created_at) values"
-              + " ('maven', 'eu/wohlben/qits/qits-eventstream/1.0.0/qits-eventstream-1.0.0.jar',"
-              + " '" + "0".repeat(64) + "', 47940, current_timestamp)");
-    }
+    execute(
+        "insert into maven_artifact (repository, path, blob_id, size_bytes, created_at) values"
+            + " ('maven', 'eu/wohlben/qits/qits-eventstream/1.0.0/qits-eventstream-1.0.0.jar',"
+            + " '" + "0".repeat(64) + "', 47940, current_timestamp)");
     assertEquals(1, count("select count(*) from maven_artifact where repository = 'maven'"));
+
     SQLException refused =
         assertThrows(
             SQLException.class,
-            () -> {
-              try (Connection connection = dataSource.getConnection();
-                  Statement statement = connection.createStatement()) {
-                statement.executeUpdate(
+            () ->
+                execute(
                     "insert into maven_artifact (repository, path, blob_id, size_bytes, created_at)"
                         + " values ('no-such-repo', 'x/y.jar', '" + "1".repeat(64)
-                        + "', 1, current_timestamp)");
-              }
-            });
+                        + "', 1, current_timestamp)"));
     assertTrue(
-        refused.getMessage().toUpperCase(java.util.Locale.ROOT).contains("FK_MAVEN_ARTIFACT_REPOSITORY"),
-        refused.getMessage());
-  }
-
-  @Test
-  void theMavenCacheGetsOneTableAndReusesTheArtifactTableForItsFiles() throws SQLException {
-    // V13's shape, and the half of it that is a decision rather than a table: a cached file is an
-    // ordinary maven_artifact row under a maven-proxy repository, so the same insert works under
-    // both types and every reader tells them apart by the repository's type. Only the one document
-    // that mutates needed a table.
-    insertRepository("central", "MAVEN_PROXY");
-    try (Connection connection = dataSource.getConnection();
-        Statement statement = connection.createStatement()) {
-      statement.executeUpdate(
-          "insert into maven_artifact (repository, path, blob_id, size_bytes, created_at) values"
-              + " ('central', 'org/slf4j/slf4j-api/2.0.13/slf4j-api-2.0.13.jar',"
-              + " '" + "e".repeat(64) + "', 68000, current_timestamp)");
-      statement.executeUpdate(
-          "insert into maven_proxy_metadata (repository, path, doc, fetched_at) values"
-              + " ('central', 'org/slf4j/slf4j-api/maven-metadata.xml', '<metadata/>',"
-              + " current_timestamp)");
-    }
-    assertEquals(1, count("select count(*) from maven_artifact where repository = 'central'"));
-    assertEquals(1, count("select count(*) from maven_proxy_metadata"));
-
-    SQLException refused =
-        assertThrows(
-            SQLException.class,
-            () -> {
-              try (Connection connection = dataSource.getConnection();
-                  Statement statement = connection.createStatement()) {
-                statement.executeUpdate(
-                    "insert into maven_proxy_metadata (repository, path, doc, fetched_at) values"
-                        + " ('no-such-repo', 'x/maven-metadata.xml', '<metadata/>',"
-                        + " current_timestamp)");
-              }
-            });
-    assertTrue(
-        refused
-            .getMessage()
-            .toUpperCase(java.util.Locale.ROOT)
-            .contains("FK_MAVEN_PROXY_METADATA_REPOSITORY"),
+        refused.getMessage().toUpperCase(Locale.ROOT).contains("FK_MAVEN_ARTIFACT_REPOSITORY"),
         refused.getMessage());
   }
 
   @Test
   void theDaemonTableIsThereKeyedByRepositoryNameAndVersion() throws SQLException {
-    // V10's one table. The plan that asked for it said "V6" — written when the lineage ended at V5,
-    // with four migrations landing behind it. No plan reserves a number; this took the next free V
-    // and re-enumerated the constraint from the enum as it stands, which is what the first test in
-    // this class turns into a property.
     insertRepository("daemons", "DAEMON_BINARIES");
-    try (Connection connection = dataSource.getConnection();
-        Statement statement = connection.createStatement()) {
-      statement.executeUpdate(
-          "insert into daemon_binary (repository, name, version, blob_id, size_bytes, published_at)"
-              + " values ('daemons', 'qits-ci-daemon', '2026.801.120000',"
-              + " '" + "c".repeat(64) + "', 43123792, current_timestamp)");
-    }
+    execute(
+        "insert into daemon_binary (repository, name, version, blob_id, size_bytes, published_at)"
+            + " values ('daemons', 'qits-ci-daemon', '2026.801.120000',"
+            + " '" + "c".repeat(64) + "', 43123792, current_timestamp)");
     assertEquals(1, count("select count(*) from daemon_binary where repository = 'daemons'"));
 
     // The uniqueness that makes a republish answerable at all: without it there is no "409, this
@@ -259,59 +252,71 @@ class MigrationLineageTest {
     SQLException duplicate =
         assertThrows(
             SQLException.class,
-            () -> {
-              try (Connection connection = dataSource.getConnection();
-                  Statement statement = connection.createStatement()) {
-                statement.executeUpdate(
+            () ->
+                execute(
                     "insert into daemon_binary (repository, name, version, blob_id, size_bytes,"
                         + " published_at) values ('daemons', 'qits-ci-daemon', '2026.801.120000',"
-                        + " '" + "d".repeat(64) + "', 1, current_timestamp)");
-              }
-            });
+                        + " '" + "d".repeat(64) + "', 1, current_timestamp)"));
     assertTrue(
-        duplicate.getMessage().toUpperCase(java.util.Locale.ROOT).contains("PRIMARY KEY"),
+        duplicate.getMessage().toUpperCase(Locale.ROOT).contains("DAEMON_BINARY_PKEY"),
         duplicate.getMessage());
 
     SQLException refused =
         assertThrows(
             SQLException.class,
-            () -> {
-              try (Connection connection = dataSource.getConnection();
-                  Statement statement = connection.createStatement()) {
-                statement.executeUpdate(
+            () ->
+                execute(
                     "insert into daemon_binary (repository, name, version, blob_id, size_bytes,"
                         + " published_at) values ('no-such-repo', 'x', '1', '" + "1".repeat(64)
-                        + "', 1, current_timestamp)");
-              }
-            });
+                        + "', 1, current_timestamp)"));
     assertTrue(
-        refused.getMessage().toUpperCase(java.util.Locale.ROOT).contains("FK_DAEMON_BINARY_REPOSITORY"),
+        refused.getMessage().toUpperCase(Locale.ROOT).contains("FK_DAEMON_BINARY_REPOSITORY"),
         refused.getMessage());
   }
 
   @Test
-  void theThreeProtocolTablesCarryANullableAccessedAtWithNoBackfill() throws SQLException {
-    // V11's whole shape, from empty. The insert names no accessed_at, so a NOT NULL column or a
-    // default would fail here — and null is the state the sweep has to be able to read as "never
-    // accessed", which a backfill of created_at/published_at would have destroyed silently.
+  void aDocsVersionIsTheUnitOfEvictionBecauseItsFilesCascade() throws SQLException {
+    // The one foreign key in this schema that is load-bearing rather than hygienic: deleting a
+    // docs_site row must take its files with it, or a sweep could leave a version that lists itself
+    // and 404s its own stylesheet.
+    insertRepository("docs", "DOCS");
+    execute(
+        "insert into docs_site (repository, name, version, file_count, total_bytes, published_at)"
+            + " values ('docs', '@qits/ui-components', '1.0.0', 2, 300, current_timestamp)");
+    execute(
+        "insert into docs_file (repository, name, version, path, blob_id, size_bytes, media_type)"
+            + " values ('docs', '@qits/ui-components', '1.0.0', 'index.html', '" + "a".repeat(64)
+            + "', 100, 'text/html')");
+    execute(
+        "insert into docs_file (repository, name, version, path, blob_id, size_bytes, media_type)"
+            + " values ('docs', '@qits/ui-components', '1.0.0', 'main.css', '" + "b".repeat(64)
+            + "', 200, 'text/css')");
+    assertEquals(2, count("select count(*) from docs_file"));
+
+    execute("delete from docs_site");
+    assertEquals(0, count("select count(*) from docs_file"), "the cascade is the eviction unit");
+  }
+
+  @Test
+  void theProtocolTablesCarryANullableAccessedAtWithNoBackfill() throws SQLException {
+    // The inserts name no accessed_at, so a NOT NULL column or a default would fail here — and null
+    // is the state a sweep has to be able to read as "never accessed", which stamping
+    // created_at/published_at into the column would have destroyed silently.
     insertRepository("npm", "NPM_PACKAGES");
     insertRepository("maven", "MAVEN_PACKAGES");
     insertRepository("daemons", "DAEMON_BINARIES");
-    try (Connection connection = dataSource.getConnection();
-        Statement statement = connection.createStatement()) {
-      statement.executeUpdate(
-          "insert into npm_version (repository, package_name, version, tarball_blob_id,"
-              + " manifest_json, created_at) values ('npm', '@qits/ui', '1.0.0', '"
-              + "a".repeat(64) + "', '{}', current_timestamp)");
-      statement.executeUpdate(
-          "insert into maven_artifact (repository, path, blob_id, size_bytes, created_at) values"
-              + " ('maven', 'eu/wohlben/qits/lib/1.0.0/lib-1.0.0.jar', '" + "b".repeat(64)
-              + "', 1, current_timestamp)");
-      statement.executeUpdate(
-          "insert into daemon_binary (repository, name, version, blob_id, size_bytes, published_at)"
-              + " values ('daemons', 'qits-ci-daemon', '2026.801.120000', '" + "c".repeat(64)
-              + "', 1, current_timestamp)");
-    }
+    execute(
+        "insert into npm_version (repository, package_name, version, tarball_blob_id,"
+            + " manifest_json, created_at) values ('npm', '@qits/ui', '1.0.0', '"
+            + "a".repeat(64) + "', '{}', current_timestamp)");
+    execute(
+        "insert into maven_artifact (repository, path, blob_id, size_bytes, created_at) values"
+            + " ('maven', 'eu/wohlben/qits/lib/1.0.0/lib-1.0.0.jar', '" + "b".repeat(64)
+            + "', 1, current_timestamp)");
+    execute(
+        "insert into daemon_binary (repository, name, version, blob_id, size_bytes, published_at)"
+            + " values ('daemons', 'qits-ci-daemon', '2026.801.120000', '" + "c".repeat(64)
+            + "', 1, current_timestamp)");
     assertEquals(1, count("select count(*) from npm_version where accessed_at is null"));
     assertEquals(1, count("select count(*) from maven_artifact where accessed_at is null"));
     assertEquals(1, count("select count(*) from daemon_binary where accessed_at is null"));
@@ -319,21 +324,26 @@ class MigrationLineageTest {
 
   @Test
   void theLineageEmbedsNoLivePlatformDigest() throws SQLException {
-    // §5 step 2's rule, as an assertion: adopting the three ELF blobs already on the volume is an
-    // OPS action, never a migration. A migration cannot verify a digest against the running store,
-    // and a lineage carrying one would replay it onto every fresh platform that has no such bytes.
+    // Adopting the ELF blobs already on a live volume is an OPS action, never a migration. A
+    // migration cannot verify a digest against the running store, and a lineage carrying one would
+    // replay it onto every fresh platform that has no such bytes.
     assertEquals(0, count("select count(*) from daemon_binary"));
+    assertEquals(0, count("select count(*) from blob"));
   }
 
   private void insertRepository(String name, String type) throws SQLException {
+    execute(
+        "insert into artifact_repository (name, type, created_at) values ('"
+            + name
+            + "', '"
+            + type
+            + "', current_timestamp)");
+  }
+
+  private void execute(String sql) throws SQLException {
     try (Connection connection = dataSource.getConnection();
         Statement statement = connection.createStatement()) {
-      statement.executeUpdate(
-          "insert into artifact_repository (name, type, created_at) values ('"
-              + name
-              + "', '"
-              + type
-              + "', current_timestamp)");
+      statement.executeUpdate(sql);
     }
   }
 
@@ -344,5 +354,12 @@ class MigrationLineageTest {
       rows.next();
       return rows.getLong(1);
     }
+  }
+
+  /** 1 if the table is in this database's public schema, 0 if it is not. */
+  private long tableCount(String table) throws SQLException {
+    return count(
+        "select count(*) from information_schema.tables where table_schema = 'public'"
+            + " and table_name = '" + table + "'");
   }
 }
