@@ -63,8 +63,8 @@
         <!-- The two shared libraries the byte plane was carved into. Published from their own
              repositories (libs/qits-blobstore, libs/qits-registries) and consumed here like any
              other artifact. -->
-        <qits.blobstore.version>1.0.0-SNAPSHOT</qits.blobstore.version>
-        <qits.registries.version>1.0.0-SNAPSHOT</qits.registries.version>
+        <qits.blobstore.version>2026.813.161828</qits.blobstore.version>
+        <qits.registries.version>2026.813.162639</qits.registries.version>
         <qits.maven.repository.url>http://localhost:8081/artifacts/maven/maven</qits.maven.repository.url>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
