@@ -65,12 +65,32 @@
             <artifactId>quarkus-jackson</artifactId>
         </dependency>
         <dependency>
+            <!-- The one engine this service has. It replaced quarkus-jdbc-h2 with the blob store's
+                 move to chunked bytea: `bytea`, `pg_advisory_xact_lock`, a partial index and an
+                 on-conflict promote exist on no other, so H2 is not a smaller postgres here, it is
+                 a different store. Compile scope, unlike the libraries' test scope: this module
+                 owns the schema, so it also picks the driver. -->
             <groupId>io.quarkus</groupId>
-            <artifactId>quarkus-jdbc-h2</artifactId>
+            <artifactId>quarkus-jdbc-postgresql</artifactId>
+        </dependency>
+        <dependency>
+            <!-- PatientPgDriver, which the datasource block in this jar's
+                 microprofile-config.properties names as a string. It also arrives transitively on
+                 qits-blobstore, which reads DbRetry — named here because this module's own config
+                 is what pins the class, and a config-only reference is exactly the kind that
+                 disappears silently when a transitive dependency moves. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-db-core</artifactId>
         </dependency>
         <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-flyway</artifactId>
+        </dependency>
+        <dependency>
+            <!-- Flyway 10 split its database support out of core; without this the postgres lineage
+                 has no dialect and migrate-at-start fails at the first statement. -->
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-database-postgresql</artifactId>
         </dependency>
         <dependency>
             <groupId>io.quarkus</groupId>
@@ -87,6 +107,33 @@
         <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-junit5</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- A real postgres for this module's suite, spawned as a child process rather than a
+                 container: the first rule of this repo is that a clone tests green with no docker,
+                 and the schema under test is a PostgreSQL lineage. See testdb/EmbeddedPg. -->
+            <groupId>io.zonky.test</groupId>
+            <artifactId>embedded-postgres</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- Named per architecture on purpose: the binaries are separate artifacts and zonky
+                 picks one at run time, so an unnamed arch fails in the middle of a suite rather
+                 than during resolution. These three are what this platform is built and developed
+                 on — the same three the qits-blobstore and qits-registries suites name. -->
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-linux-amd64</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-linux-arm64v8</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-darwin-arm64v8</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>

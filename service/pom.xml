@@ -169,6 +169,30 @@
             <artifactId>quarkus-smallrye-jwt-build</artifactId>
             <scope>test</scope>
         </dependency>
+        <dependency>
+            <!-- A real postgres for this module's suite AND for the native gate: PackagedProcessIT
+                 launches the compiled binary against this instance, passing its url as -D flags.
+                 The third copy of this block, because test-scope dependencies do not travel between
+                 modules — see testdb/EmbeddedPg, which is also copied rather than shared. -->
+            <groupId>io.zonky.test</groupId>
+            <artifactId>embedded-postgres</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-linux-amd64</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-linux-arm64v8</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-darwin-arm64v8</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>

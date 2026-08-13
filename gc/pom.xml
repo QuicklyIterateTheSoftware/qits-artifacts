@@ -72,6 +72,31 @@
             <artifactId>quarkus-junit5</artifactId>
             <scope>test</scope>
         </dependency>
+        <dependency>
+            <!-- A real postgres for this module's suite. Test-scope dependencies do not travel, so
+                 this block is a copy of `artifacts`' rather than something inherited — the same
+                 rule that gives this module its own GcFixture: modules here share no test
+                 classpath. Its database name is its own (see testdb/EmbeddedPgConfigSource), so two
+                 modules' suites in one build never mean the same one. -->
+            <groupId>io.zonky.test</groupId>
+            <artifactId>embedded-postgres</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-linux-amd64</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-linux-arm64v8</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-darwin-arm64v8</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
