@@ -19,47 +19,49 @@
 # below packages a bundle that was ALREADY BUILT rather than building one. See the Quinoa flags on
 # the mvnw line for why the build cannot happen inside that stage.
 #
-# --- this image does NOT run with an empty environment, and that is not a packaging bug ------------
-# `docker run --rm qits/artifacts:latest` dies before the HTTP listener with
+# --- this image is STATELESS, and does NOT run with an empty environment ---------------------------
+# There is no volume, no /data and no blob directory. Everything this service stores — metadata rows
+# AND blob bytes — is in one PostgreSQL database, so the container's filesystem holds nothing worth
+# keeping and a restart loses only in-flight upload sessions. The OCI distribution spec permits
+# exactly that: a blob-upload session is resumable state, not content, and a client whose session is
+# gone re-POSTs and re-sends. Nothing else is in flight to lose.
 #
-#   FlywaySqlUnableToConnectToDbException: ... A file path that is implicitly relative to the current
-#   working directory is not allowed in the database URL "jdbc:h2:file:?/.qits/data/artifacts/h2/artifacts"
+# `docker run --rm qits/artifacts:latest` therefore still dies before the HTTP listener, and for a
+# better reason than it used to:
 #
-# That `?` is `${user.home}`. UID 1001 has no /etc/passwd entry in ubi-minimal, and a native image
-# resolves user.home through getpwuid rather than $HOME — so setting HOME does not fix it, and the
-# two defaults this repo ships (the H2 file and the blobs dir) have nowhere to land. Give the
-# datasource an absolute url and it comes up in ~0.1s, Flyway migration included.
+#   FlywaySqlUnableToConnectToDbException: ... Could not expand value QITS_RESOURCE_DB_URL
 #
-# An /etc/passwd line for 1001 would make it boot with no environment at all. It is deliberately not
-# here: both paths would then resolve inside the container's writable layer, and this service's data
-# is not its own. A container that came up healthy on an ephemeral copy is the failure that hides;
-# one that refuses to start is the failure you see.
+# The datasource maps the platform's generic resource contract with NO defaults:
 #
-# The two paths:
+#   QITS_RESOURCE_DB_URL        jdbc:postgresql://<host>:5432/<database>
+#   QITS_RESOURCE_DB_USERNAME
+#   QITS_RESOURCE_DB_PASSWORD
 #
-#   the database      the prototype. Deliberately unnamed here; the service will not start until a
-#                     deployment says where it goes.
+# qits-platform-deployments injects all three — it creates the role and the database on the tier's
+# postgres before the successor container starts, driven by the `resources:` declaration in this
+# repository's own deployment spec. Nothing about those names is artifacts-specific, which is the
+# point: the application maps them in its own config and the deployer stays framework-agnostic.
 #
-#   the blob dir      files on disk, but every one of them is indexed by a row in that database —
-#                     blobs whose index did not survive are not data, they are orphans. So it stays
-#                     with the database, and is named alongside it.
+# THE REFUSAL IS THE FEATURE. An unset variable leaves the expressions unresolvable and the process
+# dies naming the missing one, rather than opening some fallback store nobody meant. The image used
+# to ship an H2 file url under ${user.home}, which was precisely such a fallback and failed in the
+# ugliest available way — UID 1001 has no /etc/passwd entry in ubi-minimal and a native image
+# resolves user.home through getpwuid, so the url came out as `jdbc:h2:file:?/.qits/...`. A container
+# that came up healthy on an ephemeral copy is the failure that hides; one that refuses to start is
+# the failure you see.
 #
-# There is no third. The git host used to keep bare origins on a volume qits-workspaces mounted too,
-# and this image named that path itself; a repository is DFS-backed now — packs and refs are blobs
-# in the dir above — so the volume, the shared contract and the env var are all gone.
+# READINESS IS TIED TO THAT DATABASE, DELIBERATELY. `quarkus.datasource.health.enabled=true` is
+# spelled out in service/src/main/resources/application.properties, which departs from the platform's
+# "readiness independent of external dependencies" stance — see the comment there. Postgres is not an
+# external dependency of this service, it is the store, and a container that reported READY without it
+# is one the deployer's health gate would cut over onto: the registry every build pulls from, swapped
+# for one that answers 500 to everything.
 #
-# So a deployment mounts a volume at /data (which this image owns, see the runtime stage) and names
-# both:
-#
-#   docker run -v qits-artifacts-data:/data \
-#     -e QUARKUS_DATASOURCE_ARTIFACTS_JDBC_URL=jdbc:h2:file:/data/artifacts/h2/artifacts \
-#     -e QITS_ARTIFACTS_BLOBS_DIR=/data/artifacts/blobs \
-#     qits/artifacts:latest
-#
-# One more has no safe default and no error when it is wrong: `qits.ci.intake-url`, where the git
-# host's post-receive hook delivers. CiPostReceiveNotifier is fire-and-forget and swallows delivery
-# failures at debug, so an unset or wrong host produces no log line anywhere and CI simply never
-# runs. Point it at qits-ci on qits-net. See README.md for the whole config surface.
+# WHAT ABOUT THE ONE-TIME COPY. Moving a live deployment's H2 rows and blob files into PostgreSQL is
+# an OPS TOOL run once against both stores, not this image's boot path: a boot that migrated data
+# would have to be given two databases, would run on every restart, and would put a data conversion
+# behind a health check. This image only ever meets a database that is empty or that this lineage
+# built.
 #
 # --- stage `build`: native-compile ----------------------------------------------------------------
 # The builder JDK MUST be 25: native-image cannot read bytecode newer than its own JDK, and this
@@ -183,19 +185,16 @@ WORKDIR /work
 COPY --from=build --chown=1001:root /src/service/target/qits-artifacts /work/qits-artifacts
 RUN chmod +x /work/qits-artifacts
 
-# The mount point for everything above, created here so it is OWNED. Docker seeds a fresh named
-# volume from whatever the image has at the mount path, ownership included; with no such directory
-# it makes one root-owned 0755 and the boot dies on `AccessDeniedException: /data/artifacts` instead
-# of the config error, which reads like a bug in this image and is not one. Group-writable and
-# group-root because a ubi image is meant to survive being assigned an arbitrary UID with GID 0.
-# (A bind mount still takes its ownership from the host — nothing in an image can fix that.)
-RUN mkdir -p /data && chown -R 1001:root /data && chmod -R 775 /data
+# NO VOLUME, NO /data, NO OWNERSHIP FIXUP. There used to be a mount point here, created and chowned
+# so a fresh named volume would inherit the ownership; the blob directory it existed for is gone, so
+# the directory, its chown and the deployment's -v are all gone with it. A `/data` this image still
+# made would be an empty directory an operator would eventually mount something into.
+#
+# Nothing about the store is named here either: the QITS_RESOURCE_DB_* triple belongs to the
+# deployment, and this image refuses to start until one supplies it.
 
-# Nothing is named here: no QUARKUS_DATASOURCE_* and no QITS_ARTIFACTS_BLOBS_DIR. Both belong to the
-# prototype's storage, and this image refuses to start until a deployment says where they go.
-
-# One port for all of it — /artifacts/api/** (JAX-RS), /artifacts/q/** (openapi, swagger-ui) and
-# /artifacts/git/** (raw Vert.x) are three route stacks in one process, not three listeners.
+# One port for all of it — /artifacts/api/** (JAX-RS), /artifacts/q/** (openapi, swagger-ui) and the
+# five raw Vert.x route stacks are one process, not several listeners.
 EXPOSE 8080
 USER 1001
 
