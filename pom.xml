@@ -78,7 +78,7 @@
              the <repositories> block below. It also arrives transitively on qits-blobstore; it is
              named here because this repository's own config names the driver class. -->
         <qits.db-core.version>2026.811.165001</qits.db-core.version>
-        <qits.maven.repository.url>http://localhost:8081/artifacts/maven/maven</qits.maven.repository.url>
+        <qits.maven.repository.url>http://registry.dev.localhost:8080/artifacts/maven/maven</qits.maven.repository.url>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
