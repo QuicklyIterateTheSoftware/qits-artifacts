@@ -44,7 +44,7 @@
          and the mandatory -Dqits.variant=oauth|forwardauth|local auth profiles. -->
     <groupId>eu.wohlben.qits</groupId>
     <artifactId>qits-artifacts</artifactId>
-    <version>2026.813.165241</version>
+    <version>2026.814.72855</version>
     <packaging>pom</packaging>
     <name>qits-artifacts</name>
 
@@ -64,13 +64,11 @@
              repositories (libs/qits-blobstore, libs/qits-registries) and consumed here like any
              other artifact.
 
-             BRANCH VERSIONS. `postgres-blobs` moves the blob store's only backend to PostgreSQL,
-             and every consumer has to move with it in the same campaign — so the branch must be
-             invisible to the calver train and to a ship-mains bootstrap until they are all ready.
-             A -SNAPSHOT pinned exactly is what keeps it that way; the release restamps calver.
-             Both libraries move together: qits-registries is built against this blobstore. -->
-        <qits.blobstore.version>1.0.0-pgblobs-SNAPSHOT</qits.blobstore.version>
-        <qits.registries.version>1.0.0-pgblobs-SNAPSHOT</qits.registries.version>
+             The blob store's only backend is PostgreSQL now, and every consumer moved with it in the
+             same campaign. That campaign has released, so both are pinned at their calver. The two
+             move together: qits-registries is built against this blobstore. -->
+        <qits.blobstore.version>2026.814.71936</qits.blobstore.version>
+        <qits.registries.version>2026.814.72113</qits.registries.version>
         <!-- The platform's datasource resilience baseline: qits-db-core carries PatientPgDriver,
              which the datasource block in the artifacts jar's microprofile-config.properties names,
              and DbRetry. Published by libs/qits-integrations-quarkus, so it is one of the few
@@ -78,7 +76,7 @@
              the <repositories> block below. It also arrives transitively on qits-blobstore; it is
              named here because this repository's own config names the driver class. -->
         <qits.db-core.version>2026.811.165001</qits.db-core.version>
-        <qits.maven.repository.url>http://localhost:8081/artifacts/maven/maven</qits.maven.repository.url>
+        <qits.maven.repository.url>http://registry.dev.localhost:8080/artifacts/maven/maven</qits.maven.repository.url>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
