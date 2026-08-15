@@ -16,6 +16,11 @@
 # held.
 deployment_target: environment
 
+# The browser surface and OCI Distribution's externally fixed root both resolve to this service.
+# `/v2` is an extra protocol address, not a second navigation entry.
+routes: /artifacts,/v2
+navigation: Artifacts:3
+
 # A postgres role and database of this application's own (qits_artifacts by derivation), created
 # on the tier's postgres BEFORE the successor starts and injected as QITS_RESOURCE_DB_URL /
 # _USERNAME / _PASSWORD. Declared AHEAD of the PostgreSQL cutover on purpose: the running H2
