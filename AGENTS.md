@@ -515,11 +515,10 @@ authenticates no user itself.
 of the form `if (identity.isAnonymous()) deny` would look like a security control and be worth
 nothing, because reaching this service at all already implies you are inside the trusted network.
 
-There is no auth variant to select and no authorization policy here, and roles are deliberately not
-resolved — the single role check the system has (`qits.auth.required-role`) is the gateway's. See
-`migration-auth-plan.md`.
-
-## Tests
+There is no auth variant to select in this service. The shared `qits-auth-core` resolves both
+`X-Qits-User` and `X-Qits-Roles`; human-facing REST boundaries use Jakarta
+`@RolesAllowed("qits:admin")`. Machine-facing boundaries require an authenticated identity and
+retain their narrower `MachineAuth` audience/scope checks.
 
 - `mvn verify` runs 225 tests (38 in `artifacts/`, 98 in `gc/`, 89 in `service/`) in about a
   minute — counted from the surefire reports.
