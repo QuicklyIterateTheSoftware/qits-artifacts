@@ -8,6 +8,7 @@ import java.security.PrivateKey;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * A test issuer for the machine tokens qits-platform-idp mints, and the profile that turns
@@ -89,6 +90,10 @@ public final class MachineTokens {
         .issuer(ISSUER)
         .subject(AUDIENCE)
         .claim("aud", Json.createArrayBuilder(List.of(audiences)).build())
+        // The IDP copies the configured client roles into `groups`; @RolesAllowed consumes this
+        // claim after OIDC has authenticated the token. Audience-only tokens authenticate but are
+        // correctly forbidden, which was the stale fixture behind the service-suite failures.
+        .groups(Set.of("qits:system", "qits-platform:system"))
         .expiresIn(Duration.ofMinutes(5))
         .sign(signingKey());
   }

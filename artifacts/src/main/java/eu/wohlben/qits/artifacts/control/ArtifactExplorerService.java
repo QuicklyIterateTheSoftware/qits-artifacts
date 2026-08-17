@@ -5,6 +5,8 @@ import eu.wohlben.qits.artifacts.dto.ImageManifestSummary;
 import eu.wohlben.qits.artifacts.dto.ImageTagSummary;
 import eu.wohlben.qits.artifacts.dto.PackageSummary;
 import eu.wohlben.qits.artifacts.dto.PackageVersionSummary;
+import eu.wohlben.qits.artifacts.dto.MavenPackageSummary;
+import eu.wohlben.qits.artifacts.dto.MavenVersionSummary;
 import eu.wohlben.qits.artifacts.dto.RepositorySummary;
 import eu.wohlben.qits.artifacts.dto.StoreSummary;
 import eu.wohlben.qits.artifacts.entity.ArtifactRepository;
@@ -12,6 +14,7 @@ import eu.wohlben.qits.artifacts.entity.RepositoryTypeProfile;
 import eu.wohlben.qits.artifacts.entity.NpmDistTag;
 import eu.wohlben.qits.artifacts.entity.OciManifest;
 import eu.wohlben.qits.artifacts.entity.OciTag;
+import eu.wohlben.qits.artifacts.entity.MavenArtifact;
 import eu.wohlben.qits.artifacts.error.BadRequestException;
 import eu.wohlben.qits.artifacts.error.NotFoundException;
 import eu.wohlben.qits.artifacts.persistence.ArtifactRecordRepository;
@@ -223,6 +226,34 @@ public class ArtifactExplorerService {
     return summaries;
   }
 
+  /** Maven's layout normalized into coordinate rows rather than exposing an opaque path list. */
+  public List<MavenPackageSummary> listMavenPackages(String repository) {
+    requireMaven(repository);
+    Map<String, Set<String>> versionsByPackage = new TreeMap<>();
+    Map<String, Long> sizes = new TreeMap<>();
+    for (MavenArtifact artifact : mavenArtifacts.list("repository", repository)) {
+      MavenPath path = MavenPath.parse(artifact.path);
+      if (path == null) continue;
+      versionsByPackage.computeIfAbsent(path.coordinate(), ignored -> new HashSet<>()).add(path.version());
+      sizes.merge(path.coordinate(), artifact.sizeBytes, Long::sum);
+    }
+    return versionsByPackage.entrySet().stream()
+        .map(entry -> new MavenPackageSummary(entry.getKey(), entry.getValue().size(), sizes.get(entry.getKey())))
+        .toList();
+  }
+
+  /** Every published version of one Maven coordinate, including its jar, pom and sidecars. */
+  public List<MavenVersionSummary> listMavenVersions(String repository, String coordinate) {
+    requireMaven(repository);
+    Map<String, MavenVersionBuilder> byVersion = new TreeMap<>();
+    for (MavenArtifact artifact : mavenArtifacts.list("repository", repository)) {
+      MavenPath path = MavenPath.parse(artifact.path);
+      if (path == null || !path.coordinate().equals(coordinate)) continue;
+      byVersion.computeIfAbsent(path.version(), MavenVersionBuilder::new).add(path.file(), artifact);
+    }
+    return byVersion.values().stream().map(MavenVersionBuilder::build).toList();
+  }
+
   /**
    * The figures that do not reconcile, and the gaps between them.
    *
@@ -277,6 +308,38 @@ public class ArtifactExplorerService {
           "Repository '" + name + "' is " + wireName(repository) + ", not npm-packages");
     }
     return repository;
+  }
+
+  private ArtifactRepository requireMaven(String name) {
+    ArtifactRepository repository = require(name);
+    if (!MavenPackagesProfile.KEY.equals(repository.type)) {
+      throw new BadRequestException(
+          "Repository '" + name + "' is " + wireName(repository) + ", not maven-packages");
+    }
+    return repository;
+  }
+
+  private record MavenPath(String coordinate, String version, String file) {
+    static MavenPath parse(String path) {
+      String[] parts = path.split("/");
+      if (parts.length < 4 || path.endsWith("maven-metadata.xml")) return null;
+      String artifact = parts[parts.length - 3];
+      String group = String.join(".", java.util.Arrays.copyOf(parts, parts.length - 3));
+      return new MavenPath(group + ":" + artifact, parts[parts.length - 2], parts[parts.length - 1]);
+    }
+  }
+
+  private static final class MavenVersionBuilder {
+    private final String version;
+    private final List<String> files = new ArrayList<>();
+    private long size;
+    private Instant publishedAt;
+    MavenVersionBuilder(String version) { this.version = version; }
+    void add(String file, MavenArtifact artifact) {
+      files.add(file); size += artifact.sizeBytes;
+      if (publishedAt == null || artifact.createdAt.isBefore(publishedAt)) publishedAt = artifact.createdAt;
+    }
+    MavenVersionSummary build() { return new MavenVersionSummary(version, files, size, publishedAt); }
   }
 
   /** A repository's type as the API spells it — the kebab form, never the stored key. */
