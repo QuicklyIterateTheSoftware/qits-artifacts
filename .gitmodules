@@ -1,6 +1,6 @@
 [submodule "qits-platform-spa-artifacts"]
 	path = service/src/main/webui
-	url = ../qits-spa-artifacts.git
+	url = https://github.com/QuicklyIterateTheSoftware/qits-spa-artifacts.git
 	ignore = all
 	update = merge
 	branch = main
