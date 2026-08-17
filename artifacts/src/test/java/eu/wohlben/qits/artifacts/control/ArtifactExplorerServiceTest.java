@@ -178,6 +178,20 @@ class ArtifactExplorerServiceTest extends ArtifactsTestSupport {
   }
 
   @Test
+  void mavenCoordinatesDrillDownIntoVersionsAndFiles() {
+    seedMaven();
+    var packages = explorer.listMavenPackages("maven");
+    assertEquals(1, packages.size());
+    assertEquals("eu.wohlben.qits:qits-eventstream", packages.getFirst().name());
+    assertEquals(1, packages.getFirst().versionCount());
+    assertEquals(105, packages.getFirst().sizeBytes());
+    var published = explorer.listMavenVersions("maven", packages.getFirst().name());
+    assertEquals(List.of("1.0.0"), published.stream().map(v -> v.version()).toList());
+    assertEquals(2, published.getFirst().files().size());
+    assertEquals(105, published.getFirst().sizeBytes());
+  }
+
+  @Test
   void aVersionWhoseTarballIsGoneReportsAnUnknownSizeRatherThanZero() {
     // A row can outlive its bytes. Zero would read as an empty tarball; null says the file is not
     // there, which is the only honest answer with no size column to fall back on.
