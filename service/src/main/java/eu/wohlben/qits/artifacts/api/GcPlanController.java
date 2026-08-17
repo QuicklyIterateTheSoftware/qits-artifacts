@@ -63,6 +63,7 @@ public class GcPlanController {
   @GET
   @Path("/plan")
   @Operation(hidden = true)
+  @jakarta.annotation.security.RolesAllowed("qits:admin")
   public GcPlanReport plan() {
     return planner.plan();
   }
@@ -80,6 +81,7 @@ public class GcPlanController {
   @GET
   @Path("/repositories")
   @Operation(hidden = true)
+  @jakarta.annotation.security.RolesAllowed("qits:admin")
   public GcRepositoriesPlanResponse repositories() {
     return planner.planForRepositories();
   }
@@ -98,6 +100,7 @@ public class GcPlanController {
   @GET
   @Path("/repositories/{repository}/plan")
   @Operation(hidden = true)
+  @jakarta.annotation.security.RolesAllowed("qits:admin")
   public GcRepositoryPlanReport repositoryPlan(@PathParam("repository") String repository) {
     return planner.planForRepository(repository);
   }
@@ -113,6 +116,7 @@ public class GcPlanController {
   @POST
   @Path("/sweep")
   @Operation(hidden = true)
+  @jakarta.annotation.security.RolesAllowed("qits:system")
   public GcSweepReport sweep() {
     return executor.sweep();
   }
@@ -139,6 +143,7 @@ public class GcPlanController {
   @POST
   @Path("/repositories/{repository}/sweep")
   @Operation(hidden = true)
+  @jakarta.annotation.security.RolesAllowed("qits:system")
   public GcRepositorySweepReport repositorySweep(@PathParam("repository") String repository) {
     return executor.sweep(repository);
   }

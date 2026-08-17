@@ -44,7 +44,7 @@
          and the mandatory -Dqits.variant=oauth|forwardauth|local auth profiles. -->
     <groupId>eu.wohlben.qits</groupId>
     <artifactId>qits-artifacts</artifactId>
-    <version>2026.814.72855</version>
+    <version>2026.817.171510</version>
     <packaging>pom</packaging>
     <name>qits-artifacts</name>
 
@@ -59,7 +59,7 @@
     </modules>
 
     <properties>
-        <qits.auth-core.version>2026.811.165001</qits.auth-core.version>
+        <qits.auth-core.version>2026.815.141521</qits.auth-core.version>
         <!-- The two shared libraries the byte plane was carved into. Published from their own
              repositories (libs/qits-blobstore, libs/qits-registries) and consumed here like any
              other artifact.
@@ -75,7 +75,7 @@
              dependencies here that is neither on Maven Central nor in the Quarkus platform — see
              the <repositories> block below. It also arrives transitively on qits-blobstore; it is
              named here because this repository's own config names the driver class. -->
-        <qits.db-core.version>2026.811.165001</qits.db-core.version>
+        <qits.db-core.version>2026.815.141521</qits.db-core.version>
         <qits.maven.repository.url>http://registry.dev.localhost:8080/artifacts/maven/maven</qits.maven.repository.url>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>

@@ -62,6 +62,7 @@ public class RepositoryController {
   @PUT
   @Path("/{repo}")
   @Operation(hidden = true)
+  @jakarta.annotation.security.RolesAllowed("qits:system")
   public EnsureRepositoryRequest.Response ensure(
       @PathParam("repo") String repo, @Valid EnsureRepositoryRequest request) {
     var profile = repositoryTypes.requireWireName(request.type());
@@ -78,6 +79,7 @@ public class RepositoryController {
    */
   @GET
   @Operation(hidden = true)
+  @jakarta.annotation.security.RolesAllowed("qits:admin")
   public ListRepositoriesResponse list() {
     return new ListRepositoriesResponse(explorer.listRepositories());
   }

@@ -52,7 +52,7 @@ class AdminWriteGuardTest {
   }
 
   @Test
-  void aUserHeaderIsNotAMachineToken() {
+  void aUserWithoutTheSystemRoleIsForbidden() {
     // The gateway's forward-auth identity names a person; this API is machine-only, and a browser
     // session must not reach a write just because it reached the service.
     given()
@@ -62,7 +62,9 @@ class AdminWriteGuardTest {
         .when()
         .put("/artifacts/api/repositories/guarded")
         .then()
-        .statusCode(401);
+        // Forward auth produced a real user identity, so this is authorization (403), not a
+        // missing-authentication challenge (401). The user still cannot cross the system role.
+        .statusCode(403);
   }
 
   @Test
