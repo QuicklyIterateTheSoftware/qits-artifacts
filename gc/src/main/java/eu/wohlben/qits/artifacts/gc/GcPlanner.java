@@ -84,7 +84,19 @@ public class GcPlanner {
    * the report comes back with the pin-dependent types failed and {@code executable} false.
    */
   public GcPlanReport plan() {
-    return plan(census.take(), registered(), pinSources.fetch());
+    return plan((GcSuppliedPins) null);
+  }
+
+  /**
+   * The same plan, over pins the caller supplied instead of the ones this service would fetch.
+   *
+   * <p>Null is the no-body path and behaves exactly like {@link #plan()}. A supplied set drives the
+   * keeps in its place — one platform-wide pin set, read once by qits-platform-orchestrator and
+   * given to every deleter in the run — and a member it left out is that source unanswered, so the
+   * report comes back non-executable just as an unreachable service makes it.
+   */
+  public GcPlanReport plan(GcSuppliedPins supplied) {
+    return plan(census.take(), registered(), pinSources.fetch(supplied));
   }
 
   /**

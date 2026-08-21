@@ -333,11 +333,11 @@ class GcPlanControllerTest {
 
   @Test
   void readingAndExecutingStayTwoDifferentUrls() {
-    // A POST to the plan path must not quietly find some other resource, and a GET must never
-    // sweep: the reviewed-report-then-invoke order is carried by the verbs. The scoped pair carries
-    // it the same way, and adds the one a path segment buys: a name that is not a repository can
-    // never widen into the whole store.
-    given().when().post("/artifacts/api/gc/plan").then().statusCode(405);
+    // A GET must never sweep: the reviewed-report-then-invoke order is carried by the verbs. The
+    // scoped pair carries it the same way, and adds the one a path segment buys: a name that is not
+    // a repository can never widen into the whole store. POST /gc/plan is a reader too — it exists
+    // to carry supplied pins in a body — so it answers a report, never a deletion.
+    given().when().post("/artifacts/api/gc/plan").then().statusCode(200).body("dryRun", is(true));
     given().when().get("/artifacts/api/gc/sweep").then().statusCode(405);
     given()
         .when()
@@ -350,5 +350,179 @@ class GcPlanControllerTest {
         .post("/artifacts/api/gc/repositories/no-such-repository/sweep")
         .then()
         .statusCode(404);
+  }
+
+  /** The deployer's answer, verbatim as {@code GET /platform-deployments/api/pins} spells it. */
+  private static final String DEPLOYMENTS =
+      """
+      {"pins":[{"applicationName":"qits-artifacts","shas":["aaaa","bbbb"]}]}
+      """;
+
+  /** qits-ci's answer, verbatim as {@code GET /ci/api/daemon} spells it. */
+  private static final String CI_DAEMON =
+      """
+      {"daemonName":"qits-ci-daemon","daemonVersion":"2026.805.1",
+       "previousDaemonVersion":"","source":"adopted"}
+      """;
+
+  private static String body(String deployments, String ciDaemon) {
+    StringBuilder pins = new StringBuilder("{\"pins\":{");
+    if (deployments != null) {
+      pins.append("\"deployments\":").append(deployments);
+    }
+    if (deployments != null && ciDaemon != null) {
+      pins.append(',');
+    }
+    if (ciDaemon != null) {
+      pins.append("\"ciDaemon\":").append(ciDaemon);
+    }
+    return pins.append("}}").toString();
+  }
+
+  @Test
+  void suppliedPinsDriveThePlanAndAreNamedAsSupplied() {
+    // What qits-platform-orchestrator sends. It reads the platform's pins once per run and hands
+    // the same set to every deleter, which is the only way two deleters in one run work off one
+    // truth — and, on an authenticated platform, the only component that can read them at all.
+    // The report says so: the sources are named "supplied", and they carry no url because this
+    // service made no call.
+    given()
+        .contentType(io.restassured.http.ContentType.JSON)
+        .body(body(DEPLOYMENTS, CI_DAEMON))
+        .when()
+        .post("/artifacts/api/gc/plan")
+        .then()
+        .statusCode(200)
+        .body("dryRun", is(true))
+        .body("executable", is(true))
+        .body("pinFailures", hasSize(0))
+        .body("pins", hasSize(2))
+        .body(
+            "pins.source",
+            org.hamcrest.Matchers.containsInAnyOrder(
+                "supplied: qits-platform-deployments", "supplied: qits-ci"))
+        .body("pins.url", everyItem(is("")))
+        .body(
+            "pins.find { it.source == 'supplied: qits-platform-deployments' }.keeps",
+            org.hamcrest.Matchers.containsInAnyOrder(
+                "qits-artifacts:aaaa", "qits-artifacts:bbbb"))
+        .body(
+            "pins.find { it.source == 'supplied: qits-ci' }.keeps",
+            org.hamcrest.Matchers.contains("qits-ci-daemon@2026.805.1"))
+        // With both sources answered, the pin-dependent types plan instead of refusing.
+        .body("types.find { it.type == 'oci-images' }.error", nullValue());
+  }
+
+  @Test
+  void aSuppliedSetMissingASourceRefusesExactlyAsAnUnreachableOneDoes() {
+    // The fail-closed rule does not soften because the pins arrived by hand. A caller that supplied
+    // one document supplied half a keep-set, and half a keep-set condemns whatever the other half
+    // protected — so the plan is not executable and the sweep deletes nothing.
+    given()
+        .contentType(io.restassured.http.ContentType.JSON)
+        .body(body(DEPLOYMENTS, null))
+        .when()
+        .post("/artifacts/api/gc/plan")
+        .then()
+        .statusCode(200)
+        .body("executable", is(false))
+        .body("pinFailures", hasSize(1))
+        .body("pinFailures[0]", org.hamcrest.Matchers.containsString("ciDaemon"))
+        .body("pins.find { it.source == 'supplied: qits-ci' }.answered", is(false))
+        .body("pins.find { it.source == 'supplied: qits-platform-deployments' }.answered", is(true));
+
+    given()
+        .contentType(io.restassured.http.ContentType.JSON)
+        .body(body(DEPLOYMENTS, null))
+        .when()
+        .post("/artifacts/api/gc/sweep")
+        .then()
+        .statusCode(200)
+        .body("aborted", org.hamcrest.Matchers.containsString("supplied: qits-ci"))
+        .body("types.deleted.flatten()", hasSize(0))
+        .body("sweep.blobsUnlinked", is(0))
+        .body("untouchable.reason", org.hamcrest.Matchers.containsString("not computed"));
+  }
+
+  @Test
+  void aSweepWithSuppliedPinsRunsAndStillDeletesNothingOnAStoreThisYoung() {
+    // The executing half of the orchestrator's two calls. It runs — no abort — and the only reason
+    // nothing dies is the store's own age: every byte here was written seconds ago, inside the
+    // grace window. Two independent things would have to be true for a deletion, which is the
+    // property that makes this case safe to run at all.
+    given()
+        .contentType(io.restassured.http.ContentType.JSON)
+        .body(body(DEPLOYMENTS, CI_DAEMON))
+        .when()
+        .post("/artifacts/api/gc/sweep")
+        .then()
+        .statusCode(200)
+        .body("aborted", nullValue())
+        .body("types", hasSize(7))
+        .body("types.deleted.flatten()", hasSize(0))
+        .body("sweep.blobsUnlinked", is(0))
+        .body("sweep.bytesReclaimed", is(0))
+        .body("pins.source", org.hamcrest.Matchers.hasItem("supplied: qits-ci"));
+
+    given()
+        .contentType(io.restassured.http.ContentType.JSON)
+        .body(body(DEPLOYMENTS, CI_DAEMON))
+        .when()
+        .post("/artifacts/api/gc/repositories/" + REPO + "/sweep")
+        .then()
+        .statusCode(200)
+        .body("repository", is(REPO))
+        .body("aborted", nullValue())
+        .body("deleted", hasSize(0))
+        .body("pins.url", everyItem(is("")));
+  }
+
+  @Test
+  void aCallWithNoBodyIsTheOldCallInEveryRespect() {
+    // The SPA and every operator recipe send no body — some with no Content-Type at all — and that
+    // must keep meaning "read the pins over HTTP". Here those readers are closed ports, so the
+    // refusal on the wire is the proof the HTTP path is what ran.
+    given()
+        .when()
+        .post("/artifacts/api/gc/plan")
+        .then()
+        .statusCode(200)
+        .body("executable", is(false))
+        .body("pinFailures", hasSize(2))
+        .body(
+            "pins.find { it.source == 'qits-platform-deployments' }.url",
+            is("http://localhost:1/platform-deployments/api/pins"));
+
+    // An empty JSON object is the SPA's scoped sweep, which posts {} rather than nothing.
+    given()
+        .contentType(io.restassured.http.ContentType.JSON)
+        .body("{}")
+        .when()
+        .post("/artifacts/api/gc/repositories/" + REPO + "/sweep")
+        .then()
+        .statusCode(200)
+        .body("aborted", org.hamcrest.Matchers.containsString("qits-platform-deployments"))
+        .body("pins.find { it.source == 'qits-ci' }.url", is("http://localhost:1/ci/api/daemon"));
+  }
+
+  @Test
+  void aMalformedBodyIsA400RatherThanASilentFallBackToTheHttpReaders() {
+    // A caller that meant to supply pins and mistyped them must never be answered with a run that
+    // read different ones — quietly reading the closed ports instead would be a plan about a
+    // keep-set nobody asked for.
+    given()
+        .contentType(io.restassured.http.ContentType.JSON)
+        .body("{\"pins\": not json}")
+        .when()
+        .post("/artifacts/api/gc/plan")
+        .then()
+        .statusCode(400);
+    given()
+        .contentType(io.restassured.http.ContentType.JSON)
+        .body("{\"pins\": 5}")
+        .when()
+        .post("/artifacts/api/gc/sweep")
+        .then()
+        .statusCode(400);
   }
 }

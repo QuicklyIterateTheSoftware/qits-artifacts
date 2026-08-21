@@ -72,7 +72,19 @@ public class GcSweepExecutor {
    * the last reference to content a pinned identity of another type still needs.
    */
   public GcSweepReport sweep() {
-    GcPins pins = pinSources.fetch();
+    return sweep((GcSuppliedPins) null);
+  }
+
+  /**
+   * The same run, over pins the caller supplied instead of the ones this service would fetch.
+   *
+   * <p>Null is the no-body path and behaves exactly like {@link #sweep()}. A supplied set is one
+   * platform-wide pin set, read once by qits-platform-orchestrator and given to every deleter in
+   * the run, and the abort rule does not soften for it: a member the caller left out is that source
+   * unanswered, and the run ends here with nothing deleted.
+   */
+  public GcSweepReport sweep(GcSuppliedPins supplied) {
+    GcPins pins = pinSources.fetch(supplied);
     if (!pins.complete()) {
       return aborted(pins);
     }
@@ -106,8 +118,17 @@ public class GcSweepExecutor {
    * @throws eu.wohlben.qits.artifacts.error.NotFoundException no repository of that name
    */
   public GcRepositorySweepReport sweep(String name) {
+    return sweep(name, null);
+  }
+
+  /**
+   * One repository's run, over pins the caller supplied instead of the ones this service would
+   * fetch. Null is the no-body path; everything else this method's untyped twin says still holds,
+   * the whole-run abort included.
+   */
+  public GcRepositorySweepReport sweep(String name, GcSuppliedPins supplied) {
     ArtifactRepository row = repositories.require(name);
-    GcPins pins = pinSources.fetch();
+    GcPins pins = pinSources.fetch(supplied);
     if (!pins.complete()) {
       return aborted(row, pins);
     }
