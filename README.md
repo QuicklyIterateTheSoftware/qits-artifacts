@@ -1067,7 +1067,12 @@ truths. Nothing about the fail-closed rule softens: a member the caller left out
 **unanswered**, the plan reports itself non-executable and the sweep aborts with nothing deleted,
 exactly as an unreachable service does. A deployments document of `{"pins":[]}` is the opposite and
 is a real answer — a platform with nothing deployed, pinning nothing, and a run may proceed on it. A body that is not that shape is a `400` rather
-than a quiet fall back to the readers. Sending no body at all is unchanged in every respect, which
+than a quiet fall back to the readers. **`POST /gc/plan` accepts `qits:admin` or `qits:system`** —
+the `GET` stays `qits:admin`-only and both sweeps stay `qits:system` — because the caller that needs
+it is a machine: the orchestrator authenticates as `qits:system,qits-platform:system` and never
+holds `qits:admin`, and it is the same machine already allowed to run the sweep. Being a `POST` also
+puts it inside `AdminWriteGuard`, so once `qits.auth.machine.required` is on it needs the machine
+audience the sweep needs. Sending no body at all is unchanged in every respect, which
 is what the SPA and every operator recipe do, and the HTTP readers stay the fallback for them.
 **Those readers send no credential**, so on an authenticated platform they get a `401` and every
 no-body run aborts; supplying pins is the way around that today, and fixing the readers is a

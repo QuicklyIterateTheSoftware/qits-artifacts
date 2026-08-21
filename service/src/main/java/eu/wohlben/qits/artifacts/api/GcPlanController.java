@@ -84,10 +84,18 @@ public class GcPlanController {
    * The same report, over pins the caller supplied.
    *
    * <p>A {@code POST} because it carries a body, not because it does anything: this route reads and
-   * deletes nothing, exactly like the {@code GET}, and holds the same {@code qits:admin} role. It
-   * exists for qits-platform-orchestrator, which reads the platform's pins once per run and hands
-   * the same set to every deleter — this plan is the review artifact for the sweep that follows it,
-   * and a plan read against different pins than the sweep applies would not be one.
+   * deletes nothing, exactly like the {@code GET}. It exists for qits-platform-orchestrator, which
+   * reads the platform's pins once per run and hands the same set to every deleter — this plan is
+   * the review artifact for the sweep that follows it, and a plan read against different pins than
+   * the sweep applies would not be one.
+   *
+   * <p><b>{@code qits:system} may read it as well as {@code qits:admin}</b>, which is the one place
+   * this route's roles differ from the {@code GET}'s. The caller that needs it is a machine —
+   * qits-platform-orchestrator authenticates as {@code qits:system,qits-platform:system} and never
+   * holds {@code qits:admin} — and it is the same machine that is allowed to run the sweep
+   * afterwards. Letting it execute a plan it may not read would be the strange posture, not this
+   * one. Nothing is widened for people: a person still needs {@code qits:admin}, and the route
+   * reads.
    *
    * <p>With no body, or a body without {@code pins}, it answers exactly what the {@code GET}
    * answers.
@@ -101,7 +109,7 @@ public class GcPlanController {
   @POST
   @Path("/plan")
   @Operation(hidden = true)
-  @jakarta.annotation.security.RolesAllowed("qits:admin")
+  @jakarta.annotation.security.RolesAllowed({"qits:admin", "qits:system"})
   public GcPlanReport planWithSuppliedPins(String body) {
     return planner.plan(suppliedPins(body));
   }

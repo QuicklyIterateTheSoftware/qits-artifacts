@@ -130,6 +130,31 @@ class AdminWriteGuardTest {
   }
 
   @Test
+  void theMachineIdentityMayPostTheGcPlanItIsAllowedToSweep() {
+    // qits-platform-orchestrator authenticates as qits:system,qits-platform:system and never holds
+    // qits:admin, so a qits:admin-only POST /gc/plan would 403 the one caller the route exists for
+    // — while the sweep it feeds stayed open to that same token. This asserts the pair: the machine
+    // reads the plan, and it reads it with a body of supplied pins, which is the whole call.
+    given()
+        .header("Authorization", bearer(MachineTokens.forThisService()))
+        .contentType(ContentType.JSON)
+        .body(
+            """
+            {"pins":{"deployments":{"pins":[]},
+                     "ciDaemon":{"daemonName":"qits-ci-daemon","daemonVersion":"",
+                                 "previousDaemonVersion":"","source":"none"}}}
+            """)
+        .when()
+        .post("/artifacts/api/gc/plan")
+        .then()
+        .statusCode(200)
+        .body("executable", org.hamcrest.Matchers.is(true));
+
+    // The guard is untouched by the wider role: no token is still 401 on a write method.
+    given().contentType(ContentType.JSON).when().post("/artifacts/api/gc/plan").then().statusCode(401);
+  }
+
+  @Test
   void anUploadWithoutATokenIs401() {
     given()
         .contentType("image/png")
