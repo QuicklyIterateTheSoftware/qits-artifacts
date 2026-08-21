@@ -1,6 +1,9 @@
 package eu.wohlben.qits.artifacts.api;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import eu.wohlben.qits.artifacts.error.BadRequestException;
 import eu.wohlben.qits.artifacts.gc.GcPlanner;
+import eu.wohlben.qits.artifacts.gc.GcSuppliedPins;
 import eu.wohlben.qits.artifacts.gc.GcSweepExecutor;
 import eu.wohlben.qits.artifacts.gc.dto.GcPlanReport;
 import eu.wohlben.qits.artifacts.gc.dto.GcRepositoriesPlanResponse;
@@ -45,6 +48,14 @@ import org.eclipse.microprofile.openapi.annotations.Operation;
  * front door is the gateway's session policy, and the sweep's own safety is its content: on a
  * store younger than the grace window it deletes nothing, provably.
  *
+ * <p><b>Pins may arrive in the request.</b> {@code POST /gc/plan} is the {@code GET}'s twin for
+ * that and nothing else, and both sweeps take the same optional body: {@code {"pins":
+ * {"deployments": …, "ciDaemon": …}}}, each member the peer's response verbatim. It is how
+ * qits-platform-orchestrator gives one platform-wide pin set — read once, by the one component
+ * holding an idp client for every peer — to every deleter in a run. A request without a body is
+ * unchanged in every respect, and a supplied set never widens what a run may delete: a member left
+ * out is that source unanswered, and the run refuses.
+ *
  * <p>The registries' {@code 405} on client deletes is unaffected: no client gains deletion
  * semantics from any of this. The sweep is an operator invocation of an internal process, and its
  * receipt is the plan report's executed twin.
@@ -55,6 +66,7 @@ public class GcPlanController {
 
   @Inject GcPlanner planner;
   @Inject GcSweepExecutor executor;
+  @Inject ObjectMapper objectMapper;
 
   /**
    * Every repository type, its strategy's plan or the reason it has none, the cross-type sweep, and
@@ -66,6 +78,32 @@ public class GcPlanController {
   @jakarta.annotation.security.RolesAllowed("qits:admin")
   public GcPlanReport plan() {
     return planner.plan();
+  }
+
+  /**
+   * The same report, over pins the caller supplied.
+   *
+   * <p>A {@code POST} because it carries a body, not because it does anything: this route reads and
+   * deletes nothing, exactly like the {@code GET}, and holds the same {@code qits:admin} role. It
+   * exists for qits-platform-orchestrator, which reads the platform's pins once per run and hands
+   * the same set to every deleter — this plan is the review artifact for the sweep that follows it,
+   * and a plan read against different pins than the sweep applies would not be one.
+   *
+   * <p>With no body, or a body without {@code pins}, it answers exactly what the {@code GET}
+   * answers.
+   *
+   * <p><b>Being a {@code POST} does put it inside {@code AdminWriteGuard}</b>, which claims the
+   * {@code gc} prefix for every write method. The guard is inert until {@code
+   * qits.auth.machine.required} is on; after that a caller of this reader needs the machine
+   * audience the sweep needs, which is a consequence of the verb rather than a decision about the
+   * route. A caller that wants neither sends the {@code GET}.
+   */
+  @POST
+  @Path("/plan")
+  @Operation(hidden = true)
+  @jakarta.annotation.security.RolesAllowed("qits:admin")
+  public GcPlanReport planWithSuppliedPins(String body) {
+    return planner.plan(suppliedPins(body));
   }
 
   /**
@@ -117,8 +155,8 @@ public class GcPlanController {
   @Path("/sweep")
   @Operation(hidden = true)
   @jakarta.annotation.security.RolesAllowed("qits:system")
-  public GcSweepReport sweep() {
-    return executor.sweep();
+  public GcSweepReport sweep(String body) {
+    return executor.sweep(suppliedPins(body));
   }
 
   /**
@@ -144,7 +182,30 @@ public class GcPlanController {
   @Path("/repositories/{repository}/sweep")
   @Operation(hidden = true)
   @jakarta.annotation.security.RolesAllowed("qits:system")
-  public GcRepositorySweepReport repositorySweep(@PathParam("repository") String repository) {
-    return executor.sweep(repository);
+  public GcRepositorySweepReport repositorySweep(
+      @PathParam("repository") String repository, String body) {
+    return executor.sweep(repository, suppliedPins(body));
+  }
+
+  /**
+   * The optional body, read into the documents the engine should use — or null for "fetch them".
+   *
+   * <p>Taken as a raw string rather than as a bound entity so that a caller sending no body, and no
+   * {@code Content-Type} with it, is still the plain no-body call the SPA and every existing
+   * operator recipe make. Malformed JSON is a 400 rather than a silent fall back to the HTTP
+   * readers: a caller that meant to supply pins and mistyped them must not be answered with a run
+   * that read different ones.
+   */
+  private GcSuppliedPins suppliedPins(String body) {
+    if (body == null || body.isBlank()) {
+      return null;
+    }
+    try {
+      return GcSuppliedPins.inRequestBody(objectMapper.readTree(body)).orElse(null);
+    } catch (com.fasterxml.jackson.core.JsonProcessingException | IllegalArgumentException wrong) {
+      throw new BadRequestException(
+          "the gc request body must be {\"pins\":{\"deployments\":…,\"ciDaemon\":…}} or absent: "
+              + wrong.getMessage());
+    }
   }
 }

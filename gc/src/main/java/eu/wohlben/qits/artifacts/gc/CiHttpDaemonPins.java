@@ -51,10 +51,28 @@ public class CiHttpDaemonPins implements CiDaemonPins {
   @Override
   public DaemonPin daemonPin() {
     String url = url();
-    JsonNode body = get(url);
-    // Missing fields read as blank rather than as a refusal: blank is this endpoint's own way of
-    // saying "no pin", so a shape with one absent says the same thing. A body that is not an object
-    // at all is the refusal, and get() has already made it one.
+    return parse(get(url), url);
+  }
+
+  /**
+   * qits-ci's answer, read into a pin — the parsing half, with no transport in it.
+   *
+   * <p>Split out for the reason {@link CdHttpDeploymentPins#parse} gives: the same document may be
+   * fetched here or handed in by qits-platform-orchestrator, and one reader for both is what keeps
+   * the two paths from reading one body two ways.
+   *
+   * <p>Missing fields read as blank rather than as a refusal: blank is this endpoint's own way of
+   * saying "no pin", so a shape with one absent says the same thing. A body that is not an object
+   * at all is the refusal.
+   *
+   * @param body the response body, verbatim
+   * @param origin where it came from, for the message a refusal carries
+   * @throws IllegalStateException the body is not a JSON object
+   */
+  public static DaemonPin parse(JsonNode body, String origin) {
+    if (body == null || !body.isObject()) {
+      throw new IllegalStateException("qits-ci answered a non-object body for " + origin);
+    }
     return new DaemonPin(
         text(body, "daemonName"),
         text(body, "daemonVersion"),
@@ -72,11 +90,7 @@ public class CiHttpDaemonPins implements CiDaemonPins {
         throw new IllegalStateException(
             "qits-ci answered " + response.statusCode() + " for " + url);
       }
-      JsonNode body = objectMapper.readTree(response.body());
-      if (body == null || !body.isObject()) {
-        throw new IllegalStateException("qits-ci answered a non-object body for " + url);
-      }
-      return body;
+      return objectMapper.readTree(response.body());
     } catch (InterruptedException interrupted) {
       Thread.currentThread().interrupt();
       throw new IllegalStateException("interrupted while reading " + url, interrupted);

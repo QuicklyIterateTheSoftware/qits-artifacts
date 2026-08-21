@@ -347,6 +347,14 @@ collection" section is the contract; these are the rules that get "helpfully" re
   dedupe globally: a tarball one type releases may be the last reference to bytes a pinned image also
   names. `GET /gc/plan` must **never** 500 on it — it answers `executable: false` with
   `pinFailures` and the pin-dependent types refused.
+- **Pins may be supplied in the request, and the parsers are shared.** `POST /gc/plan` (the `GET`'s
+  twin) and both sweeps take an optional `{"pins":{"deployments":…,"ciDaemon":…}}`, each member the
+  peer's response verbatim, read by `CdHttpDeploymentPins.parse` / `CiHttpDaemonPins.parse` — the
+  same code the HTTP readers use, so one document cannot be read two ways. qits-platform-orchestrator
+  sends it: one platform-wide pin set, read once per run, given to every deleter. A missing member
+  is that source **unanswered**, not "nothing is pinned", so the run refuses as before; no body is
+  the old call exactly. The readers are the no-body fallback and **send no credential**, so they
+  `401` on an authenticated platform — a known gap, fixed elsewhere, not here.
 - **Two pin semantics that look like bugs if you "fix" them.** A blank `daemonVersion` is an
   *answer* meaning "no daemon is pinned" (the shipped default) and must not abort a run; a 64-hex
   daemon version pins the **blob** at that digest as well as any row, because the pin has been a

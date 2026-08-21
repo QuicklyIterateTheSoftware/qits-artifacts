@@ -69,10 +69,32 @@ public class CdHttpDeploymentPins implements CdDeploymentPins {
   @Override
   public List<ApplicationPin> pins() {
     String url = url();
-    JsonNode body = get(url);
+    return parse(get(url), url);
+  }
+
+  /**
+   * The deployer's answer, read into pins — the parsing half, with no transport in it.
+   *
+   * <p>Separate from {@link #pins()} because the same document can arrive two ways now: fetched
+   * here, or handed in by qits-platform-orchestrator, which reads the platform's pins once and
+   * gives every deleter the same set. Both paths must read a body the same way, so there is one
+   * reader and the caller decides where the bytes came from.
+   *
+   * @param body the response body, verbatim
+   * @param origin where it came from, for the message a refusal carries — a url, or a phrase
+   *     naming the supplied document
+   * @throws IllegalStateException the shape is one this cannot read. Never an empty list on doubt:
+   *     an empty answer condemns every tag.
+   */
+  public static List<ApplicationPin> parse(JsonNode body, String origin) {
+    if (body == null || !body.isObject()) {
+      throw new IllegalStateException(
+          "qits-platform-deployments answered a non-object body for " + origin);
+    }
     JsonNode pins = body.get("pins");
     if (pins == null || !pins.isArray()) {
-      throw new IllegalStateException("qits-platform-deployments answered without a 'pins' array for " + url);
+      throw new IllegalStateException(
+          "qits-platform-deployments answered without a 'pins' array for " + origin);
     }
     List<ApplicationPin> rows = new ArrayList<>();
     for (JsonNode pin : pins) {
@@ -104,11 +126,7 @@ public class CdHttpDeploymentPins implements CdDeploymentPins {
         throw new IllegalStateException(
             "qits-platform-deployments answered " + response.statusCode() + " for " + url);
       }
-      JsonNode body = objectMapper.readTree(response.body());
-      if (body == null || !body.isObject()) {
-        throw new IllegalStateException("qits-platform-deployments answered a non-object body for " + url);
-      }
-      return body;
+      return objectMapper.readTree(response.body());
     } catch (InterruptedException interrupted) {
       Thread.currentThread().interrupt();
       throw new IllegalStateException("interrupted while reading " + url, interrupted);
