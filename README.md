@@ -47,13 +47,13 @@ the mirror's DAOs are live beans here. See "The pull-through mirror".
 | `artifacts/` | What did not move out: the docs and daemon registries (entities, persistence, services), the store explorer, the live blob census, the repository seeder, the two repository-type **profile beans** this service contributes (`DAEMON_BINARIES`, `DOCS`) — and the Flyway lineage. A library jar: no web, no JAX-RS. |
 | `gc/` | `eu.wohlben.qits.artifacts.gc` (+ `.dto`) — garbage collection: the pin-based own-artifacts engine, the per-type adapters, the planner, the reconciliation and the sweep, plus the two pin ports (`CdDeploymentPins`, `CiDaemonPins`) and their HTTP adapters. A *process* modelled from within this service, not artifacts domain. Depends on `artifacts` and, one way, never back. |
 | `service/` | `eu.wohlben.qits.artifacts.api` (the JAX-RS boundary), `eu.wohlben.qits.docs` and `eu.wohlben.qits.daemon` (two raw Vert.x wires), and the SPA. The npm, maven and OCI wires are **not** written here any more — they arrive as beans on the qits-registries jars and register their own routes. |
-| `service/src/main/webui/` | The SPA submodule — an Angular app, built into the app by Quinoa and served at `/artifacts`. Not Java, and not a Maven module. |
+| `service/src/main/webui/` | The SPA submodule — an Angular app, built into the app by Quinoa and served at the **root** of this service's own host. Not Java, and not a Maven module. |
 
 `artifacts/` and `gc/` are library jars; **`service/` is the application** — it carries
 `<packaging>quarkus</packaging>` and produces a process, as a JVM fast-jar or as a native binary:
 
     ./mvnw verify
-    java -jar service/target/quarkus-app/quarkus-run.jar   # :8080 — SPA /artifacts/, blobs /artifacts/api/**,
+    java -jar service/target/quarkus-app/quarkus-run.jar   # :8080 — SPA /, blobs /artifacts/api/**,
                                                            #         npm /artifacts/npm/**, maven /artifacts/maven/**,
                                                            #         docs /artifacts/docs/**, daemons /artifacts/daemons/**,
                                                            #         images /v2/**
@@ -80,12 +80,14 @@ coexist in one process, and the only thing that exercises zero-copy `sendFile` s
 `./mvnw package`; without it Quinoa finds no `package.json`, disables itself with a warning, and the
 app ships with no client while the build stays green.
 
-The segment is spelled a THIRD time inside the client — the Angular `baseHref` in its `angular.json`
-is `/artifacts/` — because the browser resolves asset urls against the document, not against
-anything the server knows. Move `quarkus.quinoa.ui-root-path` and move that.
+The client no longer spells the segment at all. Its Angular `baseHref` is `/`, matching
+`quarkus.quinoa.ui-root-path` here, because this service has a **host of its own** —
+`registry.<env>.<domain>`, the name docker already resolves every image reference against — and the
+client is what that host serves at its root. The two still move together: the browser resolves asset
+urls against the document, not against anything the server knows.
 
-Everything is served under the `/artifacts` gateway segment, because `qits-gateway` routes
-verbatim by prefix and rewrites nothing — there is no unprefixed form, on `qits-net` either.
+The machine surfaces keep their prefixes. The edge path-routes `/artifacts` and `/v2` on every host
+and rewrites nothing, so there is no unprefixed form, on `qits-net` either.
 
 Note the route stacks resolve differently: `/artifacts/api/**` is JAX-RS and moves with
 `quarkus.rest.path`; `/artifacts/npm/**`, `/artifacts/maven/**`, `/artifacts/docs/**`,
@@ -160,11 +162,14 @@ accept no path prefix, so this cannot live under `quarkus.rest.path` the way the
 is raw Vert.x at the host root, a literal in the code exactly as `/artifacts/npm` is, and nothing in
 the JAX-RS configuration moves it. `RegistryTest` is the only thing that would notice if it drifted.
 
-The corollary is that `/artifacts/v2` must serve **nothing**, and since the SPA took the whole
-segment that now takes saying so: `/v2` is in `quarkus.quinoa.ignored-path-prefixes` for that alone.
-A deployment that prefixes the registry is misconfigured, and a 404 is how a registry client is told
-"not a registry here" — answered with the SPA it gets `200 text/html` and no
-`Docker-Distribution-Api-Version` header, and reports something that names neither cause nor fix.
+The corollary is that `/artifacts/v2` must serve **nothing**. A deployment that prefixes the
+registry is misconfigured, and a 404 is how a registry client is told "not a registry here" —
+answered with the SPA it gets `200 text/html` and no `Docker-Distribution-Api-Version` header, and
+reports something that names neither cause nor fix.
+
+`/v2` itself is in `quarkus.quinoa.ignored-path-prefixes` for the same reason turned around. The
+client is at `/` now, so its catch-all covers the whole host: without that entry a mistyped registry
+path would answer the page rather than a 404.
 
 Storage is the blob store, unchanged: OCI addresses every layer, config and manifest as
 `sha256:<hex>`, which *is* `BlobStore`'s model, so layers dedupe globally with everything else. Two

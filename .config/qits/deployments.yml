@@ -16,10 +16,20 @@
 # held.
 deployment_target: environment
 
-# The browser surface and OCI Distribution's externally fixed root both resolve to this service.
-# `/v2` is an extra protocol address, not a second navigation entry.
+# The machine surfaces. The edge path-routes both prefixes on every host, so a build reaches
+# /artifacts/npm and a docker client reaches /v2 wherever it asks. The browser surface is what this
+# service's own host serves at its root and needs no route entry.
 routes: /artifacts,/v2
-navigation: Artifacts:3
+
+# The DNS label of that host. Explicit because the derived one would be `artifacts` (the application
+# name minus its qits- prefix), and `registry.<env>.<domain>` is the name docker already resolves
+# every image reference against — one public name for the plane rather than two for one service.
+host: registry
+
+# Where this application hangs in the sidebar: under the four kinds of repository that publish
+# bytes here. A frontend or a CLI publishes documentation and runs CI, but nothing of its own lands
+# in this store, so those two slots are deliberately empty. The position is per slot.
+navigation-entries: services.details.Artifacts:3, daemons.details.Artifacts:3, libs.details.Artifacts:3, images.details.Artifacts:3
 
 # A postgres role and database of this application's own (qits_artifacts by derivation), created
 # on the tier's postgres BEFORE the successor starts and injected as QITS_RESOURCE_DB_URL /

@@ -74,13 +74,14 @@ the class, which is the friendly half of this table.
 
 ## Paths
 
-Almost everything is served under the `/artifacts` gateway segment — `qits-gateway` routes verbatim
-by prefix, so an unprefixed route is normally unreachable, on `qits-net` as much as through the
-gateway. Four second-level segments and the segment itself, plus one root-level exception:
+The machine surface is served under the `/artifacts` segment — the edge path-routes it verbatim on
+every host, so an unprefixed route is normally unreachable, on `qits-net` as much as through the
+edge. The **client** is the exception: this service has a host of its own,
+`registry.<env>.<domain>`, and the client is what that host serves at `/`.
 
 | Prefix | Machinery | Moves with |
 |---|---|---|
-| `/artifacts/` | the Angular SPA, built and served by Quinoa from the `src/main/webui` submodule | `quarkus.quinoa.ui-root-path` **and** the client's own `baseHref` |
+| `/` | the Angular SPA, built and served by Quinoa from the `src/main/webui` submodule | `quarkus.quinoa.ui-root-path` **and** the client's own `baseHref` |
 | `/artifacts/api/**` | JAX-RS | `quarkus.rest.path` |
 | `/artifacts/q/**` | Quarkus' non-application root (openapi, swagger-ui, health) | `quarkus.http.non-application-root-path` |
 | `/artifacts/npm/**` | raw Vert.x routes in `NpmRoutes` (the npm registry; only the hosted type is registered here) | **nothing** — a literal, and `NpmPaths.BASE` is the only place it is spelled |
@@ -90,46 +91,44 @@ gateway. Four second-level segments and the segment itself, plus one root-level 
 | `/v2/**` | raw Vert.x routes in `RegistryRoutes` (the OCI Distribution API) | **nothing** — a literal, and not under `/artifacts` at all |
 
 `/artifacts/npm` is *not* forced on us the way `/v2` is: npm accepts a registry URL of any depth, so
-it sits inside the segment the gateway already routes here and needs no extra prefix on
-`QitsService.ARTIFACTS`. The first path segment after it is the `artifact_repository` row, the same
+it sits inside the segment the edge already routes here and needs no `routes:` entry of its own. The first path segment after it is the `artifact_repository` row, the same
 first-segment rule the OCI registry uses. `/artifacts/maven` is the same case verbatim: maven
 accepts a repository URL of any depth, and `MavenPaths.BASE` is the only place the segment is
 spelled.
 
-The SPA is the one that takes the *whole* segment, so it is the one that can swallow the others.
-Quinoa's SPA re-route is a catch-all at `/artifacts/*` registered near-last, so anything with a real
-route in front of it still wins — but a request matching **no** route is rerouted to `index.html` and
-answers `200 text/html`. `quarkus.quinoa.ignored-path-prefixes` is what stops that, and it is set
-explicitly (`/api,/q,/npm,/maven,/daemons,/docs,/v2`) rather than left to Quinoa's derivation,
-because the
-derivation reads `quarkus.rest.path` and `quarkus.http.non-application-root-path` and **nothing
-names `/npm`, `/maven`, `/daemons` or `/docs`**. `/daemons` is the least forgiving omission of the
-four: a bootstrap script `curl`s a daemon binary and execs it, so `index.html` at 200 becomes an
-executable that is a web page.
-Setting the key REPLACES the derivation rather than extending it, and its values are relative to
-`ui-root-path`, so `/api` and `/q` cannot be written as `${quarkus.rest.path}`: that line is a
-hand-kept copy of a derivation and has to be edited when either key moves.
+The SPA takes the *whole host*, so it is the one that can swallow every other stack. Quinoa's SPA
+re-route is a catch-all at the ui root registered near-last, so anything with a real route in front
+of it still wins — but a request matching **no** route is rerouted to `index.html` and answers
+`200 text/html`. `quarkus.quinoa.ignored-path-prefixes` is what stops that, and since the ui root
+moved to `/` its values are **absolute**: `/artifacts,/v2`.
 
-`/v2` is in that list even though **nothing is mounted at `/artifacts/v2`** — it is the one entry
-that ignores a path no route serves. The registry is at the host root, so a deployment that sends
-`/artifacts/v2` is misconfigured and has to find out: a 404 tells a registry client "not a registry
-here", while the SPA answers 200 `text/html` with no `Docker-Distribution-Api-Version` header. That
-assertion predates the SPA (`PackagedProcessIT.theRegistryIsMountedAtTheHostRootNotUnderTheArtifactsSegment`)
-and enabling SPA routing is what would otherwise have flipped it — it caught the change, which is
-the argument for leaving it spelled out absolutely.
+Two entries cover everything, because the match is by prefix. `/artifacts` claims the JAX-RS base,
+the framework root and all four wire stacks under the segment; `/daemons` is the least forgiving of
+those four — a bootstrap script `curl`s a daemon binary and execs it, so `index.html` at 200 becomes
+an executable that is a web page. Setting the key REPLACES Quinoa's derivation
+(`/artifacts/api`, `/artifacts/q`) rather than extending it, which is why the first entry is spelled
+by hand.
 
-The client's `baseHref` is a fourth spelling of the segment and lives in another repo. Quinoa mounts
+`/v2` used to be in that list although **nothing is mounted at `/artifacts/v2`**, as the one entry
+ignoring a path no route serves. It now does real work in the other direction: the registry is at
+the host root, which is *inside* the ui root, so without the entry a mistyped registry path answers
+the page. A 404 tells a registry client "not a registry here", while the SPA answers 200
+`text/html` with no `Docker-Distribution-Api-Version` header.
+`PackagedProcessIT.theRegistryIsMountedAtTheHostRootNotUnderTheArtifactsSegment` asserts both
+directions.
+
+The client's `baseHref` is `/`, matching `ui-root-path`, and lives in another repo. Quinoa mounts
 the files; the `baseHref` is what makes `index.html` ask for them at the right url. A mismatch serves
 a page whose every asset 404s, and no test here would see it.
 
-Bare `/artifacts` (no trailing slash) is a 301 to `/artifacts/` — Quinoa mounts the SPA at
-`/artifacts/*`, which does not match the bare segment on its own, so `webui/WebUiRedirect` serves
-the missing spelling (GET/HEAD only, query preserved; a write to the bare segment answers 405).
+**`webui/WebUiRedirect` is gone.** It served bare `/artifacts` as a 301 to `/artifacts/` because
+Quinoa mounted the SPA at `/artifacts/*` and missed the bare segment. `/artifacts` is the machine
+segment now and the client is at the root, so the bare spelling means nothing to bounce.
 
 `/v2` is the exception to the segment rule and it is forced on us: docker and podman resolve an image
-reference against `<host>/v2/` and accept no path prefix. The gateway claims it as an *extra prefix*
-on its artifacts entry (`QitsService.ARTIFACTS("/v2")`) rather than as a service of its own, so a
-deployment still names one host and gets both.
+reference against `<host>/v2/` and accept no path prefix. `.config/qits/deployments.yml` names it as
+a second `routes:` prefix rather than a service of its own, and `host: registry` gives the plane the
+public name docker already uses — one deployment, one host, both surfaces.
 
 The last four lines are the ones that bite: no config key moves those routes, and no JAX-RS test
 covers them. `RegistryTest`, `NpmRegistryTest`, `MavenRegistryTest`, `DaemonRegistryTest` and
@@ -597,8 +596,7 @@ retain their narrower `MachineAuth` audience/scope checks.
   route stacks are proved to coexist and where the binary is proved to boot at all.
   It is also the **only** place the web UI can be tested at all: Quinoa logs "Quinoa is disabled by
   default in tests" and registers neither the static resources nor the SPA re-route, so a
-  `@QuarkusTest` asserting anything about `/artifacts/` passes against a process that has no client
-  in it. Two of them are that, and they are the guard on
+  `@QuarkusTest` asserting anything about `/` passes against a process that has no client in it. Two of them are that, and they are the guard on
   `quarkus.quinoa.ignored-path-prefixes`.
   Its `@TestProfile` hands the launched process a database, because the shipped config deliberately
   has none: the `QITS_RESOURCE_DB_*` expressions are unresolvable outside a deployment, so without

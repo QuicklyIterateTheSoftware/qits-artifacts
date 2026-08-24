@@ -7,6 +7,7 @@ import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.hasItems;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -43,7 +44,7 @@ import org.junit.jupiter.api.Test;
  * gap in any of them leaves the JVM suite green and fails only in the binary, at runtime.
  *
  * <p>Deliberately <b>one</b> class spanning both packages rather than one per context, because the
- * thing under test is the single process: {@code /artifacts/} is Quinoa's static SPA, {@code
+ * thing under test is the single process: {@code /} is Quinoa's static SPA, {@code
  * /artifacts/api/**} is JAX-RS, {@code /artifacts/q/**} is Quarkus' non-application root, and
  * {@code /artifacts/npm/**}, {@code /artifacts/maven/**}, {@code /artifacts/docs/**}, {@code
  * /artifacts/daemons/**} and {@code /v2/**} are independent raw-Vert.x route stacks — and what
@@ -112,48 +113,74 @@ class PackagedProcessIT {
   @TestHTTPResource("/")
   URL root;
 
+  /** The string that identifies a response as the CLIENT's index.html rather than anything else. */
+  private static final String BASE_HREF = "<base href=\"/\">";
+
   @Test
-  void theSpaIsServedAtTheSegmentWithAMatchingBaseHref() {
+  void theSpaIsServedAtTheRootOfThisServicesOwnHost() {
     // Quinoa builds src/main/webui (the qits-spa-artifacts submodule) during augmentation and the
     // files ship inside the artifact. The base href is the client's half of the same coupling:
     // Quinoa mounts the files at quarkus.quinoa.ui-root-path, but only the baseHref baked in by
     // `ng build` makes the browser ask for them there. Asserting both together is what makes a
     // one-sided move fail here instead of in a browser.
+    //
+    // Both are `/` now: this service has a host of its own (registry.<env>.<domain>) and the client
+    // is what that host serves.
     given()
         .when()
-        .get("/artifacts/")
+        .get("/")
         .then()
         .statusCode(200)
         .contentType(containsString("text/html"))
-        .body(containsString("<base href=\"/artifacts/\">"));
+        .body(containsString(BASE_HREF));
   }
 
   @Test
   void aDeepLinkFallsBackToTheSpaButTheOtherStacksAreNotSwallowed() {
-    // quarkus.quinoa.enable-spa-routing puts a catch-all at /artifacts/* near the end of the route
+    // quarkus.quinoa.enable-spa-routing puts a catch-all at the ui root near the end of the route
     // order: a client route has no file behind it and must reach index.html, or every reload and
-    // every pasted link 404s.
+    // every pasted link 404s. Both spellings the client routes are probed — its own, and the
+    // platform's scoped one.
+    given().when().get("/repositories/npm").then().statusCode(200).body(containsString(BASE_HREF));
     given()
         .when()
-        .get("/artifacts/some/client/route")
+        .get("/qits/services/qits-artifacts/repositories/npm")
         .then()
         .statusCode(200)
-        .body(containsString("<base href=\"/artifacts/\">"));
+        .body(containsString(BASE_HREF));
 
     // The other half, and the reason quarkus.quinoa.ignored-path-prefixes is spelled out rather
-    // than left to Quinoa's derivation. That derivation reads quarkus.rest.path and
-    // quarkus.http.non-application-root-path — so /api and /q would be covered — but NOTHING names
-    // /artifacts/npm, which NpmRoutes carries as a literal in the qits-registries-npm jar. Un-ignored
-    // it answers 200 text/html, and an npm client handed a web page parses it as JSON.
+    // than left to Quinoa's derivation. The ui root is `/`, so EVERY machine path is inside the
+    // catch-all now and only these two entries keep it out.
+    //
+    // /artifacts covers the four wire stacks that live under the segment as literals in their own
+    // classes. Un-ignored, /artifacts/npm answers 200 text/html and an npm client parses a web page
+    // as JSON.
     given().when().get("/artifacts/npm/npm/@qits%2fnothing").then().statusCode(404);
 
-    // The npm case verbatim, one segment over: no config key names /maven either (MavenRoutes
-    // spells it as a literal), so without the ignore a mistyped artifact path would answer 200
-    // text/html and a maven client would report a corrupt jar.
+    // The npm case verbatim, one segment over: MavenRoutes spells /artifacts/maven as a literal, so
+    // without the ignore a mistyped artifact path would answer 200 text/html and a maven client
+    // would report a corrupt jar.
     given().when().get("/artifacts/maven/maven").then().statusCode(404);
 
-    // Setting the key REPLACED the derivation, so the two it used to supply are re-asserted here.
+    // The bare segment is the machine surface, not a door to the client: nothing serves it, and a
+    // 404 is the answer rather than the page.
+    given()
+        .when()
+        .get("/artifacts/")
+        .then()
+        .statusCode(404)
+        .body(not(containsString(BASE_HREF)));
+
+    // Setting the key REPLACED the derivation, so the two it used to supply are re-asserted here —
+    // both by a live route and by a mistyped sibling that must not answer the page.
     given().when().get("/artifacts/api/repositories").then().statusCode(200);
+    given()
+        .when()
+        .get("/artifacts/api/nope")
+        .then()
+        .statusCode(404)
+        .body(not(containsString(BASE_HREF)));
     given().when().get("/artifacts/q/health/ready").then().statusCode(200);
   }
 
@@ -233,6 +260,17 @@ class PackagedProcessIT {
         .statusCode(200)
         .header("Docker-Distribution-Api-Version", "registry/2.0");
     given().when().get("/artifacts/v2/").then().statusCode(404);
+
+    // /v2 is INSIDE the ui root since the client moved to `/`, so it is the SPA catch-all it has to
+    // be kept out of now rather than a path nothing could reach. A mistyped registry path must be a
+    // 404 and never the page: served index.html a docker client gets 200 text/html with no
+    // Docker-Distribution-Api-Version header and reports something that names neither cause nor fix.
+    given()
+        .when()
+        .get("/v2/nope/manifests")
+        .then()
+        .statusCode(404)
+        .body(not(containsString(BASE_HREF)));
   }
 
   @Test
