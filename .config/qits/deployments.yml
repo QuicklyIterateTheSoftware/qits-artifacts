@@ -28,8 +28,10 @@ host: registry
 
 # Where this application hangs in the sidebar: under the four kinds of repository that publish
 # bytes here. A frontend or a CLI publishes documentation and runs CI, but nothing of its own lands
-# in this store, so those two slots are deliberately empty. The position is per slot.
-navigation-entries: services.details.Artifacts:3, daemons.details.Artifacts:3, libs.details.Artifacts:3, images.details.Artifacts:3
+# in this store, so those two slots are deliberately empty. The position is per slot: 5 is
+# Artifacts' place in the platform's fixed order of the per-repository applications
+# (Api Docs 1, Docs 2, Code 3, CI 4, Artifacts 5, Configuration 6, Workspaces 7).
+navigation-entries: services.details.Artifacts:5, daemons.details.Artifacts:5, libs.details.Artifacts:5, images.details.Artifacts:5
 
 # A postgres role and database of this application's own (qits_artifacts by derivation), created
 # on the tier's postgres BEFORE the successor starts and injected as QITS_RESOURCE_DB_URL /
