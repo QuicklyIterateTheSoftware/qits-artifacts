@@ -85,6 +85,8 @@ abstract class GcFixture {
   @Inject MavenArtifactRepository mavenArtifacts;
   @Inject MavenProxyMetadataRepository mavenProxyMetadata;
   @Inject DaemonBinaryRepository daemonBinaries;
+  @Inject eu.wohlben.qits.artifacts.persistence.DocsSiteRepository docsSites;
+  @Inject eu.wohlben.qits.artifacts.persistence.DocsFileRepository docsFiles;
   @Inject OciMirrorUpstreamRepository mirrorUpstreams;
   @Inject OciMirrorTagCheckRepository mirrorTagChecks;
   @Inject BlobDiskIndex diskIndex;
@@ -116,6 +118,10 @@ abstract class GcFixture {
               mavenArtifacts.deleteAll();
               mavenProxyMetadata.deleteAll();
               daemonBinaries.deleteAll();
+              // The site's files and metadata ride the database cascade; wiping the file rows
+              // first anyway keeps the wipe legible.
+              docsFiles.deleteAll();
+              docsSites.deleteAll();
               records.deleteAll();
               // The mirror upstreams too: their slug is a foreign key into artifact_repository, so
               // the pairing that makes a namespace resolvable is also what makes the wipe ordered.
@@ -355,6 +361,48 @@ abstract class GcFixture {
             + String.join(",", descriptors)
             + "]}")
         .getBytes(StandardCharsets.UTF_8);
+  }
+
+  /**
+   * One published docs version with one file per blob id — the docs half of what {@code daemonRow}
+   * is for binaries. Metadata (if any) lands in {@code docs_site_metadata} through the entity's
+   * element collection, so a delete-cascade case exercises the real FK.
+   */
+  void docsSite(
+      String repository,
+      String name,
+      String version,
+      Instant publishedAt,
+      Instant accessedAt,
+      java.util.Map<String, String> metadata,
+      String... blobIds) {
+    QuarkusTransaction.requiringNew()
+        .run(
+            () -> {
+              eu.wohlben.qits.artifacts.entity.DocsSite site =
+                  new eu.wohlben.qits.artifacts.entity.DocsSite();
+              site.repository = repository;
+              site.name = name;
+              site.version = version;
+              site.fileCount = blobIds.length;
+              site.totalBytes = blobIds.length;
+              site.publishedAt = publishedAt;
+              site.accessedAt = accessedAt;
+              site.metadata.putAll(metadata);
+              docsSites.persist(site);
+              for (int i = 0; i < blobIds.length; i++) {
+                eu.wohlben.qits.artifacts.entity.DocsFile file =
+                    new eu.wohlben.qits.artifacts.entity.DocsFile();
+                file.repository = repository;
+                file.name = name;
+                file.version = version;
+                file.path = "file-" + i;
+                file.blobId = blobIds[i];
+                file.sizeBytes = 1;
+                file.mediaType = "text/plain";
+                docsFiles.persist(file);
+              }
+            });
   }
 
   String store(byte[] bytes) {

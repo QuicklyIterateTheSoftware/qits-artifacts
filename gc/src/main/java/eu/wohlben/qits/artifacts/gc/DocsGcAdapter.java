@@ -38,13 +38,25 @@ import java.util.regex.Pattern;
  * stays, because that version's candidate retains it. Nothing here has to reason about the sharing,
  * and nothing here should.
  *
- * <h2>Every row is a release</h2>
+ * <h2>A release is a calver row, and a sha row is not one</h2>
  *
- * <p>There is no prerelease coordinate on this type, {@code daemon_binaries}' situation for the same
- * reason: a {@code docs_site} row is written in the same transaction as a publish, publishes come
- * from a release pipeline, and versions are immutable. So {@link GcCandidate#released()} is true for
- * every row, and the belt reads as the settlement's sentence — the last releases of every site live
- * whatever their age, and the rest ages out once nobody has read it for the configured window.
+ * <p>{@link GcCandidate#released()} answers {@code CALVER.matches(version)} — the per-type
+ * distinction the record's own javadoc names ("a calver tag beside a sha tag"). The release train
+ * publishes calver versions; the per-commit userflow pipelines publish under the <b>bare commit
+ * sha</b>, once per push per branch, and those are working artifacts rather than releases: they
+ * never occupy a belt slot, and they live exactly as long as the access window keeps them (P90D
+ * from {@code max(published_at, accessed_at)} — a freshly pushed bundle is always young). The belt
+ * still reads as the settlement's sentence for the versions that are releases: the last calver
+ * releases of every site live whatever their age.
+ *
+ * <p><b>The group deliberately stays the site, not the site-and-branch.</b> A branch-qualified
+ * group would be doctrinally legal ("what a group is" belongs to the adapter) — but the belt keeps
+ * a group's last two releases <em>forever, whatever their age</em>, and branches die: last-2-per-
+ * branch would permanently retain two bundles of every deleted feature branch, with no fact in this
+ * service that could ever say the branch is gone. That is the CI types' intended "while the branch
+ * exists" rule, which needs a githost-backed pin source and is its own workstream. With sha rows
+ * never reaching the belt, the branch question does not arise here; the stated consequence is that
+ * a branch idle past the window loses its bundles, and CI republishes on the next push.
  *
  * <h2>Nothing pins a docs version, and that is a decision</h2>
  *
@@ -98,7 +110,9 @@ public class DocsGcAdapter implements GcTypeAdapter {
                 // The belt counts per SITE, not per repository: two libraries releasing on the same
                 // cadence must not spend each other's slots.
                 row.repository + "/" + row.name,
-                true,
+                // A calver row is a release; a per-commit sha row is a working artifact that lives
+                // on the access window alone. See the class javadoc.
+                CALVER.matcher(row.version).matches(),
                 latest(row.publishedAt, row.accessedAt),
                 Set.copyOf(files.listBlobIds(row.repository, row.name, row.version))));
       }
@@ -106,12 +120,32 @@ public class DocsGcAdapter implements GcTypeAdapter {
     return List.copyOf(candidates);
   }
 
-  /** Oldest first by version; ties on the identity so a report is stable across runs. */
+  /**
+   * Oldest first: calver versions by their numeric parts, everything else below them by {@code
+   * lastAccessAt}; ties on the identity so a report is stable across runs.
+   *
+   * <p>With {@code released = isCalver} the non-calver rungs are unreachable from the belt — the
+   * engine sorts released candidates only — but the comparator must stay total and sane: if the
+   * release meaning ever changes again, "oldest" must not quietly mean "smallest hex". {@code
+   * lastAccessAt} is the honest age the candidate actually carries for a sha version; a publish
+   * timestamp on {@code GcCandidate} would ripple through every adapter for a rung nothing reads.
+   */
   @Override
   public Comparator<GcCandidate> byAge() {
-    return Comparator.comparing(
-            (GcCandidate candidate) -> versionOf(candidate.identity()), BY_VERSION)
-        .thenComparing(GcCandidate::identity);
+    return (left, right) -> {
+      String leftVersion = versionOf(left.identity());
+      String rightVersion = versionOf(right.identity());
+      boolean leftCalver = CALVER.matcher(leftVersion).matches();
+      boolean rightCalver = CALVER.matcher(rightVersion).matches();
+      if (leftCalver != rightCalver) {
+        return leftCalver ? 1 : -1; // every calver release ranks above (newer than) any sha row
+      }
+      int compared =
+          leftCalver
+              ? BY_VERSION.compare(leftVersion, rightVersion)
+              : left.lastAccessAt().compareTo(right.lastAccessAt());
+      return compared != 0 ? compared : left.identity().compareTo(right.identity());
+    };
   }
 
   @Override

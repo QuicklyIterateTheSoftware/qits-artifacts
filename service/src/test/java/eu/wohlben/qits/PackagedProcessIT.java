@@ -619,6 +619,41 @@ class PackagedProcessIT {
         .body("untouchable.reason", containsString("not computed"));
   }
 
+  @org.junit.jupiter.api.Test
+  void theDocsWireCarriesMetadataThroughTheCompile() {
+    // The docs wire's V2 feature, proved against the BINARY: header parsing (the shared
+    // ArtifactMetadataHeaders reading), the @ElementCollection write, the JsonObject metadata
+    // member, and the ?meta.* filter — the whole chain a JVM-green build could still lose to a
+    // native compile if anything reflective crept in. An unscoped site name on purpose, so this
+    // asserts the feature rather than RestAssured's path encoding.
+    byte[] bundle = eu.wohlben.qits.docs.TinyBundle.storybookLike("packaged-meta").toTarGz();
+    given()
+        .header("X-Artifacts-Meta-git.branch.name", "main")
+        .header("X-Artifacts-Meta-git.commit.hash", "f".repeat(40))
+        .body(bundle)
+        .when()
+        .put("/artifacts/docs/docs/packaged-it-userflows/-/" + "f".repeat(40))
+        .then()
+        .statusCode(201)
+        .body("metadata.'git.branch.name'", equalTo("main"));
+
+    given()
+        .when()
+        .get("/artifacts/docs/docs/packaged-it-userflows?meta.git.branch.name=main")
+        .then()
+        .statusCode(200)
+        .body("versions", hasSize(1))
+        .body("versions[0].version", equalTo("f".repeat(40)))
+        .body("versions[0].metadata.'git.commit.hash'", equalTo("f".repeat(40)));
+
+    given()
+        .when()
+        .get("/artifacts/docs/docs/packaged-it-userflows?meta.git.branch.name=elsewhere")
+        .then()
+        .statusCode(200)
+        .body("versions", hasSize(0));
+  }
+
   private void ensureOciRepository() {
     given()
         .contentType("application/json")

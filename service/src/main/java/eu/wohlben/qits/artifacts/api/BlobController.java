@@ -1,5 +1,6 @@
 package eu.wohlben.qits.artifacts.api;
 
+import eu.wohlben.qits.artifacts.control.ArtifactMetadataHeaders;
 import eu.wohlben.qits.artifacts.control.ArtifactQueryService;
 import eu.wohlben.qits.artifacts.control.BlobService;
 import eu.wohlben.qits.artifacts.dto.ArtifactRecordDto;
@@ -21,7 +22,6 @@ import jakarta.ws.rs.core.UriInfo;
 import java.io.InputStream;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import org.eclipse.microprofile.openapi.annotations.Operation;
 
@@ -43,10 +43,9 @@ public class BlobController {
 
   /**
    * Metadata rides these request headers (flat strings map cleanly to headers). Case-insensitive.
+   * The parsing itself is {@link ArtifactMetadataHeaders}', shared with the docs wire.
    */
-  static final String META_PREFIX = "X-Artifacts-Meta-";
-
-  private static final String META_PREFIX_LC = META_PREFIX.toLowerCase(Locale.ROOT);
+  static final String META_PREFIX = ArtifactMetadataHeaders.PREFIX;
 
   @Inject BlobService blobService;
 
@@ -123,17 +122,16 @@ public class BlobController {
     return new ListBlobsResponse(records);
   }
 
-  /** Collects {@code X-Artifacts-Meta-<key>} request headers into the flat metadata map. */
+  /**
+   * Collects {@code X-Artifacts-Meta-<key>} request headers into the flat metadata map — the JAX-RS
+   * thin adapter over the shared reading (which also strips server-owned keys and enforces the wire
+   * caps; a violation surfaces as this boundary's ordinary 400).
+   */
   private static Map<String, String> metadataFrom(HttpHeaders headers) {
-    Map<String, String> metadata = new LinkedHashMap<>();
-    headers
-        .getRequestHeaders()
-        .forEach(
-            (name, values) -> {
-              if (name.toLowerCase(Locale.ROOT).startsWith(META_PREFIX_LC) && !values.isEmpty()) {
-                metadata.put(name.substring(META_PREFIX.length()), values.get(0));
-              }
-            });
-    return metadata;
+    try {
+      return ArtifactMetadataHeaders.fromLists(headers.getRequestHeaders());
+    } catch (IllegalArgumentException capped) {
+      throw new jakarta.ws.rs.BadRequestException(capped.getMessage(), capped);
+    }
   }
 }

@@ -15,6 +15,7 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -47,14 +48,15 @@ public class DocsRegistryService {
   /** One file of a bundle, as the route staged it: the whole of what {@link #publish} needs. */
   public record BundleFile(String path, String blobId, long sizeBytes, String mediaType) {}
 
-  /** A published version, flattened for the serve path. */
+  /** A published version, flattened for the serve path. {@code metadata} is never null. */
   public record StoredSite(
       String name,
       String version,
       int fileCount,
       long totalBytes,
       Instant publishedAt,
-      Instant accessedAt) {}
+      Instant accessedAt,
+      Map<String, String> metadata) {}
 
   /** One file of a published version, flattened for the serve path. */
   public record StoredFile(String path, String blobId, long sizeBytes, String mediaType) {}
@@ -101,10 +103,43 @@ public class DocsRegistryService {
         .toList();
   }
 
+  /**
+   * One site's versions, newest first, narrowed to those whose metadata carries every {@code
+   * predicates} entry exactly — {@code ArtifactQueryService}'s semantics on the docs plane. "The
+   * latest bundle of branch X" is the first element of the filtered list, because the ordering is
+   * the same {@code publishedAt desc} the unfiltered list has.
+   *
+   * <p>Filtered <b>in Java over one site's rows</b>, deliberately: the cardinality is one site's
+   * version count, and a dynamic join per predicate buys nothing at that size — the same trade
+   * {@code ArtifactQueryService} documented and chose. An indexed metadata join is the backlog
+   * trigger, there as here.
+   */
+  @ActivateRequestContext
+  public List<StoredSite> listVersions(
+      String repository, String name, Map<String, String> predicates) {
+    return sites.listVersions(repository, name).stream()
+        .filter(
+            row ->
+                predicates.entrySet().stream()
+                    .allMatch(p -> p.getValue().equals(row.metadata.get(p.getKey()))))
+        .map(DocsRegistryService::flatten)
+        .toList();
+  }
+
   /** Every site in the repository, by name — the catalog qits-platform-docs lists. */
   @ActivateRequestContext
   public List<String> listNames(String repository) {
     return sites.listNames(repository);
+  }
+
+  /**
+   * One version's paths, sorted. What the single-version document lists — and deliberately only
+   * that document: the versions <em>list</em> stays path-free, because N versions × hundreds of
+   * files is a payload the catalog page never reads.
+   */
+  @ActivateRequestContext
+  public List<String> listFiles(String repository, String name, String version) {
+    return files.listPaths(repository, name, version);
   }
 
   /** One site in the catalog: what it is called, how many versions it has, and its newest. */
@@ -184,7 +219,12 @@ public class DocsRegistryService {
   @ActivateRequestContext
   @Transactional
   public StoredSite publish(
-      String repository, String name, String version, List<BundleFile> bundle) {
+      String repository,
+      String name,
+      String version,
+      List<BundleFile> bundle,
+      Map<String, String> metadata) {
+    requireMetadataWithinCaps(metadata);
     if (bundle == null || bundle.isEmpty()) {
       throw new DocsException(
           400, "the bundle for " + name + "@" + version + " carries no files — nothing to publish");
@@ -209,6 +249,9 @@ public class DocsRegistryService {
     site.fileCount = bundle.size();
     site.totalBytes = bundle.stream().mapToLong(BundleFile::sizeBytes).sum();
     site.publishedAt = Instant.now();
+    if (metadata != null) {
+      site.metadata.putAll(metadata);
+    }
     sites.persist(site);
 
     for (BundleFile entry : bundle) {
@@ -267,7 +310,38 @@ public class DocsRegistryService {
 
   private static StoredSite flatten(DocsSite row) {
     return new StoredSite(
-        row.name, row.version, row.fileCount, row.totalBytes, row.publishedAt, row.accessedAt);
+        row.name,
+        row.version,
+        row.fileCount,
+        row.totalBytes,
+        row.publishedAt,
+        row.accessedAt,
+        Map.copyOf(row.metadata));
+  }
+
+  /**
+   * The wire already refused an over-cap map through {@code ArtifactMetadataHeaders}; this is the
+   * defensive restatement at the only write path, so the database column limit is never the
+   * enforcer.
+   */
+  private static void requireMetadataWithinCaps(Map<String, String> metadata) {
+    if (metadata == null) {
+      return;
+    }
+    if (metadata.size() > ArtifactMetadataHeaders.MAX_KEYS) {
+      throw new DocsException(
+          400, "more than " + ArtifactMetadataHeaders.MAX_KEYS + " metadata keys");
+    }
+    metadata.forEach(
+        (key, value) -> {
+          if (key == null
+              || key.isBlank()
+              || key.length() > ArtifactMetadataHeaders.MAX_KEY_LENGTH
+              || value == null
+              || value.length() > ArtifactMetadataHeaders.MAX_VALUE_LENGTH) {
+            throw new DocsException(400, "metadata key or value out of bounds: '" + key + "'");
+          }
+        });
   }
 
   private static StoredFile flattenFile(DocsFile row) {
