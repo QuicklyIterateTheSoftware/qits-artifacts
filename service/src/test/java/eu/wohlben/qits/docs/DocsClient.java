@@ -32,9 +32,19 @@ final class DocsClient implements AutoCloseable {
 
   /** {@code PUT …/<site>/-/<version>} with a declared {@code Content-Length}. */
   HttpResponse<String> publish(String site, String version, byte[] tarGz) {
-    return send(
-        bundle(site, version).PUT(HttpRequest.BodyPublishers.ofByteArray(tarGz)),
-        HttpResponse.BodyHandlers.ofString());
+    return publish(site, version, tarGz, java.util.Map.of());
+  }
+
+  /**
+   * The same publish carrying metadata, each entry as an {@code X-Artifacts-Meta-<key>} header —
+   * the {@code ArtifactsTestMedia} pattern on the docs wire.
+   */
+  HttpResponse<String> publish(
+      String site, String version, byte[] tarGz, java.util.Map<String, String> metadata) {
+    HttpRequest.Builder request =
+        bundle(site, version).PUT(HttpRequest.BodyPublishers.ofByteArray(tarGz));
+    metadata.forEach((key, value) -> request.header("X-Artifacts-Meta-" + key, value));
+    return send(request, HttpResponse.BodyHandlers.ofString());
   }
 
   /**
@@ -75,6 +85,15 @@ final class DocsClient implements AutoCloseable {
   HttpResponse<String> versions(String site) {
     return send(
         HttpRequest.newBuilder(URI.create(base + "artifacts/docs/docs/" + site))
+            .timeout(Duration.ofMinutes(1))
+            .GET(),
+        HttpResponse.BodyHandlers.ofString());
+  }
+
+  /** The versions list with a raw query string appended, e.g. {@code meta.git.branch.name=main}. */
+  HttpResponse<String> versions(String site, String query) {
+    return send(
+        HttpRequest.newBuilder(URI.create(base + "artifacts/docs/docs/" + site + "?" + query))
             .timeout(Duration.ofMinutes(1))
             .GET(),
         HttpResponse.BodyHandlers.ofString());

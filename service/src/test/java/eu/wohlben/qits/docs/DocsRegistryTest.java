@@ -371,6 +371,165 @@ class DocsRegistryTest {
 
   // --- helpers ----------------------------------------------------------------------------------
 
+  @Test
+  void theVersionDocumentListsItsPathsAndTheVersionsListStaysPathFree() {
+    String salt = salt();
+    String site = "@userflows/paths-" + salt;
+    try (DocsClient client = client()) {
+      client.publish(site, "1.0.0", TinyBundle.storybookLike(salt).toTarGz());
+
+      JsonArray files = new JsonObject(client.version(site, "1.0.0").body()).getJsonArray("files");
+      assertEquals(3, files.size(), "every path of the bundle, sorted");
+      assertTrue(files.contains("index.html"), files.toString());
+
+      JsonObject listed =
+          new JsonObject(client.versions(site).body()).getJsonArray("versions").getJsonObject(0);
+      assertTrue(listed.getJsonArray("files") == null, "the list stays path-free");
+    }
+  }
+
+  // --- per-version metadata ---------------------------------------------------------------------
+
+  @Test
+  void publishedMetadataRidesTheReceiptAndTheVersionDocument() {
+    String salt = salt();
+    String site = "@userflows/meta-" + salt;
+    java.util.Map<String, String> metadata =
+        java.util.Map.of(
+            "git.branch.name", "main",
+            "git.commit.hash", "a".repeat(40),
+            "git.repository.name", "qits-githost");
+
+    try (DocsClient client = client()) {
+      HttpResponse<String> published =
+          client.publish(site, "1.0.0", TinyBundle.storybookLike(salt).toTarGz(), metadata);
+      assertEquals(201, published.statusCode(), published.body());
+      JsonObject receiptMeta = new JsonObject(published.body()).getJsonObject("metadata");
+      assertEquals("main", receiptMeta.getString("git.branch.name"));
+
+      JsonObject versionMeta =
+          new JsonObject(client.version(site, "1.0.0").body()).getJsonObject("metadata");
+      assertEquals("main", versionMeta.getString("git.branch.name"));
+      assertEquals("a".repeat(40), versionMeta.getString("git.commit.hash"));
+      assertEquals("qits-githost", versionMeta.getString("git.repository.name"));
+    }
+  }
+
+  @Test
+  void aVersionWithoutMetadataKeepsItsExactWireShape() {
+    String salt = salt();
+    String site = "@userflows/bare-" + salt;
+    try (DocsClient client = client()) {
+      HttpResponse<String> published =
+          client.publish(site, "1.0.0", TinyBundle.storybookLike(salt).toTarGz());
+      assertEquals(201, published.statusCode(), published.body());
+      // No member at all, not an empty object: older readers never see a key they don't know.
+      assertTrue(new JsonObject(published.body()).getJsonObject("metadata") == null);
+      assertTrue(
+          new JsonObject(client.version(site, "1.0.0").body()).getJsonObject("metadata") == null);
+    }
+  }
+
+  @Test
+  void serverOwnedKeysAreDroppedSilentlyAndTheCapsRefuseLoudly() {
+    String salt = salt();
+    String site = "@userflows/caps-" + salt;
+    try (DocsClient client = client()) {
+      HttpResponse<String> published =
+          client.publish(
+              site,
+              "1.0.0",
+              TinyBundle.storybookLike(salt).toTarGz(),
+              java.util.Map.of("mediatype", "text/evil", "created-at", "1970-01-01T00:00:00Z"));
+      assertEquals(201, published.statusCode(), published.body());
+      assertTrue(new JsonObject(published.body()).getJsonObject("metadata") == null);
+
+      java.util.Map<String, String> tooMany = new java.util.LinkedHashMap<>();
+      for (int i = 0; i <= 32; i++) {
+        tooMany.put("key-" + i, "v");
+      }
+      assertEquals(
+          400,
+          client.publish(site, "1.0.1", TinyBundle.storybookLike(salt + "b").toTarGz(), tooMany)
+              .statusCode());
+      assertEquals(
+          400,
+          client
+              .publish(
+                  site,
+                  "1.0.2",
+                  TinyBundle.storybookLike(salt + "c").toTarGz(),
+                  java.util.Map.of("k", "v".repeat(4001)))
+              .statusCode());
+    }
+  }
+
+  @Test
+  void theVersionsListFiltersByMetadataAndAnEmptyMatchIsAnAnswer() {
+    String salt = salt();
+    String site = "@userflows/branches-" + salt;
+    try (DocsClient client = client()) {
+      client.publish(
+          site,
+          "a".repeat(40),
+          TinyBundle.storybookLike(salt + "1").toTarGz(),
+          java.util.Map.of("git.branch.name", "main"));
+      client.publish(
+          site,
+          "b".repeat(40),
+          TinyBundle.storybookLike(salt + "2").toTarGz(),
+          java.util.Map.of("git.branch.name", "feature/x"));
+      client.publish(
+          site,
+          "c".repeat(40),
+          TinyBundle.storybookLike(salt + "3").toTarGz(),
+          java.util.Map.of("git.branch.name", "main"));
+
+      // Filtered to one branch, newest first — the first element IS that branch's latest.
+      JsonArray main =
+          new JsonObject(client.versions(site, "meta.git.branch.name=main").body())
+              .getJsonArray("versions");
+      assertEquals(2, main.size());
+      assertEquals("c".repeat(40), main.getJsonObject(0).getString("version"));
+      assertEquals("a".repeat(40), main.getJsonObject(1).getString("version"));
+
+      // A known site filtered to nothing is an ANSWER, not an error.
+      HttpResponse<String> none = client.versions(site, "meta.git.branch.name=gone");
+      assertEquals(200, none.statusCode(), none.body());
+      assertEquals(0, new JsonObject(none.body()).getJsonArray("versions").size());
+
+      // An unknown site stays a 404, filter or no filter.
+      assertEquals(
+          404, client.versions("@userflows/no-such-" + salt, "meta.git.branch.name=main")
+              .statusCode());
+    }
+  }
+
+  @Test
+  void aRepublishWithDifferentMetadataIsRefusedAndTheStoredMetadataStands() {
+    String salt = salt();
+    String site = "@userflows/immutable-" + salt;
+    try (DocsClient client = client()) {
+      client.publish(
+          site,
+          "1.0.0",
+          TinyBundle.storybookLike(salt).toTarGz(),
+          java.util.Map.of("git.branch.name", "main"));
+      HttpResponse<String> republished =
+          client.publish(
+              site,
+              "1.0.0",
+              TinyBundle.storybookLike(salt).toTarGz(),
+              java.util.Map.of("git.branch.name", "rewritten"));
+      assertEquals(409, republished.statusCode());
+      assertEquals(
+          "main",
+          new JsonObject(client.version(site, "1.0.0").body())
+              .getJsonObject("metadata")
+              .getString("git.branch.name"));
+    }
+  }
+
   private DocsClient client() {
     return new DocsClient(URI.create(root.toString()));
   }

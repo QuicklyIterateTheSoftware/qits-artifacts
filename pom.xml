@@ -67,7 +67,7 @@
              The blob store's only backend is PostgreSQL now, and every consumer moved with it in the
              same campaign. That campaign has released, so both are pinned at their calver. The two
              move together: qits-registries is built against this blobstore. -->
-        <qits.blobstore.version>2026.818.45340</qits.blobstore.version>
+        <qits.blobstore.version>2026.827.71232</qits.blobstore.version>
         <qits.registries.version>2026.818.45443</qits.registries.version>
         <!-- The platform's datasource resilience baseline: qits-db-core carries PatientPgDriver,
              which the datasource block in the artifacts jar's microprofile-config.properties names,

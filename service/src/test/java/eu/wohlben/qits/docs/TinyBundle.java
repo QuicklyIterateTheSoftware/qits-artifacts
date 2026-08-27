@@ -19,7 +19,7 @@ import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
  * <dir> .} puts on every entry — the spelling a pipeline reaches for and the one the publish path
  * has to normalise away.
  */
-final class TinyBundle {
+public final class TinyBundle {
 
   private final Map<String, byte[]> files = new LinkedHashMap<>();
   private boolean dotSlash;
@@ -48,7 +48,7 @@ final class TinyBundle {
   }
 
   /** A Storybook-shaped bundle: an index, a chunk, and a font under a nested directory. */
-  static TinyBundle storybookLike(String salt) {
+  public static TinyBundle storybookLike(String salt) {
     return new TinyBundle()
         .file("index.html", "<!doctype html><title>" + salt + "</title>")
         .file("assets/iframe-" + salt + ".js", "export const story = '" + salt + "';")
@@ -67,7 +67,7 @@ final class TinyBundle {
     return font;
   }
 
-  byte[] toTarGz() {
+  public byte[] toTarGz() {
     ByteArrayOutputStream out = new ByteArrayOutputStream();
     try (GZIPOutputStream gzip = new GZIPOutputStream(out);
         TarArchiveOutputStream tar = new TarArchiveOutputStream(gzip)) {

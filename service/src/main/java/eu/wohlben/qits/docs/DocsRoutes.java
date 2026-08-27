@@ -1,5 +1,6 @@
 package eu.wohlben.qits.docs;
 
+import eu.wohlben.qits.artifacts.control.ArtifactMetadataHeaders;
 import eu.wohlben.qits.artifacts.control.ArtifactsRepositorySeeder;
 import eu.wohlben.qits.artifacts.control.BlobStore;
 import eu.wohlben.qits.artifacts.control.DocsRegistryService;
@@ -23,7 +24,9 @@ import jakarta.inject.Inject;
 import java.io.IOException;
 import java.io.InputStream;
 import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /**
@@ -198,7 +201,13 @@ public class DocsRoutes {
             .find(repository, name, version)
             .orElseThrow(
                 () -> new DocsException(404, "no such docs version: " + name + "@" + version));
-    respond(rc, 200, describe(site));
+    // The single-version document also lists its paths — what tells a reader the bundle's shape
+    // (an index.html site vs a directory of markdown) and names the files it can fetch, without
+    // probing. Only HERE, never in the versions list: N versions × hundreds of paths is a payload
+    // the catalog page never reads.
+    JsonArray files = new JsonArray();
+    registry.listFiles(repository, name, version).forEach(files::add);
+    respond(rc, 200, describe(site).put("files", files));
   }
 
   /**
@@ -238,10 +247,23 @@ public class DocsRoutes {
     String name = rc.pathParam("name");
     registry.requireDocsRepository(repository);
 
-    List<DocsRegistryService.StoredSite> found = registry.listVersions(repository, name);
-    if (found.isEmpty()) {
+    // ?meta.<key>=<value> exact-match predicates, the blob query API's convention on this plane.
+    Map<String, String> predicates = new LinkedHashMap<>();
+    for (Map.Entry<String, String> param : rc.request().params()) {
+      if (param.getKey().startsWith("meta.")) {
+        predicates.put(param.getKey().substring("meta.".length()), param.getValue());
+      }
+    }
+
+    List<DocsRegistryService.StoredSite> all = registry.listVersions(repository, name);
+    if (all.isEmpty()) {
+      // Unknown site stays a 404 with or without a filter — "no such site" is an error…
       throw new DocsException(404, "no such docs site: " + name);
     }
+    List<DocsRegistryService.StoredSite> found =
+        predicates.isEmpty() ? all : registry.listVersions(repository, name, predicates);
+    // …while a known site filtered to nothing is an ANSWER (200, empty list): "no bundle for this
+    // branch" is a fact a branch-latest probe has to be able to render.
     JsonArray versions = new JsonArray();
     found.forEach(site -> versions.add(describe(site)));
     respond(rc, 200, new JsonObject().put("name", name).put("versions", versions));
@@ -276,6 +298,16 @@ public class DocsRoutes {
     String version = rc.pathParam("version");
     registry.requireDocsRepository(repository);
 
+    // Read metadata off the headers before touching the body — a cap violation is a clean 400
+    // before a byte is staged. MultiMap iterates as name/value entries, which is the helper's
+    // wire-agnostic shape.
+    Map<String, String> metadata;
+    try {
+      metadata = ArtifactMetadataHeaders.from(rc.request().headers());
+    } catch (IllegalArgumentException capped) {
+      throw new DocsException(400, capped.getMessage());
+    }
+
     try (ScratchBlob archive = blobStore.stageScratch()) {
       long received = 0;
       try (InputStream body = OciRequestBody.open(rc, UPLOAD_IDLE_TIMEOUT.toMillis())) {
@@ -296,7 +328,7 @@ public class DocsRoutes {
       List<BundleFile> bundle =
           DocsBundle.stageAll(archive.openRead(), blobStore, maxBundleSize.asLongValue());
       DocsRegistryService.StoredSite published =
-          registry.publish(repository, name, version, bundle);
+          registry.publish(repository, name, version, bundle, metadata);
 
       // A JsonObject, not a DTO. A type serialised only inside a Vert.x handler is invisible to the
       // native-image build, so this stack adds zero reflection configuration — the rule registry,
@@ -306,12 +338,21 @@ public class DocsRoutes {
   }
 
   private static JsonObject describe(DocsRegistryService.StoredSite site) {
-    return new JsonObject()
-        .put("name", site.name())
-        .put("version", site.version())
-        .put("fileCount", site.fileCount())
-        .put("totalBytes", site.totalBytes())
-        .put("publishedAt", site.publishedAt().toString());
+    JsonObject described =
+        new JsonObject()
+            .put("name", site.name())
+            .put("version", site.version())
+            .put("fileCount", site.fileCount())
+            .put("totalBytes", site.totalBytes())
+            .put("publishedAt", site.publishedAt().toString());
+    // Only when present, so a version published before metadata existed keeps its exact wire
+    // shape. A JsonObject over the map, never a DTO — the native-image rule of this whole stack.
+    if (!site.metadata().isEmpty()) {
+      JsonObject metadata = new JsonObject();
+      site.metadata().forEach(metadata::put);
+      described.put("metadata", metadata);
+    }
+    return described;
   }
 
   private void respond(RoutingContext rc, int status, JsonObject body) {

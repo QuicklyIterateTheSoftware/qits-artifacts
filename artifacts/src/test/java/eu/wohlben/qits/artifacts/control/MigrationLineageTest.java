@@ -298,6 +298,29 @@ class MigrationLineageTest {
   }
 
   @Test
+  void docsVersionMetadataCascadesWithItsVersionBecauseV2SaysSo() throws SQLException {
+    // V2's one table, and its one property: metadata is a fact ABOUT a version, keyed by the same
+    // three columns, and fk_docs_site_metadata_site's cascade means a collected version cannot
+    // leave orphaned metadata describing a bundle that no longer lists itself.
+    insertRepository("docs", "DOCS");
+    execute(
+        "insert into docs_site (repository, name, version, file_count, total_bytes, published_at)"
+            + " values ('docs', '@userflows/qits-githost', '" + "c".repeat(40)
+            + "', 1, 100, current_timestamp)");
+    execute(
+        "insert into docs_site_metadata (repository, name, version, meta_key, meta_value)"
+            + " values ('docs', '@userflows/qits-githost', '" + "c".repeat(40)
+            + "', 'git.branch.name', 'main')");
+    assertEquals(1, count("select count(*) from docs_site_metadata"));
+
+    execute("delete from docs_site");
+    assertEquals(
+        0,
+        count("select count(*) from docs_site_metadata"),
+        "fk_docs_site_metadata_site must cascade with the version");
+  }
+
+  @Test
   void theProtocolTablesCarryANullableAccessedAtWithNoBackfill() throws SQLException {
     // The inserts name no accessed_at, so a NOT NULL column or a default would fail here — and null
     // is the state a sweep has to be able to read as "never accessed", which stamping

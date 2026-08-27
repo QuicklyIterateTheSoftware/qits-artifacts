@@ -1,12 +1,20 @@
 package eu.wohlben.qits.artifacts.entity;
 
 import io.quarkus.hibernate.orm.panache.PanacheEntityBase;
+import jakarta.persistence.CollectionTable;
 import jakarta.persistence.Column;
+import jakarta.persistence.ElementCollection;
 import jakarta.persistence.Entity;
+import jakarta.persistence.FetchType;
 import jakarta.persistence.Id;
 import jakarta.persistence.IdClass;
+import jakarta.persistence.JoinColumn;
+import jakarta.persistence.MapKeyColumn;
 import jakarta.persistence.Table;
 import java.time.Instant;
+import java.util.HashMap;
+import java.util.Map;
+import org.hibernate.annotations.BatchSize;
 
 /**
  * One published version of one documentation site — {@code (repository, name, version)} <em>is</em>
@@ -71,4 +79,27 @@ public class DocsSite extends PanacheEntityBase {
    */
   @Column(name = "accessed_at")
   public Instant accessedAt;
+
+  /**
+   * The flat string metadata map a publisher rode on {@code X-Artifacts-Meta-*} headers —
+   * {@code git.branch.name}, {@code git.commit.hash} and whatever else the publisher chose, stored
+   * opaquely (the blob plane's stance: blobs address the world by string metadata).
+   *
+   * <p><b>LAZY is load-bearing.</b> The catalog reads every row of the repository
+   * ({@code listAllByRepository}) and touches only name/version/publishedAt — an eager collection
+   * there would be one query per site version. The endpoints that do read metadata (one version,
+   * one site's versions) initialize it inside their request context, batched.
+   */
+  @ElementCollection(fetch = FetchType.LAZY)
+  @CollectionTable(
+      name = "docs_site_metadata",
+      joinColumns = {
+        @JoinColumn(name = "repository", referencedColumnName = "repository"),
+        @JoinColumn(name = "name", referencedColumnName = "name"),
+        @JoinColumn(name = "version", referencedColumnName = "version")
+      })
+  @MapKeyColumn(name = "meta_key")
+  @Column(name = "meta_value", length = 4000)
+  @BatchSize(size = 50)
+  public Map<String, String> metadata = new HashMap<>();
 }

@@ -37,6 +37,23 @@ public class DocsFileRepository implements PanacheRepositoryBase<DocsFile, DocsF
   }
 
   /**
+   * One published version's paths, sorted — what the version document lists so a reader can tell a
+   * bundle's shape (an {@code index.html} site, a directory of markdown) without probing for files
+   * it has to guess the names of.
+   */
+  public List<String> listPaths(String repository, String name, String version) {
+    return getEntityManager()
+        .createQuery(
+            "select f.path from DocsFile f where f.repository = :repository"
+                + " and f.name = :name and f.version = :version order by f.path",
+            String.class)
+        .setParameter("repository", repository)
+        .setParameter("name", name)
+        .setParameter("version", version)
+        .getResultList();
+  }
+
+  /**
    * The distinct blobs a repository references, with their sizes — the docs half of a size union.
    *
    * <p>{@code distinct} is doing real work here, unlike in the daemon and maven queries it mirrors:
