@@ -545,10 +545,13 @@ purpose, because tokenless-on-qits-net is their contract.
   fast-jar: the `service` module opts back into ITs (`skipITs=false` in its pom), because
   `TokenValidationBootstrapIT` and `ExplorerBrowseIT` are **userflows** and `target/userstories/`
   is a build product a plain verify regenerates. `.config/qits/ci-event-userflows.yml` runs the
-  same verify per commit in two steps — the SPA bundle first (node-base, on qits-net where the
-  @qits scope resolves), then the whole IT suite on `userflows-base` (Maven + baked Chromium,
-  `user: pwuser` for zonky's initdb) with the Dockerfile's neutered-Quinoa recipe so the jar under
-  test carries the real client — and publishes the reports as the `@userflows/qits-artifacts`
+  same verify per commit in ONE step on `userflows-base` (Maven + baked Chromium, `user: pwuser`
+  for zonky's initdb, the step-image contract since qits-oci 2026.828.162434) — one step because
+  step containers share no workspace (each clones for itself), so the SPA bundle must be built in
+  the same container that packages it: the lockfile origin swap runs in the script and Quinoa's
+  managed node (the pinned 22.22.0) does the real `npm ci` + build with `npm_config_*` registries
+  from the environment. It opens with a 120s settle-hold because this repo's own build run deploys
+  the registry the whole step dials. It publishes the reports as the `@userflows/qits-artifacts`
   docs site, version = the commit sha; non-gating for the image by design. This repository carries
   **no `ci-post-receive.yml`** any more: every pipeline is a domain-event trigger, the push build in
   `ci-event-build.yml` (the old file's step, byte-identical, under `SCMPublishCommit` + `checkout:`)

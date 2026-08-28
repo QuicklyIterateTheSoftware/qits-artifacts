@@ -3,29 +3,39 @@
 # ExplorerBrowseIT (the browser story over the embedded SPA) — and the reports published as one
 # docs bundle, site @userflows/qits-artifacts, version = the bare commit sha, branch riding as
 # artifacts metadata for discovery. qits-githost's file of the same name is the pattern; this one
-# departs from it in ONE way, and the web UI is the whole reason.
+# departs from it in two ways, and the web UI is the reason for both.
 #
-# TWO STEPS, BECAUSE THE UI IS EMBEDDED. The browser story drives the SPA the packaged jar itself
-# serves (Quinoa), so the jar under test must carry the real client — a quinoa-off jar would fail
-# PackagedProcessIT's SPA cases and give the browser story nothing to open. Half one therefore
-# builds the bundle exactly as ci-event-build.yml's half one does, HERE on qits-net where the @qits
-# scope resolves; half two runs the verify on userflows-base — Maven plus the browser toolchain,
-# Chromium baked at PLAYWRIGHT_BROWSERS_PATH — with the Dockerfile's neutered-Quinoa recipe, so
-# augmentation MOVES the prebuilt bundle into the jar and runs no install of its own (the node it
-# downloads runs `--version` three times and builds nothing). The full failsafe suite runs: the
-# packaged jar is exactly what ships, so nothing needs scoping out any more.
+# ONE STEP, BECAUSE STEPS SHARE NOTHING. Every step container clones the repository for itself
+# (the ci-daemon's Workspace clones into the container's own /workspace), so a bundle built in one
+# step does not exist in the next — the two-step split this file shipped with was structurally
+# wrong and never survived its first run. The whole journey therefore happens in one container:
+# the browser story drives the SPA the packaged jar itself serves (Quinoa), so the jar under test
+# must carry the real client, and the client must be built HERE, on qits-net, where the @qits
+# scope resolves.
+#
+# ON userflows-base, BECAUSE THE STEP NEEDS EVERYTHING AT ONCE: Maven + JDK, Chromium at
+# PLAYWRIGHT_BROWSERS_PATH for the browser story, and the step-image contract (passwd user,
+# /workspace 1777 — since qits-oci 2026.828.162434, this image carries it). Node is deliberately
+# NOT assumed: Quinoa's managed install fetches its own node (the pinned 22.22.0, the same version
+# docker/Dockerfile pins) and runs the REAL npm ci + build with it — the registry redirection
+# rides in as npm_config_* environment, which outranks the submodule's committed .npmrc.
+#
+# `user: pwuser`, and NOT a switch inside the script: the suite starts zonky's embedded postgres,
+# initdb refuses to run as root and calls getpwuid, so the step needs a passwd-backed non-root
+# user — pwuser is the one the Playwright image bakes (and userflows-base now guarantees).
 #
 # NON-GATING BY DESIGN, which is why it is a separate file from ci-event-build.yml: this run going
 # red must not cost the branch its image while "quality gate before merging" is still a decision to
 # be taken — when it is, these per-commit runs are what the gate reads. One run per push per
 # branch, collapsed to the newest tip under burst.
 #
-# `user: pwuser` on half two, and NOT a switch inside the script: the suite starts zonky's embedded
-# postgres, initdb refuses to run as root and calls getpwuid, so the step needs a passwd-backed
-# non-root user. userflows-base is the Playwright image plus Maven, and pwuser is the non-root
-# user Playwright images bake (uid 1001 — the same uid maven-base's `build` carries, which is what
-# lets it write the checkout). Half one runs as the image's root and ends with a chmod for exactly
-# that seam: Quinoa MOVES the bundle during augmentation, so uid 1001 must be able to.
+# LET OUR OWN DEPLOY SETTLE, FIRST THING. This repo IS the registry everything below dials: the
+# runner serializes this run behind ci-event-build.yml's, whose BuildSuccessful makes qits-cd swap
+# the very container that serves the maven jars, the npm tarballs and the docs PUT — measured
+# 2026-08-28, twice: the follow-on container's first fetch died ~20s after the build went green,
+# mid-swap. The hold sits at the top of the script (the daemon bootstrap that starts this
+# container wins the race by starting immediately; everything after must wait the swap out). No
+# sibling needs this: no sibling's deploy blinks the store its own pipeline reads.
 #
 # The docs publish below lands in the DEPLOYED qits-artifacts — this repo's own service, the same
 # already-running-while-we-build fact ci-event-build.yml leans on: the run tests the pushed
@@ -43,70 +53,45 @@ checkout:
   branch: branch
   sha: sha
 steps:
-  # --- half one: the client bundle, so the jar under test carries the SPA that ships -------------
-  - image: qits/build-images/node-base:latest
-    timeout-seconds: 900
-    script: |
-      set -eu
-      # The same three moves as ci-event-build.yml's half one — the submodule fetch under the OLD
-      # .gitmodules entry name, the lockfile origin swap (broad proxy sed FIRST, narrow @qits sed
-      # SECOND), and the npm_config_* environment that outranks the committed .npmrc. That file
-      # carries the long form of every rule; this copy exists so the userflow run's jar is shaped
-      # like what ships, and the two should keep matching.
-      frontend_url="${QITS_CI_REPOSITORY_URL%/*}/qits-spa-artifacts"
-      git -c submodule.qits-platform-spa-artifacts.url="$frontend_url" submodule update --init service/src/main/webui
-
-      cd service/src/main/webui
-      npm_hosted_origin=$(node -p 'new URL(process.env.QITS_NPM_REGISTRY_URL).origin')
-      npm_proxy_origin=$(node -p 'new URL(process.env.QITS_NPM_PROXY_URL).origin')
-      npm_hosted_path=$(node -p 'new URL(process.env.QITS_NPM_REGISTRY_URL).pathname')
-      sed -i -E \
-        -e "s#(\"resolved\": \")https?://[^/\"]+#\1$npm_proxy_origin#" \
-        -e "s#(\"resolved\": \")https?://[^/\"]+($npm_hosted_path)#\1$npm_hosted_origin\2#" \
-        package-lock.json
-      env npm_config_registry="$QITS_NPM_PROXY_URL" \
-          "npm_config_@qits:registry=$QITS_NPM_REGISTRY_URL" \
-          npm ci --no-audit --no-fund
-      npm run build
-      cd -
-
-      # Half two runs as pwuser (uid 1001) and Quinoa MOVES dist/ during augmentation — everything
-      # this root step wrote must be writable by then, or the build dies on the rename.
-      chmod -R a+rwX service/src/main/webui
-
-      # LET OUR OWN DEPLOY SETTLE. This repo IS the registry every step container bootstraps from:
-      # the runner serializes this run behind ci-event-build.yml's, whose BuildSuccessful makes
-      # qits-cd swap the very container that serves the CI daemon binary — and half two's
-      # bootstrap wget lands ~20s after that swap begins, mid-blink, with no retry (measured
-      # 2026-08-28: build green 15:51:20, daemon fetch dead 15:51:39, twice in a row at the same
-      # offset). No sibling has this problem, because no sibling's deploy blinks the store the
-      # daemon comes from. The hold belongs HERE, at the end of the half that doesn't need the
-      # registry, so half two's container is born after the swap is over.
-      sleep 120
-
-  # --- half two: the verify, browser stories included --------------------------------------------
   - image: qits/build-images/userflows-base:latest
     user: pwuser
     timeout-seconds: 2400
     script: |
       set -eu
-      # The platform registry, exactly as qits-eventstream's step derives it: the pom's default
-      # names a host-published address unreachable from a step container, and the exact-id mirror
-      # in .qits-maven-settings.xml is what passes Maven's HTTP blocker.
+      # The settle-hold from the header: our own build's deploy is swapping the registry container
+      # about now, and everything below — the submodule fetch, npm, maven, the docs PUT — dials it.
+      sleep 120
+
+      # The submodule fetch under the OLD .gitmodules entry name, and the lockfile origin swap
+      # (broad proxy sed FIRST, narrow @qits sed SECOND) — ci-event-build.yml's half one carries
+      # the long form of every rule here, and the two should keep matching. Origins are derived
+      # with sed rather than node -p: this image deliberately carries no node of its own.
+      frontend_url="${QITS_CI_REPOSITORY_URL%/*}/qits-spa-artifacts"
+      git -c submodule.qits-platform-spa-artifacts.url="$frontend_url" submodule update --init service/src/main/webui
+      npm_hosted_origin=$(echo "$QITS_NPM_REGISTRY_URL" | sed -E 's#^(https?://[^/]+).*#\1#')
+      npm_proxy_origin=$(echo "$QITS_NPM_PROXY_URL" | sed -E 's#^(https?://[^/]+).*#\1#')
+      npm_hosted_path=$(echo "$QITS_NPM_REGISTRY_URL" | sed -E 's#^https?://[^/]+##')
+      sed -i -E \
+        -e "s#(\"resolved\": \")https?://[^/\"]+#\1$npm_proxy_origin#" \
+        -e "s#(\"resolved\": \")https?://[^/\"]+($npm_hosted_path)#\1$npm_hosted_origin\2#" \
+        service/src/main/webui/package-lock.json
+
+      # The registry redirection for the npm Quinoa is about to run: npm_config_* environment
+      # outranks the submodule's committed .npmrc, and Quinoa's child processes inherit it.
+      export npm_config_registry="$QITS_NPM_PROXY_URL"
       export QITS_MAVEN_REPOSITORY_URL="$QITS_MAVEN_REGISTRY_URL"
 
-      # The neutered-Quinoa recipe from docker/Dockerfile, for the same reason it exists there: the
-      # bundle is already built (half one, where the @qits scope resolves), so the package-manager
-      # commands are nulled to `--version` and augmentation only moves dist/ into the jar. The
-      # managed-node install stays ON because this image need not carry npm at all — the node it
-      # fetches proves the package manager runs and builds nothing.
-      ./mvnw -B -ntp -s .qits-maven-settings.xml verify \
+      # The platform maven registry exactly as qits-eventstream's step derives it, plus Quinoa's
+      # MANAGED node: this image carries none, so the extension downloads its pinned 22.22.0 and
+      # runs the real install + build with it. quinoa.ci=true pins `npm ci` regardless of the
+      # container's CI envs. The scoped-registry variable needs the env wrapper — `@` and `:` are
+      # not assignable in a shell prefix.
+      env "npm_config_@qits:registry=$QITS_NPM_REGISTRY_URL" \
+        ./mvnw -B -ntp -s .qits-maven-settings.xml verify \
         -Dqits.maven.repository.url="$QITS_MAVEN_REPOSITORY_URL" \
         -Dquarkus.quinoa.package-manager-install=true \
         -Dquarkus.quinoa.package-manager-install.node-version=22.22.0 \
-        -Dquarkus.quinoa.package-manager-command.install=--version \
-        -Dquarkus.quinoa.package-manager-command.ci=--version \
-        -Dquarkus.quinoa.package-manager-command.build=--version
+        -Dquarkus.quinoa.ci=true
 
       # `-C … .` so the story directories are the bundle's roots — nesting one directory deep would
       # put it in every served URL.
