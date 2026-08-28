@@ -310,7 +310,7 @@ nothing but a JDK. Build it once, then point the IT at it:
 git clone https://github.com/opencontainers/distribution-spec.git
 cd distribution-spec/conformance && go build -o conformance .    # needs Go >= 1.24
 
-./mvnw verify -DskipITs=false \
+./mvnw verify \
     -Doci.conformance-binary=/abs/path/to/distribution-spec/conformance/conformance
 ```
 

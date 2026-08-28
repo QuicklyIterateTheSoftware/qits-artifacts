@@ -531,8 +531,30 @@ There is no auth variant to select in this service. The shared `qits-auth-core` 
 `@RolesAllowed("qits:admin")`. Machine-facing boundaries require an authenticated identity and
 retain their narrower `MachineAuth` audience/scope checks.
 
+**The `@RolesAllowed` answers differ by suite, and the packaged ITs must play the gateway.** Under
+`@QuarkusTest` the `%test`-scoped synthetic dev-user answers every role check, which is why the
+in-JVM suites need no headers. The **packaged** process runs `LaunchMode.NORMAL`, where
+`ForwardAuthMechanism` deliberately stays anonymous — so every `/artifacts/api` read 401s unless
+the request carries the `X-Qits-User`/`X-Qits-Roles` pair the gateway would assert.
+`PackagedProcessIT.asOperator()` is that pair for RestAssured, and `ExplorerBrowseIT` sets the same
+headers on the Playwright browser context before navigating; the wire cases stay header-free on
+purpose, because tokenless-on-qits-net is their contract.
+
 - `mvn verify` runs 225 tests (38 in `artifacts/`, 98 in `gc/`, 89 in `service/`) in about a
-  minute — counted from the surefire reports.
+  minute — counted from the surefire reports — and then the failsafe ITs against the packaged
+  fast-jar: the `service` module opts back into ITs (`skipITs=false` in its pom), because
+  `TokenValidationBootstrapIT` and `ExplorerBrowseIT` are **userflows** and `target/userstories/`
+  is a build product a plain verify regenerates. `.config/qits/ci-event-userflows.yml` runs the
+  same verify per commit in two steps — the SPA bundle first (node-base, on qits-net where the
+  @qits scope resolves), then the whole IT suite on `userflows-base` (Maven + baked Chromium,
+  `user: pwuser` for zonky's initdb) with the Dockerfile's neutered-Quinoa recipe so the jar under
+  test carries the real client — and publishes the reports as the `@userflows/qits-artifacts`
+  docs site, version = the commit sha; non-gating for the image by design. This repository carries
+  **no `ci-post-receive.yml`** any more: every pipeline is a domain-event trigger, the push build in
+  `ci-event-build.yml` (the old file's step, byte-identical, under `SCMPublishCommit` + `checkout:`)
+  and the maintenance bump train's release call in `ci-event-maintenance-release.yml` — its own
+  file because an event pipeline's steps may not carry `branches:`; the branch condition is a
+  `when:` prefix matcher there.
 - **Every module's suite runs on a REAL PostgreSQL**, spawned as a child process from zonky binaries
   that resolve as ordinary Maven artifacts. Not a container: the clone-alone rule forbids one, and
   the store's only engine is postgres now — `bytea`, an advisory lock, a partial index and an
@@ -591,8 +613,12 @@ retain their narrower `MachineAuth` audience/scope checks.
   with nothing in the failure to say why. It is the one thing to check first if a count is off by
   one. `backdate` moves the blob's `stored_at` column, which is the same clock a production sweep
   reads.
-- `mvn verify -Dnative` runs those, then `PackagedProcessIT` against the compiled binary.
-  It is the only suite that starts a **process** rather than an in-JVM Quarkus, so it is where the
+- `mvn verify -Dnative` runs those against the compiled binary instead of the fast-jar.
+  `PackagedProcessIT` was the first suite to start a **process** rather than an in-JVM Quarkus; its
+  siblings do too — `TokenValidationBootstrapIT` with the rollout gate on against a recording mock
+  idp (the token userflows), and `ExplorerBrowseIT` sharing `TargetDirState` so one boot serves it
+  and `PackagedProcessIT` both, driving headless Chromium over the embedded SPA (the browser
+  userflow; the UI ships inside the jar, so the browser runs through the service). It is where the
   route stacks are proved to coexist and where the binary is proved to boot at all.
   It is also the **only** place the web UI can be tested at all: Quinoa logs "Quinoa is disabled by
   default in tests" and registers neither the static resources nor the SPA re-route, so a

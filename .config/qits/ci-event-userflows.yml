@@ -1,0 +1,117 @@
+# The per-commit userflow run: `mvn verify` at the pushed commit — which regenerates
+# service/target/userstories/ through TokenValidationBootstrapIT (the token stories) and
+# ExplorerBrowseIT (the browser story over the embedded SPA) — and the reports published as one
+# docs bundle, site @userflows/qits-artifacts, version = the bare commit sha, branch riding as
+# artifacts metadata for discovery. qits-githost's file of the same name is the pattern; this one
+# departs from it in ONE way, and the web UI is the whole reason.
+#
+# TWO STEPS, BECAUSE THE UI IS EMBEDDED. The browser story drives the SPA the packaged jar itself
+# serves (Quinoa), so the jar under test must carry the real client — a quinoa-off jar would fail
+# PackagedProcessIT's SPA cases and give the browser story nothing to open. Half one therefore
+# builds the bundle exactly as ci-event-build.yml's half one does, HERE on qits-net where the @qits
+# scope resolves; half two runs the verify on userflows-base — Maven plus the browser toolchain,
+# Chromium baked at PLAYWRIGHT_BROWSERS_PATH — with the Dockerfile's neutered-Quinoa recipe, so
+# augmentation MOVES the prebuilt bundle into the jar and runs no install of its own (the node it
+# downloads runs `--version` three times and builds nothing). The full failsafe suite runs: the
+# packaged jar is exactly what ships, so nothing needs scoping out any more.
+#
+# NON-GATING BY DESIGN, which is why it is a separate file from ci-event-build.yml: this run going
+# red must not cost the branch its image while "quality gate before merging" is still a decision to
+# be taken — when it is, these per-commit runs are what the gate reads. One run per push per
+# branch, collapsed to the newest tip under burst.
+#
+# `user: pwuser` on half two, and NOT a switch inside the script: the suite starts zonky's embedded
+# postgres, initdb refuses to run as root and calls getpwuid, so the step needs a passwd-backed
+# non-root user. userflows-base is the Playwright image plus Maven, and pwuser is the non-root
+# user Playwright images bake (uid 1001 — the same uid maven-base's `build` carries, which is what
+# lets it write the checkout). Half one runs as the image's root and ends with a chmod for exactly
+# that seam: Quinoa MOVES the bundle during augmentation, so uid 1001 must be able to.
+#
+# The docs publish below lands in the DEPLOYED qits-artifacts — this repo's own service, the same
+# already-running-while-we-build fact ci-event-build.yml leans on: the run tests the pushed
+# commit, the platform's docs registry is whatever is deployed, and nothing here bootstraps from
+# the artifact it produces.
+#
+# Loop review: this pipeline PUTs a docs bundle and pushes no commit — no cycle. Publish-if-absent:
+# events redeliver and docs versions are immutable, so 409 is success (the qits-spa-ui-components
+# release file's discipline).
+event: SCMPublishCommit
+when:
+  - repoId: { exact: qits-artifacts }
+    suppressCi: { exact: "false" }
+checkout:
+  branch: branch
+  sha: sha
+steps:
+  # --- half one: the client bundle, so the jar under test carries the SPA that ships -------------
+  - image: qits/build-images/node-base:latest
+    timeout-seconds: 900
+    script: |
+      set -eu
+      # The same three moves as ci-event-build.yml's half one — the submodule fetch under the OLD
+      # .gitmodules entry name, the lockfile origin swap (broad proxy sed FIRST, narrow @qits sed
+      # SECOND), and the npm_config_* environment that outranks the committed .npmrc. That file
+      # carries the long form of every rule; this copy exists so the userflow run's jar is shaped
+      # like what ships, and the two should keep matching.
+      frontend_url="${QITS_CI_REPOSITORY_URL%/*}/qits-spa-artifacts"
+      git -c submodule.qits-platform-spa-artifacts.url="$frontend_url" submodule update --init service/src/main/webui
+
+      cd service/src/main/webui
+      npm_hosted_origin=$(node -p 'new URL(process.env.QITS_NPM_REGISTRY_URL).origin')
+      npm_proxy_origin=$(node -p 'new URL(process.env.QITS_NPM_PROXY_URL).origin')
+      npm_hosted_path=$(node -p 'new URL(process.env.QITS_NPM_REGISTRY_URL).pathname')
+      sed -i -E \
+        -e "s#(\"resolved\": \")https?://[^/\"]+#\1$npm_proxy_origin#" \
+        -e "s#(\"resolved\": \")https?://[^/\"]+($npm_hosted_path)#\1$npm_hosted_origin\2#" \
+        package-lock.json
+      env npm_config_registry="$QITS_NPM_PROXY_URL" \
+          "npm_config_@qits:registry=$QITS_NPM_REGISTRY_URL" \
+          npm ci --no-audit --no-fund
+      npm run build
+      cd -
+
+      # Half two runs as pwuser (uid 1001) and Quinoa MOVES dist/ during augmentation — everything
+      # this root step wrote must be writable by then, or the build dies on the rename.
+      chmod -R a+rwX service/src/main/webui
+
+  # --- half two: the verify, browser stories included --------------------------------------------
+  - image: qits/build-images/userflows-base:latest
+    user: pwuser
+    timeout-seconds: 2400
+    script: |
+      set -eu
+      # The platform registry, exactly as qits-eventstream's step derives it: the pom's default
+      # names a host-published address unreachable from a step container, and the exact-id mirror
+      # in .qits-maven-settings.xml is what passes Maven's HTTP blocker.
+      export QITS_MAVEN_REPOSITORY_URL="$QITS_MAVEN_REGISTRY_URL"
+
+      # The neutered-Quinoa recipe from docker/Dockerfile, for the same reason it exists there: the
+      # bundle is already built (half one, where the @qits scope resolves), so the package-manager
+      # commands are nulled to `--version` and augmentation only moves dist/ into the jar. The
+      # managed-node install stays ON because this image need not carry npm at all — the node it
+      # fetches proves the package manager runs and builds nothing.
+      ./mvnw -B -ntp -s .qits-maven-settings.xml verify \
+        -Dqits.maven.repository.url="$QITS_MAVEN_REPOSITORY_URL" \
+        -Dquarkus.quinoa.package-manager-install=true \
+        -Dquarkus.quinoa.package-manager-install.node-version=22.22.0 \
+        -Dquarkus.quinoa.package-manager-command.install=--version \
+        -Dquarkus.quinoa.package-manager-command.ci=--version \
+        -Dquarkus.quinoa.package-manager-command.build=--version
+
+      # `-C … .` so the story directories are the bundle's roots — nesting one directory deep would
+      # put it in every served URL.
+      tar -czf userstories.tgz -C service/target/userstories .
+
+      # Branch and commit ride as metadata (the docs store's exact-match discovery keys); the
+      # version is the sha itself, so a bundle URL never changes meaning.
+      status=$(curl -sS -o /tmp/docs-publish.out -w '%{http_code}' \
+        -X PUT --data-binary @userstories.tgz \
+        -H "X-Artifacts-Meta-git.branch.name: $QITS_CI_BRANCH" \
+        -H "X-Artifacts-Meta-git.commit.hash: $QITS_CI_SHA" \
+        -H "X-Artifacts-Meta-git.repository.name: qits-artifacts" \
+        "$QITS_DOCS_URL/@userflows/qits-artifacts/-/$QITS_CI_SHA")
+      case "$status" in
+        201) echo "published userflows for qits-artifacts@$QITS_CI_SHA ($QITS_CI_BRANCH)" ;;
+        409) echo "userflows for qits-artifacts@$QITS_CI_SHA already published — skipping" ;;
+        *)   echo "docs publish failed: HTTP $status"; cat /tmp/docs-publish.out; exit 1 ;;
+      esac
