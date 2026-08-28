@@ -76,6 +76,14 @@
              the <repositories> block below. It also arrives transitively on qits-blobstore; it is
              named here because this repository's own config names the driver class. -->
         <qits.db-core.version>2026.817.175344</qits.db-core.version>
+        <!-- The user-story framework (test scope): TokenValidationBootstrapIT is a userflow, so a
+             `mvn verify` also regenerates service/target/userstories/ — the story's documentation,
+             sequence diagram included. Same version as qits-githost, the first consumer. -->
+        <qits.userflows.version>2026.828.153026</qits.userflows.version>
+        <!-- The recording service mocks the same IT boots against (the generic MockService plus
+             idp.MockIdp), released out of libs/qits-integrations-quarkus like qits-db-core above
+             (the same-string policy applies the day this repo consumes a newer reactor). -->
+        <qits.service-mock.version>2026.827.71232</qits.service-mock.version>
         <qits.maven.repository.url>http://registry.dev.localhost:8080/artifacts/maven/maven</qits.maven.repository.url>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -112,9 +120,11 @@
         <zonky.embedded-postgres.version>2.2.2</zonky.embedded-postgres.version>
         <zonky.postgres-binaries.version>18.4.0</zonky.postgres-binaries.version>
 
-        <!-- Integration tests run against a PACKAGED artifact, so a plain `mvn verify` — which
-             produces the fast-jar — skips them; `service`'s `native` profile flips this to false so
-             a `-Dnative` build exercises the binary it just compiled. -->
+        <!-- Integration tests run against a PACKAGED artifact. The library modules keep this
+             default; the `service` module opts back IN (skipITs=false there), so a plain
+             `mvn verify` boots the packaged fast-jar for its ITs — deliberately, because
+             TokenValidationBootstrapIT is also the generator of the userstories documentation.
+             The `native` profile keeps flipping it too, so `-Dnative` exercises the binary. -->
         <skipITs>true</skipITs>
     </properties>
 
@@ -217,6 +227,19 @@
                 <groupId>${project.groupId}</groupId>
                 <artifactId>qits-db-core</artifactId>
                 <version>${qits.db-core.version}</version>
+            </dependency>
+            <dependency>
+                <!-- Test scope at every declaration site: the story framework runs in the build
+                     and ships in nothing. -->
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-userflows</artifactId>
+                <version>${qits.userflows.version}</version>
+            </dependency>
+            <dependency>
+                <!-- Test scope at every declaration site, like qits-userflows. -->
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-service-mock</artifactId>
+                <version>${qits.service-mock.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>

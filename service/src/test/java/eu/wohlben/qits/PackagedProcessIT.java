@@ -116,6 +116,22 @@ class PackagedProcessIT {
   /** The string that identifies a response as the CLIENT's index.html rather than anything else. */
   private static final String BASE_HREF = "<base href=\"/\">";
 
+  /**
+   * The gateway's asserted identity, played by this suite for the JSON API. Every read there is
+   * {@code @RolesAllowed("qits:admin")} and the repository/blob writes {@code "qits:system"}; a
+   * {@code @QuarkusTest} passes them on the %test synthetic dev-user, but the PACKAGED process runs
+   * {@code LaunchMode.NORMAL}, where {@code ForwardAuthMechanism} deliberately stays anonymous — so
+   * this suite asserts the header pair qits-gateway would, believed by contract (the gateway strips
+   * client-supplied copies; network trust is the deployed posture). The wire cases below
+   * deliberately do NOT use this: tokenless on qits-net is their contract, and it is asserted by
+   * their requests staying header-free.
+   */
+  private static io.restassured.specification.RequestSpecification asOperator() {
+    return given()
+        .header("X-Qits-User", "packaged-it")
+        .header("X-Qits-Roles", "qits:admin,qits:system");
+  }
+
   @Test
   void theSpaIsServedAtTheRootOfThisServicesOwnHost() {
     // Quinoa builds src/main/webui (the qits-spa-artifacts submodule) during augmentation and the
@@ -174,7 +190,7 @@ class PackagedProcessIT {
 
     // Setting the key REPLACED the derivation, so the two it used to supply are re-asserted here —
     // both by a live route and by a mistyped sibling that must not answer the page.
-    given().when().get("/artifacts/api/repositories").then().statusCode(200);
+    asOperator().when().get("/artifacts/api/repositories").then().statusCode(200);
     given()
         .when()
         .get("/artifacts/api/nope")
@@ -202,7 +218,7 @@ class PackagedProcessIT {
     //
     // `npmjs` is NOT in the set and stopped being at the byte-plane split — it was a pull-through
     // cache and it went to qits-platform-mirror with the seeding line that made it.
-    given()
+    asOperator()
         .when()
         .get("/artifacts/api/repositories")
         .then()
@@ -214,7 +230,7 @@ class PackagedProcessIT {
 
     byte[] png = png(120, 80);
     String id =
-        given()
+        asOperator()
             .contentType("image/png")
             .headers(screenshotHeaders("main", "packaged-it"))
             .body(png)
@@ -226,7 +242,7 @@ class PackagedProcessIT {
             .path("id");
 
     byte[] served =
-        given()
+        asOperator()
             .when()
             .get("/artifacts/api/repositories/ci-screenshots/blobs/" + id)
             .then()
@@ -241,7 +257,7 @@ class PackagedProcessIT {
   void anUnknownRepositoryIsRejectedByTheRepositoryLifecycle() {
     // The exception mapper is JAX-RS machinery that native-image has to have kept: an unknown
     // repository must surface as 404, not as a 500 from a missing reflective constructor.
-    given()
+    asOperator()
         .when()
         .get("/artifacts/api/repositories/no-such-repo/blobs/deadbeef")
         .then()
@@ -326,7 +342,7 @@ class PackagedProcessIT {
     //
     // The seed has already written the `npm` row in a packaged process; this states its own
     // precondition anyway rather than resting on another test's subject.
-    given()
+    asOperator()
         .contentType("application/json")
         .body("{\"type\":\"npm-packages\"}")
         .when()
@@ -373,7 +389,7 @@ class PackagedProcessIT {
     //
     // The seed has already written the `maven` row in a packaged process; this states its own
     // precondition anyway rather than resting on another test's subject.
-    given()
+    asOperator()
         .contentType("application/json")
         .body("{\"type\":\"maven-packages\"}")
         .when()
@@ -464,7 +480,7 @@ class PackagedProcessIT {
           201, npm.publish("npm", "@qits%2fbrowse-it", subject.publishDocument("latest")).statusCode());
     }
 
-    given()
+    asOperator()
         .when()
         .get("/artifacts/api/repositories")
         .then()
@@ -473,7 +489,7 @@ class PackagedProcessIT {
         .body("repositories.find { it.name == 'qits' }.itemCount", greaterThanOrEqualTo(1))
         .body("repositories.find { it.name == 'qits' }.sizeBytes", greaterThan(0));
 
-    given()
+    asOperator()
         .when()
         .get("/artifacts/api/repositories/qits/images")
         .then()
@@ -481,7 +497,7 @@ class PackagedProcessIT {
         .body("images.find { it.name == 'browse-it' }.tagCount", equalTo(1))
         .body("images.find { it.name == 'browse-it' }.sizeBytes", greaterThan(0));
 
-    given()
+    asOperator()
         .when()
         .get("/artifacts/api/repositories/qits/images/browse-it/tags")
         .then()
@@ -492,7 +508,7 @@ class PackagedProcessIT {
 
     // The percent-encoded scoped name, on the JAX-RS surface this time. The npm routes prove it for
     // a Vert.x regex route; a path template is different machinery and needs its own case.
-    given()
+    asOperator()
         .urlEncodingEnabled(false)
         .when()
         .get("/artifacts/api/repositories/npm/packages/@qits%2fbrowse-it/versions")
@@ -502,7 +518,7 @@ class PackagedProcessIT {
         .body("versions[0].tarballSizeBytes", greaterThan(0))
         .body("versions[0].distTags", hasItems("latest"));
 
-    given()
+    asOperator()
         .when()
         .get("/artifacts/api/repositories/npm/packages")
         .then()
@@ -510,7 +526,7 @@ class PackagedProcessIT {
         .body("packages.find { it.name == '@qits/browse-it' }.latest", equalTo("1.0.0"));
 
     // The seven figures, from a process that has really walked its own blob directory.
-    given()
+    asOperator()
         .when()
         .get("/artifacts/api/store/summary")
         .then()
@@ -528,8 +544,8 @@ class PackagedProcessIT {
         .body("ociMirrorBytes", equalTo(0))
         .body("mavenProxyBytes", equalTo(0));
 
-    given().when().get("/artifacts/api/repositories/no-such-repo/images").then().statusCode(404);
-    given().when().get("/artifacts/api/repositories/npm/images").then().statusCode(400);
+    asOperator().when().get("/artifacts/api/repositories/no-such-repo/images").then().statusCode(404);
+    asOperator().when().get("/artifacts/api/repositories/npm/images").then().statusCode(400);
   }
 
   @Test
@@ -547,7 +563,7 @@ class PackagedProcessIT {
     // fail-closed path only exists in the binary if the JDK HttpClient survived the compile, so this
     // is the one assertion here that a JVM test cannot make on its behalf, and every type on an
     // engine takes the same path. The two CI stubs carry their captions.
-    given()
+    asOperator()
         .when()
         .get("/artifacts/api/gc/plan")
         .then()
@@ -593,14 +609,23 @@ class PackagedProcessIT {
         .body("untouchable.blobCount", greaterThanOrEqualTo(0))
         .body("untouchable.reason", containsString("LOSES its last row"));
 
-    // Reading and executing stay two different URLs, asserted against the binary.
-    given().when().post("/artifacts/api/gc/plan").then().statusCode(405);
+    // Reading and executing stay two different URLs, asserted against the binary. POST on the plan
+    // is a READER now — the pins-in-request twin of the GET, and with no body it answers exactly
+    // what the GET answers (this line was `405` before that twin existed) — so what distinguishes
+    // it from the sweep is that it still plans rather than deletes.
+    asOperator()
+        .contentType("application/json")
+        .when()
+        .post("/artifacts/api/gc/plan")
+        .then()
+        .statusCode(200)
+        .body("dryRun", equalTo(true));
 
     // And the execute surface itself, in the binary: one more Jackson-serialised record family, and
     // the receipt of a sweep with no pin source to read. It ABORTS whole rather than degrading the
     // way the plan above does, which is the settlement's all-or-nothing rule — so every type
     // carries the abort and nothing is deleted.
-    given()
+    asOperator()
         .when()
         .post("/artifacts/api/gc/sweep")
         .then()
@@ -655,7 +680,7 @@ class PackagedProcessIT {
   }
 
   private void ensureOciRepository() {
-    given()
+    asOperator()
         .contentType("application/json")
         .body("{\"type\":\"oci-images\"}")
         .when()

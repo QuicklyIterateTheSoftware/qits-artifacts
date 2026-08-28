@@ -37,6 +37,14 @@
     <name>qits-artifacts :: service</name>
     <packaging>quarkus</packaging>
 
+    <properties>
+        <!-- Opt back IN to the parent's skipITs=true (qits-githost's pattern): this module's ITs
+             include a userflow, so every `mvn verify` boots the packaged fast-jar AND regenerates
+             target/userstories/ — the story documentation is a build product, not a CI-only
+             artifact. `-Dnative` runs the same suite against the binary, as before. -->
+        <skipITs>false</skipITs>
+    </properties>
+
     <dependencies>
         <dependency>
             <!-- /<segment>/q/health/ready - the readiness endpoint qits-cd's health gate curls;
@@ -193,6 +201,25 @@
             <artifactId>embedded-postgres-binaries-darwin-arm64v8</artifactId>
             <scope>test</scope>
         </dependency>
+        <dependency>
+            <!-- The user-story framework: TokenValidationBootstrapIT and ExplorerBrowseIT are
+                 written as @UserStory classes, so the packaged-process proofs double as
+                 documentation — steps, interactions and a sequence diagram emitted under
+                 target/userstories/. The token story is browserless; the explorer story takes a
+                 Flow, which is what launches headless Chromium (from PLAYWRIGHT_BROWSERS_PATH
+                 where an image bakes one — the workspace image and CI's userflows-base both do). -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-userflows</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- The recording service mocks. The IT points quarkus.oidc at idp.MockIdp — a
+                 MockService plus key material: it serves the JWKS for a generated keypair, mints
+                 tokens, records what it answered — the far end of the story's interactions. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-service-mock</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
@@ -225,8 +252,10 @@
             <plugin>
                 <!-- The *IT suite runs against the PACKAGED artifact, which is the only place the
                      native binary can be exercised at all: @QuarkusTest runs on the JVM and a
-                     reflection gap in the binary does not show up there. Bound but skipped by
-                     default (skipITs in the root pom); the `native` profile below flips it. -->
+                     reflection gap in the binary does not show up there. Unlike the siblings,
+                     skipITs is flipped to false in THIS module's properties, so the ITs run on
+                     every `mvn verify` against the fast-jar; the `native` profile below runs the
+                     same suite against the binary. -->
                 <artifactId>maven-failsafe-plugin</artifactId>
                 <executions>
                     <execution>
@@ -243,6 +272,13 @@
                                      to be spelled the same or a native IT launches nothing and
                                      passes. -->
                                 <native.image.path>${project.build.directory}/qits-artifacts</native.image.path>
+                                <!-- Launch the packaged app on a free port instead of the default
+                                     8081 — the @QuarkusTest port, which surefire's last Quarkus
+                                     instance can still hold when failsafe starts, and which on the
+                                     deployment host is the platform's own npm registry. Now that
+                                     the ITs run on every `mvn verify` (skipITs above), the default
+                                     would collide there on every build. -->
+                                <quarkus.http.test-port>0</quarkus.http.test-port>
                                 <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
                             </systemPropertyVariables>
                         </configuration>
