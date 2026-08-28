@@ -74,6 +74,16 @@ steps:
       # this root step wrote must be writable by then, or the build dies on the rename.
       chmod -R a+rwX service/src/main/webui
 
+      # LET OUR OWN DEPLOY SETTLE. This repo IS the registry every step container bootstraps from:
+      # the runner serializes this run behind ci-event-build.yml's, whose BuildSuccessful makes
+      # qits-cd swap the very container that serves the CI daemon binary — and half two's
+      # bootstrap wget lands ~20s after that swap begins, mid-blink, with no retry (measured
+      # 2026-08-28: build green 15:51:20, daemon fetch dead 15:51:39, twice in a row at the same
+      # offset). No sibling has this problem, because no sibling's deploy blinks the store the
+      # daemon comes from. The hold belongs HERE, at the end of the half that doesn't need the
+      # registry, so half two's container is born after the swap is over.
+      sleep 120
+
   # --- half two: the verify, browser stories included --------------------------------------------
   - image: qits/build-images/userflows-base:latest
     user: pwuser
