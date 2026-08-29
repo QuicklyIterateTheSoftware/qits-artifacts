@@ -2,7 +2,11 @@ package eu.wohlben.qits.registry;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -84,6 +88,58 @@ public record TinyImage(Blob layer, Blob config, byte[] manifest, String manifes
 
   public String manifestDigest() {
     return digest(manifest);
+  }
+
+  /**
+   * Write this image into {@code directory} as an <b>OCI image layout</b> — the on-disk form {@code
+   * skopeo copy oci:<dir>:<tag>} reads, and the one a userflow story hands a real image client
+   * without a tarball ever being committed or a registry ever being dialled.
+   *
+   * <p>Three parts, and the third is the one that is easy to leave out. {@code oci-layout} declares
+   * the layout version. {@code blobs/sha256/<hex>} holds the config, the layer <b>and the manifest
+   * itself</b> — a manifest is an ordinary blob in this layout, addressed by its own digest, which
+   * is what makes the layout self-contained. {@code index.json} then names that manifest with an
+   * {@code org.opencontainers.image.ref.name} annotation carrying {@code tag}: without the
+   * annotation the {@code oci:<dir>:<tag>} source form matches nothing and the copy fails with "no
+   * descriptor found for reference", because a tag in this layout is an annotation and not a
+   * directory name.
+   *
+   * <p>Deterministic for a given salt, like everything else here: the same {@link #of} produces the
+   * same bytes and therefore the same digests, so a pushed layout and a pulled one are comparable
+   * without either being kept.
+   */
+  public void writeOciLayout(Path directory, String tag) {
+    try {
+      Path blobs = directory.resolve("blobs").resolve("sha256");
+      Files.createDirectories(blobs);
+      Files.write(
+          directory.resolve("oci-layout"),
+          json(ordered("imageLayoutVersion", "1.0.0")));
+      writeBlob(blobs, config.digest(), config.bytes());
+      writeBlob(blobs, layer.digest(), layer.bytes());
+      writeBlob(blobs, manifestDigest(), manifest);
+      Files.write(
+          directory.resolve("index.json"),
+          json(
+              ordered(
+                  "schemaVersion", 2,
+                  "mediaType", INDEX_TYPE,
+                  "manifests",
+                  List.of(
+                      ordered(
+                          "mediaType", manifestMediaType,
+                          "digest", manifestDigest(),
+                          "size", manifest.length,
+                          "annotations",
+                              Map.of("org.opencontainers.image.ref.name", tag))))));
+    } catch (IOException e) {
+      throw new UncheckedIOException("failed to write an OCI layout into " + directory, e);
+    }
+  }
+
+  /** One blob, filed under the hex half of its {@code sha256:<hex>} digest. */
+  private static void writeBlob(Path blobs, String digest, byte[] bytes) throws IOException {
+    Files.write(blobs.resolve(digest.substring(digest.indexOf(':') + 1)), bytes);
   }
 
   private static Map<String, Object> descriptor(Blob blob) {

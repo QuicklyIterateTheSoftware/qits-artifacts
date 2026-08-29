@@ -3,6 +3,8 @@ package eu.wohlben.qits.artifacts.control;
 import eu.wohlben.qits.artifacts.persistence.ArtifactRecordRepository;
 import eu.wohlben.qits.artifacts.persistence.ArtifactRepositoryRepository;
 import eu.wohlben.qits.artifacts.persistence.DaemonBinaryRepository;
+import eu.wohlben.qits.artifacts.persistence.DocsFileRepository;
+import eu.wohlben.qits.artifacts.persistence.DocsSiteRepository;
 import eu.wohlben.qits.artifacts.persistence.MavenArtifactRepository;
 import eu.wohlben.qits.artifacts.persistence.NpmDistTagRepository;
 import eu.wohlben.qits.artifacts.persistence.NpmProxyPackumentRepository;
@@ -49,6 +51,10 @@ abstract class ArtifactsTestSupport {
 
   @Inject DaemonBinaryRepository daemonBinaries;
 
+  @Inject DocsSiteRepository docsSites;
+
+  @Inject DocsFileRepository docsFiles;
+
   @Inject OciMirrorUpstreamRepository mirrorUpstreams;
 
   @Inject BlobDiskIndex diskIndex;
@@ -77,6 +83,11 @@ abstract class ArtifactsTestSupport {
               npmProxyPackuments.deleteAll();
               mavenArtifacts.deleteAll();
               daemonBinaries.deleteAll();
+              // Only the site rows: docs_file and docs_site_metadata carry `on delete cascade` to
+              // this table (V1 and V2), which is where the "a version is the unit of eviction" rule
+              // is enforced — deleting the files here would be a second way to unmake a site, and
+              // the schema exists so there is only one.
+              docsSites.deleteAll();
               records.deleteAll();
               // The mirror upstreams too: their slug is a foreign key into artifact_repository, so
               // the pairing that makes a namespace resolvable is also what makes the wipe ordered.

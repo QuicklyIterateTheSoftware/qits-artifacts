@@ -7,17 +7,26 @@ import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
 
 import eu.wohlben.qits.artifacts.control.ArtifactRepositoryService;
 import eu.wohlben.qits.artifacts.control.BlobStore;
 import eu.wohlben.qits.artifacts.control.OciMediaTypes;
+import eu.wohlben.qits.artifacts.entity.DaemonBinary;
+import eu.wohlben.qits.artifacts.entity.DocsFile;
+import eu.wohlben.qits.artifacts.entity.DocsSite;
 import eu.wohlben.qits.artifacts.entity.NpmDistTag;
 import eu.wohlben.qits.artifacts.entity.NpmVersion;
 import eu.wohlben.qits.artifacts.entity.OciManifest;
 import eu.wohlben.qits.artifacts.entity.OciTag;
+import eu.wohlben.qits.artifacts.control.DaemonBinariesProfile;
+import eu.wohlben.qits.artifacts.control.DocsProfile;
 import eu.wohlben.qits.artifacts.control.NpmPackagesProfile;
 import eu.wohlben.qits.artifacts.control.OciImagesProfile;
+import eu.wohlben.qits.artifacts.persistence.DaemonBinaryRepository;
+import eu.wohlben.qits.artifacts.persistence.DocsFileRepository;
+import eu.wohlben.qits.artifacts.persistence.DocsSiteRepository;
 import eu.wohlben.qits.artifacts.persistence.NpmDistTagRepository;
 import eu.wohlben.qits.artifacts.persistence.NpmVersionRepository;
 import eu.wohlben.qits.artifacts.persistence.OciManifestRepository;
@@ -33,14 +42,17 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * The six browse endpoints on the wire: the two ways a repository can be the wrong subject, and the
- * two names in this service that contain a slash.
+ * The browse endpoints on the wire: the two ways a repository can be the wrong subject, and the
+ * three names in this service that contain a slash.
  *
  * <p>Those names are the reason this suite exists at all. An OCI image name may have slashes in it
  * ({@code qits/build-images/ci-base} is repository {@code qits}, image {@code
- * build-images/ci-base}), and so does every scoped npm package. A browser sends them
+ * build-images/ci-base}), so does every scoped npm package, and so does a docs site
+ * ({@code @userflows/qits-artifacts} is one site). A browser sends them
  * percent-encoded and a person pastes them literally, and both have to reach the same row — which is
- * a property of the path templates and of nothing else, so it needs a request to prove.
+ * a property of the path templates and of nothing else, so it needs a request to prove. The docs
+ * one is the sharpest case: its own WIRE accepts only the literal spelling, so the two surfaces
+ * differ here on purpose and only a request says which is which.
  *
  * <p>RestAssured re-encodes a path by default, which would make every assertion below about
  * RestAssured rather than about the routes; {@code urlEncodingEnabled(false)} is what sends the
@@ -51,6 +63,8 @@ class ArtifactBrowseControllerTest {
 
   private static final String IMAGE = "build-images/browse-it";
   private static final String PACKAGE = "@qits/browse-it";
+  private static final String DAEMON = "browse-it-daemon";
+  private static final String SITE = "@qits/browse-it-docs";
 
   @Inject ArtifactRepositoryService repositoryService;
   @Inject BlobStore blobStore;
@@ -58,11 +72,16 @@ class ArtifactBrowseControllerTest {
   @Inject OciTagRepository tags;
   @Inject NpmVersionRepository versions;
   @Inject NpmDistTagRepository distTags;
+  @Inject DaemonBinaryRepository daemonBinaries;
+  @Inject DocsSiteRepository docsSites;
+  @Inject DocsFileRepository docsFiles;
 
   @BeforeEach
   void seed() {
     repositoryService.ensure("qits", OciImagesProfile.KEY);
     repositoryService.ensure("npm", NpmPackagesProfile.KEY);
+    repositoryService.ensure("daemons", DaemonBinariesProfile.KEY);
+    repositoryService.ensure("docs", DocsProfile.KEY);
 
     byte[] config = filled(5, (byte) 7);
     String configDigest = store(config);
@@ -76,6 +95,12 @@ class ArtifactBrowseControllerTest {
             .getBytes(StandardCharsets.UTF_8);
     String manifestDigest = store(document);
     String tarball = store(filled(42, (byte) 8));
+    // The daemon and docs subjects. The font is shared between the site's two versions on purpose:
+    // it is what makes the site's size a union rather than a sum, here as in the artifacts module.
+    String binary = store(filled(64, (byte) 9));
+    String font = store(filled(33, (byte) 10));
+    String chunk = store(filled(21, (byte) 11));
+    Instant now = Instant.now();
 
     QuarkusTransaction.requiringNew()
         .run(
@@ -117,6 +142,23 @@ class ArtifactBrowseControllerTest {
                 tag.version = "1.0.0";
                 tag.updatedAt = Instant.now();
                 distTags.persist(tag);
+              }
+              if (daemonBinaries.findOne("daemons", DAEMON, "2026.1.0").isEmpty()) {
+                daemonBinaries.persist(
+                    daemon("2026.1.0", binary, 64, now.minusSeconds(60)));
+              }
+              if (daemonBinaries.findOne("daemons", DAEMON, "2026.2.0").isEmpty()) {
+                daemonBinaries.persist(
+                    daemon("2026.2.0", binary, 64, now.minusSeconds(30)));
+              }
+              if (docsSites.findOne("docs", SITE, "1.0.0").isEmpty()) {
+                docsSites.persist(site("1.0.0", 2, 33 + 21, now.minusSeconds(60)));
+                docsFiles.persist(docsFile("1.0.0", "sb-assets/font.woff2", font, 33));
+                docsFiles.persist(docsFile("1.0.0", "assets/a.js", chunk, 21));
+              }
+              if (docsSites.findOne("docs", SITE, "1.0.1").isEmpty()) {
+                docsSites.persist(site("1.0.1", 1, 33, now.minusSeconds(30)));
+                docsFiles.persist(docsFile("1.0.1", "sb-assets/font.woff2", font, 33));
               }
             });
   }
@@ -232,12 +274,105 @@ class ArtifactBrowseControllerTest {
   }
 
   @Test
+  void daemonsAreListedForTheDaemonRepository() {
+    // The URL reads oddly — /repositories/daemons/daemons — and that is the design: the wire has no
+    // repository segment (the seeded `daemons` row is the only namespace), but the explorer's
+    // subject is a repository throughout, so this type gets no addressing scheme of its own.
+    given()
+        .when()
+        .get("/artifacts/api/repositories/daemons/daemons")
+        .then()
+        .statusCode(200)
+        .body("daemons.name", hasItem(DAEMON))
+        .body("daemons.find { it.name == '" + DAEMON + "' }.versionCount", is(2))
+        .body("daemons.find { it.name == '" + DAEMON + "' }.latestVersion", is("2026.2.0"))
+        .body("daemons.find { it.name == '" + DAEMON + "' }.latestPublishedAt", notNullValue())
+        // 64, not 128: both versions are the same bytes, so the daemon's size is their union.
+        .body("daemons.find { it.name == '" + DAEMON + "' }.sizeBytes", is(64));
+  }
+
+  @Test
+  void daemonVersionsAreNewestFirstAndCarryTheWireDigest() {
+    given()
+        .when()
+        .get("/artifacts/api/repositories/daemons/daemons/" + DAEMON + "/versions")
+        .then()
+        .statusCode(200)
+        .body("versions", hasSize(2))
+        .body("versions[0].version", is("2026.2.0"))
+        .body("versions[0].digest", startsWith("sha256:"))
+        .body("versions[0].sizeBytes", is(64))
+        .body("versions[0].publishedAt", notNullValue())
+        .body("versions[0].accessedAt", nullValue())
+        .body("versions[1].version", is("2026.1.0"));
+
+    // A daemon nobody published is an empty list, not a 404 — a daemon is not a row.
+    given()
+        .when()
+        .get("/artifacts/api/repositories/daemons/daemons/never-published/versions")
+        .then()
+        .statusCode(200)
+        .body("versions", hasSize(0));
+  }
+
+  @Test
+  void docsSitesAreListedWithASizeTheOpenWireCatalogDoesNotCarry() {
+    given()
+        .when()
+        .get("/artifacts/api/repositories/docs/docs")
+        .then()
+        .statusCode(200)
+        .body("sites.name", hasItem(SITE))
+        .body("sites.find { it.name == '" + SITE + "' }.versionCount", is(2))
+        .body("sites.find { it.name == '" + SITE + "' }.latestVersion", is("1.0.1"))
+        .body("sites.find { it.name == '" + SITE + "' }.latestPublishedAt", notNullValue())
+        // 54, not 87: both versions ship the font, and a site is the union of its versions.
+        .body("sites.find { it.name == '" + SITE + "' }.sizeBytes", is(54));
+  }
+
+  @Test
+  void aDocsSiteNameWithASlashResolvesEncodedAndLiteralAlike() {
+    // The third name in this service that contains a slash, and the one whose WIRE accepts only the
+    // literal spelling — DocsPaths has no percent-encoded separator. This surface is reached from a
+    // browser, so it has to answer both, which is a property of the path template and nothing else.
+    for (String spelling : new String[] {SITE.replace("/", "%2F"), SITE}) {
+      given()
+          .urlEncodingEnabled(false)
+          .when()
+          .get("/artifacts/api/repositories/docs/docs/" + spelling + "/versions")
+          .then()
+          .statusCode(200)
+          .body("versions", hasSize(2))
+          .body("versions[0].version", is("1.0.1"))
+          .body("versions[0].fileCount", is(1))
+          .body("versions[0].sizeBytes", is(33))
+          .body("versions[0].publishedAt", notNullValue())
+          .body("versions[0].accessedAt", nullValue())
+          .body("versions[0].metadata.'git.branch.name'", is("main"))
+          .body("versions[1].version", is("1.0.0"))
+          .body("versions[1].sizeBytes", is(54));
+    }
+  }
+
+  @Test
   void anUnknownRepositoryIsFourOhFourOnBothBrowseSurfaces() {
     given().when().get("/artifacts/api/repositories/no-such-repo/images").then().statusCode(404);
     given().when().get("/artifacts/api/repositories/no-such-repo/packages").then().statusCode(404);
     given()
         .when()
         .get("/artifacts/api/repositories/no-such-repo/images/anything/tags")
+        .then()
+        .statusCode(404);
+    given().when().get("/artifacts/api/repositories/no-such-repo/daemons").then().statusCode(404);
+    given().when().get("/artifacts/api/repositories/no-such-repo/docs").then().statusCode(404);
+    given()
+        .when()
+        .get("/artifacts/api/repositories/no-such-repo/daemons/anything/versions")
+        .then()
+        .statusCode(404);
+    given()
+        .when()
+        .get("/artifacts/api/repositories/no-such-repo/docs/anything/versions")
         .then()
         .statusCode(404);
   }
@@ -248,6 +383,8 @@ class ArtifactBrowseControllerTest {
     // an empty list would read as an image registry that lost its images.
     given().when().get("/artifacts/api/repositories/npm/images").then().statusCode(400);
     given().when().get("/artifacts/api/repositories/qits/packages").then().statusCode(400);
+    given().when().get("/artifacts/api/repositories/npm/daemons").then().statusCode(400);
+    given().when().get("/artifacts/api/repositories/npm/docs").then().statusCode(400);
   }
 
   @Test
@@ -268,6 +405,42 @@ class ArtifactBrowseControllerTest {
         .body("mavenPublishedBytes", greaterThanOrEqualTo(0))
         .body("daemonBinaryBytes", greaterThanOrEqualTo(0))
         .body("diskTotalBytes", greaterThanOrEqualTo(0));
+  }
+
+  private static DaemonBinary daemon(String version, String blobId, long size, Instant publishedAt) {
+    DaemonBinary row = new DaemonBinary();
+    row.repository = "daemons";
+    row.name = DAEMON;
+    row.version = version;
+    row.blobId = blobId;
+    row.sizeBytes = size;
+    row.publishedAt = publishedAt;
+    return row;
+  }
+
+  private static DocsSite site(
+      String version, int fileCount, long totalBytes, Instant publishedAt) {
+    DocsSite row = new DocsSite();
+    row.repository = "docs";
+    row.name = SITE;
+    row.version = version;
+    row.fileCount = fileCount;
+    row.totalBytes = totalBytes;
+    row.publishedAt = publishedAt;
+    row.metadata.put("git.branch.name", "main");
+    return row;
+  }
+
+  private static DocsFile docsFile(String version, String path, String blobId, long size) {
+    DocsFile row = new DocsFile();
+    row.repository = "docs";
+    row.name = SITE;
+    row.version = version;
+    row.path = path;
+    row.blobId = blobId;
+    row.sizeBytes = size;
+    row.mediaType = "application/octet-stream";
+    return row;
   }
 
   private String store(byte[] bytes) {
