@@ -536,17 +536,22 @@ retain their narrower `MachineAuth` audience/scope checks.
 in-JVM suites need no headers. The **packaged** process runs `LaunchMode.NORMAL`, where
 `ForwardAuthMechanism` deliberately stays anonymous — so every `/artifacts/api` read 401s unless
 the request carries the `X-Qits-User`/`X-Qits-Roles` pair the gateway would assert.
-`PackagedProcessIT.asOperator()` is that pair for RestAssured, and `ExplorerBrowseIT` sets the same
-headers on the Playwright browser context before navigating; the wire cases stay header-free on
-purpose, because tokenless-on-qits-net is their contract.
+`PackagedProcessIT.asOperator()` is that pair for RestAssured, and `stories.support.StoryBrowser
+.asOperator(flow)` sets the same headers on the Playwright browser context before the first
+navigate — one copy, used by all seven explore stories; the wire cases stay header-free on
+purpose, because tokenless-on-qits-net is their contract. `StoryBrowser` is the only thing in
+`stories/support/` that touches auth, and it uses `Flow.page()` rather than a recorded step
+precisely because it is harness plumbing and not a step in anybody's story.
 
-- `mvn verify` runs 225 tests (38 in `artifacts/`, 98 in `gc/`, 89 in `service/`) in about a
+- `mvn verify` runs 255 tests (38 in `artifacts/`, 98 in `gc/`, 100 in `service/`) in about a
   minute — counted from the surefire reports — and then the failsafe ITs against the packaged
-  fast-jar: the `service` module opts back into ITs (`skipITs=false` in its pom), because
-  `TokenValidationBootstrapIT` and `ExplorerBrowseIT` are **userflows** and `target/userstories/`
-  is a build product a plain verify regenerates. `.config/qits/ci-event-userflows.yml` runs the
-  same verify per commit in ONE step on `userflows-base` (Maven + baked Chromium, `user: pwuser`
-  for zonky's initdb, the step-image contract since qits-oci 2026.828.162434) — one step because
+  fast-jar: **39 tests across 24 IT classes**, of which the three `qits`-category stories and
+  `OciConformanceIT` skip without their gates. The `service` module opts back into ITs
+  (`skipITs=false` in its pom), because `TokenValidationBootstrapIT` and the 21 story classes under
+  `eu.wohlben.qits.stories` are **userflows** and `target/userstories/` is a build product a plain
+  verify regenerates. `.config/qits/ci-event-userflows.yml` runs the
+  same verify per commit in ONE step on `userflows-base` (Maven + baked Chromium + skopeo,
+  `user: pwuser` for zonky's initdb, the step-image contract since qits-oci 2026.828.162434) — one step because
   step containers share no workspace (each clones for itself), so the SPA bundle must be built in
   the same container that packages it: the lockfile origin swap runs in the script and Quinoa's
   managed node (the pinned 22.22.0) does the real `npm ci` + build with `npm_config_*` registries
@@ -577,7 +582,12 @@ purpose, because tokenless-on-qits-net is their contract.
   hosted docs and daemon wires, the explorer, GC and the JAX-RS boundary. Nothing here
   needs docker — and that is the constraint that shapes the registry suite: `docker`, `podman` and
   `skopeo` may not be assumed present, so `registry/OciClient` + `registry/TinyImage` synthesise a
-  real image in memory and drive a full push/pull over the JDK `HttpClient`. It uses that rather than
+  real image in memory and drive a full push/pull over the JDK `HttpClient`. **That rule is
+  unchanged for every unit suite and `registry/OciClient` is unchanged with it**; it is now
+  *qualified* at the IT layer only. `userflows-base` ships a skopeo (since 2026.829.153130), and
+  the three `qits`-category stories drive that real binary — gated `@EnabledIf` on
+  `Cli#skopeoPresent`, so on a workstation without one they emit nothing rather than failing. A
+  machine having skopeo is never assumed anywhere; a machine *not* having it is still green. It uses that rather than
   RestAssured for one reason that matters: `BodyPublishers.ofInputStream` sends a body with no
   `Content-Length`, which is the chunked path docker actually uses and the one the wire ceiling does
   not gate. RestAssured also percent-encodes the colon in a digest, so any assertion carrying one
@@ -619,9 +629,11 @@ purpose, because tokenless-on-qits-net is their contract.
 - `mvn verify -Dnative` runs those against the compiled binary instead of the fast-jar.
   `PackagedProcessIT` was the first suite to start a **process** rather than an in-JVM Quarkus; its
   siblings do too — `TokenValidationBootstrapIT` with the rollout gate on against a recording mock
-  idp (the token userflows), and `ExplorerBrowseIT` sharing `TargetDirState` so one boot serves it
-  and `PackagedProcessIT` both, driving headless Chromium over the embedded SPA (the browser
-  userflow; the UI ships inside the jar, so the browser runs through the service). It is where the
+  idp (the two `authentication` userflows, and the only stories with a profile of their own), and
+  the 21 classes under `eu.wohlben.qits.stories` all sharing `PackagedProcessIT.TargetDirState` so
+  **one** boot serves every one of them and `PackagedProcessIT` besides — two launched processes in
+  the whole IT phase, not twenty-four. Seven of the stories drive headless Chromium over the
+  embedded SPA (the UI ships inside the jar, so the browser runs through the service). It is where the
   route stacks are proved to coexist and where the binary is proved to boot at all.
   It is also the **only** place the web UI can be tested at all: Quinoa logs "Quinoa is disabled by
   default in tests" and registers neither the static resources nor the SPA re-route, so a
@@ -662,9 +674,75 @@ purpose, because tokenless-on-qits-net is their contract.
   arranged so per-tag, per-image and store-wide unions all give *different* answers over the same
   content, plus one blob no row references — because a bug that sums where it should merge produces a
   number that still looks plausible, and only arithmetic that names the double-counted layer catches
-  it. `ArtifactBrowseControllerTest` proves the two names in this service that contain a slash (an
-  OCI image name, a scoped npm package) resolve in both spellings, encoded and literal, which is a
-  property of the path templates and of nothing else. Both must hold; neither implies the other.
+  it. `ArtifactBrowseControllerTest` proves the three kinds of name in this service that contain a
+  slash (an OCI image name, a scoped npm package, a docs site like `@userflows/qits-artifacts`)
+  resolve in both spellings, encoded and literal, which is a
+  property of the path templates and of nothing else. Both must hold; neither implies the other. It
+  also pins the union arithmetic one level down from the store summary: a daemon whose two versions
+  are the same bytes sizes as one blob, and a site's two versions sharing a font count it once.
+
+### The story catalogue
+
+Twenty-one classes under `service/src/test/java/eu/wohlben/qits/stories/`, plus the two
+`authentication` stories in `TokenValidationBootstrapIT` — which are the only ones with a
+`@TestProfile` of their own (the mock idp with the rollout gate on). Everything else shares
+`PackagedProcessIT.TargetDirState`, so the whole catalogue plus `PackagedProcessIT` costs **two**
+launched processes.
+
+**Seven categories, each named after the repository row it addresses** — `npm`, `maven`, `daemons`,
+`docs`, `qits` (the OCI registry; the category is the repository name, not the protocol), and the
+two CI media planes `ci-screenshots` and `ci-videos`. Every category is the same three-link chain:
+
+| | publish | consume | explore |
+|---|---|---|---|
+| `npm` | `NpmPublishIT` | `NpmInstallIT` | `NpmExploreIT` |
+| `maven` | `MavenDeployIT` | `MavenResolveIT` | `MavenExploreIT` |
+| `daemons` | `DaemonPublishIT` | `DaemonDownloadIT` | `DaemonExploreIT` |
+| `docs` | `DocsPublishIT` | `DocsReadIT` | `DocsExploreIT` |
+| `qits` | `OciPushIT` | `OciPullIT` | `OciExploreIT` |
+| `ci-screenshots` | `ScreenshotPublishIT` | `ScreenshotFetchIT` | `ScreenshotExploreIT` |
+| `ci-videos` | `VideoPublishIT` | `VideoFetchIT` | `VideoExploreIT` |
+
+- **The chaining rule, and it is asymmetric on purpose.** The consume story carries
+  `@UserflowPrecondition(<publish>)`; the explore story carries **the same precondition plus**
+  `@UserflowRunsAfter(<consume>)`. So explore is ordered behind consume but gated on **publish
+  only**: the browser story asserts what the store now holds, and a missing CLI on the consuming
+  side must not take out the one story that would still have run. Reading it the other way round —
+  gating explore on consume — is the mistake this shape exists to prevent.
+- **The subject travels in `UserflowContext`, never re-declared.** The publish story `put`s its
+  name, version and digest under `story.<category>.*`; the consume and explore stories `require`
+  them. A story that respells the coordinate is a story that can pass against something the chain
+  did not produce.
+- **Missing CLI is a SKIP, and the skip must happen before the story starts.** The gate is
+  class-level `@EnabledIf("eu.wohlben.qits.stories.support.Cli#<tool>Present")` — `npmPresent`,
+  `mvnPresent`, `skopeoPresent`, `curlPresent`, `curlAndTarPresent` — and the first line of every
+  `@AfterAll` guards on the same predicate, because JUnit still runs the lifecycle callback of a
+  disabled class. **`assumeTrue` inside a story body is wrong and not merely uglier**: the userflows
+  extension has already opened a report by the time the body runs, so an aborted test writes a
+  FAILED report, and that report is then published in the bundle. A skipped class emits nothing at
+  all, which is the honest answer for "this machine has no image client".
+- **`stories/support/` is four classes and no more.** `Cli` resolves each program once per JVM
+  (explicit `-D` from the pom → Quinoa's managed node dir → `PATH`); `StoryTarget` holds the single
+  copy of every wire prefix and derives them off the random `@TestHTTPResource` port; `StoryBrowser`
+  plays the gateway on the browser context; `StoryMedia` synthesises the PNG/webm/tarball fixtures
+  and hashes them.
+- **The fingerprint rule for `Commands` templates: programs and URLs are `{}` ARGUMENTS, never
+  spelled into the template.** A story writes `commands.run("{} publish --registry {}", Cli.npm(),
+  target.npmRegistry())`. The display line then shows the real program and the real URL while the
+  recorded fingerprint keeps `{}`, so a story's definition hash is identical on a workstation, in CI
+  and in a container resolving the tool somewhere else — and it survives the launched process taking
+  a different random port on every run. Inlining either value silently makes every run a new story.
+- **`ci-screenshots` and `ci-videos` document an INTENDED intake — no producer exists yet.** Nothing
+  in the platform has ever uploaded a golden screenshot or a run recording: the repository rows are
+  seeded, the validating upload path and the newest-per-branch-and-flow query are built, the two GC
+  stubs refuse to plan the day a row appears, and the two ends have never met. These six stories are
+  that contract written as something that runs, so the capture loop has a shape to build against.
+  Keep the caveat attached wherever these categories are summarised — a reader who takes them for a
+  live feature will go looking for the producer.
+- **npm's two flags are not simplifiable.** `npm` on `PATH` inside a qits workspace container is a
+  shim that re-execs the real npm through `env "npm_config_@qits:registry=…"`, so a story trusting
+  the environment would publish to the *platform's* registry. npm ranks the command line above the
+  environment, so every npm story passes both `--registry=` and `--@qits:registry=` explicitly.
 
 ## What not to "fix"
 
@@ -750,9 +828,17 @@ purpose, because tokenless-on-qits-net is their contract.
   unhiding an operation shows up as a diff.
 - A `Failed to start quarkus` / `Port already bound: 8081` failure is the known flake
   (`migration-plan.md` §9 item 14) — `@QuarkusTest` restarts racing for the test port. Re-run first.
-- The blob store's `RepositoryType` enum hardcodes its types. Adding one is a schema check
-  constraint change plus a validation profile, not a config knob — since V2 the constraint is named
-  (`ck_artifact_repository_type`), so widening it is a one-liner (V3 is that one-liner, twice over).
+- **The blob store no longer has a closed `RepositoryType` enum, and adding a type is still not a
+  config knob.** Registration is open: a `RepositoryTypeProfile` is an `@ApplicationScoped` CDI bean
+  and `RepositoryTypeProfiles` resolves a stored key to whichever bean claims it, so the core
+  enumerates nothing — qits-blobstore ships the two CI profiles, qits-registries ships npm, maven
+  and OCI, and a service owning a format of its own contributes that one. `key()` is the **stored**
+  form written verbatim into `artifact_repository.type` (the screaming-snake spelling the old
+  constants had, so existing rows keep their meaning), which is why contributing a profile is a
+  schema change as well as a code change: the key has to be in this lineage's
+  `ck_artifact_repository_type`. Since V2 that constraint is named, so widening it is a one-liner
+  (V3 is that one-liner, twice over) — re-enumerate the whole list from the registered profiles,
+  never append.
 - **The protocol types' profiles are empty and their `maxBytes()` is `0`, and that is not an
   oversight.** `OCI_IMAGES`, `NPM_PACKAGES`, `MAVEN_PACKAGES`, `DAEMON_BINARIES` and `DOCS` —
   and the three cache profiles the shared jars carry, which `quarkus.arc.exclude-types` keeps out of

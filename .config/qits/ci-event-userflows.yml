@@ -1,7 +1,10 @@
 # The per-commit userflow run: `mvn verify` at the pushed commit — which regenerates
-# service/target/userstories/ through TokenValidationBootstrapIT (the token stories) and
-# ExplorerBrowseIT (the browser story over the embedded SPA) — and the reports published as one
-# docs bundle, site @userflows/qits-artifacts, version = the bare commit sha, branch riding as
+# service/target/userstories/ through TokenValidationBootstrapIT (the two `authentication` stories,
+# on their own mock-idp profile) and the 21 story classes under eu.wohlben.qits.stories: seven
+# categories named after the seeded repositories — npm, maven, daemons, docs, qits (the OCI
+# registry), ci-screenshots, ci-videos — each a chain of publish -> consume -> explore, the last
+# link of every chain a headless-Chromium flow over the embedded SPA. The reports are published as
+# one docs bundle, site @userflows/qits-artifacts, version = the bare commit sha, branch riding as
 # artifacts metadata for discovery. qits-githost's file of the same name is the pattern; this one
 # departs from it in two ways, and the web UI is the reason for both.
 #
@@ -9,16 +12,44 @@
 # (the ci-daemon's Workspace clones into the container's own /workspace), so a bundle built in one
 # step does not exist in the next — the two-step split this file shipped with was structurally
 # wrong and never survived its first run. The whole journey therefore happens in one container:
-# the browser story drives the SPA the packaged jar itself serves (Quinoa), so the jar under test
+# the browser stories drive the SPA the packaged jar itself serves (Quinoa), so the jar under test
 # must carry the real client, and the client must be built HERE, on qits-net, where the @qits
 # scope resolves.
 #
 # ON userflows-base, BECAUSE THE STEP NEEDS EVERYTHING AT ONCE: Maven + JDK, Chromium at
-# PLAYWRIGHT_BROWSERS_PATH for the browser story, and the step-image contract (passwd user,
-# /workspace 1777 — since qits-oci 2026.828.162434, this image carries it). Node is deliberately
-# NOT assumed: Quinoa's managed install fetches its own node (the pinned 22.22.0, the same version
-# docker/Dockerfile pins) and runs the REAL npm ci + build with it — the registry redirection
-# rides in as npm_config_* environment, which outranks the submodule's committed .npmrc.
+# PLAYWRIGHT_BROWSERS_PATH for the seven browser stories, skopeo for the `qits` category, and the
+# step-image contract (passwd user, /workspace 1777 — since qits-oci 2026.828.162434, this image
+# carries it). Node is deliberately NOT assumed: Quinoa's managed install fetches its own node (the
+# pinned 22.22.0, the same version docker/Dockerfile pins) and runs the REAL npm ci + build with
+# it — the registry redirection rides in as npm_config_* environment, which outranks the
+# submodule's committed .npmrc.
+#
+# SKOPEO IS LOAD-BEARING, AND ITS ABSENCE LOOKS EXACTLY LIKE A PASS. The `qits` category's three
+# stories are gated `@EnabledIf(Cli#skopeoPresent)` at class level — a missing image client is a
+# SKIP, because a story that aborts mid-body publishes a red report for a machine's inventory
+# rather than for the product. So an image without skopeo runs this step green while silently
+# emitting no OCI chapter at all: the bundle would be three stories short and nothing in the log
+# would say so. userflows-base carries skopeo as of qits/build-images/userflows-base
+# 2026.829.153130; treat that as a requirement of this step and not as a convenience, and if the
+# published bundle ever loses its `qits` category, look at the image before looking at the code.
+#
+# THE MAVEN STORIES DIAL CENTRAL, WHICH IS A NEW DEPENDENCY OF THIS STEP. MavenDeployIT and
+# MavenResolveIT fork ${maven.home}/bin/mvn as a real child process — what a release pipeline
+# actually types — and those forks resolve maven-deploy-plugin:3.1.4 and maven-dependency-plugin
+# :3.8.1 (~2 MB with their transitive plugin dependencies) into the surrounding build's local
+# repository. In this container ~/.m2 is cold on every run, so both are fetched every time. The
+# outer build's .qits-maven-settings.xml mirrors only the `qits-maven` repository id, so central is
+# already dialled directly rather than through the platform mirror, and the forks inherit those
+# settings without an -s of their own. A container with no route to repo.maven.apache.org fails the
+# maven category outright — this is not a skip, because mvn itself is present.
+#
+# THE STORIES' OWN TOOLS ARE NOT THE STEP'S. eu.wohlben.qits.stories.support.Cli resolves each
+# program once per JVM — the -D override the pom fills (${maven.home}/bin/mvn, the .quinoa/node
+# directory Quinoa unpacked), then PATH — and hands the resolved path to Commands.run as a {}
+# ARGUMENT so the recorded fingerprint keeps the template. That is deliberately NOT the npm_config_*
+# environment this script exports: those exist for Quinoa's own `npm ci`, while a story publishing
+# to the launched process passes --registry= and --@qits:registry= on its command line, which
+# outrank the environment and defeat the workspace npm shim. Do not "unify" the two.
 #
 # `user: pwuser`, and NOT a switch inside the script: the suite starts zonky's embedded postgres,
 # initdb refuses to run as root and calls getpwuid, so the step needs a passwd-backed non-root
@@ -55,7 +86,10 @@ checkout:
 steps:
   - image: qits/build-images/userflows-base:latest
     user: pwuser
-    timeout-seconds: 2400
+    # 23 stories now, not two: seven Chromium-plus-video explore runs, two skopeo copies, an npm
+    # publish and install, two forked maven JVMs pulling their plugins from central on a cold ~/.m2,
+    # and the whole unit suite plus the SPA build in front of all of it.
+    timeout-seconds: 3600
     script: |
       set -eu
       # The settle-hold from the header: our own build's deploy is swapping the registry container

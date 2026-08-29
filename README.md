@@ -124,10 +124,10 @@ whole coupling model: **blobs reference qits branches and flows by string metada
 foreign key.** Nothing here breaks when qits' schema moves, and nothing here needs a JPA relation
 into another context's tables.
 
-    PUT  /artifacts/api/repositories/{repo}                 ensure a repository (token-guarded)
-    POST /artifacts/api/repositories/{repo}/blobs           upload, raw body + X-Artifacts-Meta-*
-    GET  /artifacts/api/repositories/{repo}/blobs/{id}      serve — open, cacheable, immutable
-    GET  /artifacts/api/repositories/{repo}/blobs?meta.…    query
+    PUT  /artifacts/api/repositories/{repo}                 ensure a repository — qits:system
+    POST /artifacts/api/repositories/{repo}/blobs           upload, raw body + X-Artifacts-Meta-* — qits:system
+    GET  /artifacts/api/repositories/{repo}/blobs/{id}      serve — qits:admin, cacheable, immutable
+    GET  /artifacts/api/repositories/{repo}/blobs?meta.…    query — qits:admin
 
 A **repository** here is a named bucket of artifacts — the Maven/npm sense of the word, not
 `domain.repository`. The resource keeps that name; the `artifacts` the path used to repeat is gone,
@@ -682,20 +682,36 @@ discovery by probing is impossible. npm's `/-/all` and `/-/v1/search` are absent
 repository, because those paths never write `artifact_record` — it looks like an empty registry and
 is not. So these routes are new machinery rather than a view over an existing one.
 
-All are reads and all are **unguarded**, like their neighbours: `ArtifactsTokenFilter`
-covers write methods only, and `/artifacts/api` is already on qits-gateway's public paths. Every
-operation carries `@Operation(hidden = true)` as everything here does, so `docs/openapi.yml` stays
-`paths: {}` and the contract is written out below instead.
+All are reads, and **a read here is `@RolesAllowed("qits:admin")`** — every browse controller
+carries the annotation at class level, answered from the `X-Qits-User`/`X-Qits-Roles` pair
+qits-gateway asserts for a signed-in operator. `AdminWriteGuard` is a *separate* mechanism and
+covers write methods only (`MachineAuth.require()` under the `qits.auth.machine.required` rollout
+gate), so it is correct that no read passes through it — but that does not make a read open, and
+the retired `ArtifactsTokenFilter` / `X-Artifacts-Token` scheme this section used to name is gone.
+Every operation carries `@Operation(hidden = true)` as everything here does, so `docs/openapi.yml`
+stays `paths: {}` and the contract is written out below instead.
 
 ```
-GET /artifacts/api/repositories                                    every repository
-GET /artifacts/api/repositories/{repo}/images                      an OCI repository
-GET /artifacts/api/repositories/{repo}/images/{image}/tags         one image's tags
-GET /artifacts/api/repositories/{repo}/images/{image}/manifests    every manifest, tagged or not
-GET /artifacts/api/repositories/{repo}/packages                    an npm repository
-GET /artifacts/api/repositories/{repo}/packages/{package}/versions one package's versions
-GET /artifacts/api/store/summary                                   the whole store, ten ways
+GET /artifacts/api/repositories                                          every repository
+GET /artifacts/api/repositories/{repo}/images                            an OCI repository
+GET /artifacts/api/repositories/{repo}/images/{image}/tags               one image's tags
+GET /artifacts/api/repositories/{repo}/images/{image}/manifests          every manifest, tagged or not
+GET /artifacts/api/repositories/{repo}/packages                          an npm repository
+GET /artifacts/api/repositories/{repo}/packages/{package}/versions       one package's versions
+GET /artifacts/api/repositories/{repo}/maven-packages                    a maven repository
+GET /artifacts/api/repositories/{repo}/maven-packages/{coord}/versions   one coordinate's versions
+GET /artifacts/api/repositories/{repo}/daemons                           a daemon-binaries repository
+GET /artifacts/api/repositories/{repo}/daemons/{daemon}/versions         one daemon's versions
+GET /artifacts/api/repositories/{repo}/docs                              a docs repository
+GET /artifacts/api/repositories/{repo}/docs/{site}/versions              one site's versions
+GET /artifacts/api/store/summary                                         the whole store, ten ways
 ```
+
+**`/repositories/daemons/daemons` reads oddly and is the design.** The daemon *wire* carries no
+repository segment — the seeded `daemons` row is the only namespace a publisher can reach — but the
+explorer's subject is an `artifact_repository` row throughout, repositories and then what is inside
+one. Giving this one type a second addressing scheme would make the SPA's drill-down a special case
+for it, and the URL stays correct on the day a second namespace is a decision somebody takes.
 
 `GET /artifacts/api/mirror-upstreams` was a fifth route and is gone with its controller — which
 public registry is mirrored is qits-platform-mirror's question, and it answers it.
@@ -708,6 +724,12 @@ public registry is mirrored is qits-platform-mirror's question, and it answers i
 | `manifests` | `{"manifests":[{"digest","mediaType","sizeBytes","createdAt","accessedAt","tags"}]}` |
 | `packages` | `{"packages":[{"name","versionCount","latest"}]}` |
 | `versions` | `{"versions":[{"version","tarballSizeBytes","publishedAt","accessedAt","distTags"}]}` |
+| `maven-packages` | `{"packages":[{"name","versionCount","sizeBytes"}]}` |
+| maven `versions` | `{"versions":[{"version","files","sizeBytes","publishedAt"}]}` |
+| `daemons` | `{"daemons":[{"name","versionCount","latestVersion","latestPublishedAt","sizeBytes"}]}` |
+| daemon `versions` | `{"versions":[{"version","digest","sizeBytes","publishedAt","accessedAt"}]}` |
+| `docs` | `{"sites":[{"name","versionCount","latestVersion","latestPublishedAt","sizeBytes"}]}` |
+| docs `versions` | `{"versions":[{"version","fileCount","sizeBytes","publishedAt","accessedAt","metadata"}]}` |
 | `store/summary` | `{"ociPerImageSumBytes","ociUnionBytes","ociMirrorBytes","orphanBytes","npmPublishedBytes","npmProxyTarballBytes","npmProxyPackumentBytes","mavenPublishedBytes","mavenProxyBytes","daemonBinaryBytes","diskTotalBytes"}` |
 
 **The summary's four cache figures are structurally zero**, and they keep their places in the record
@@ -752,9 +774,49 @@ Details a client trips over if it does not know them:
   lost its images.
 - **An unknown *image* is `200` with an empty list**, not a 404 — an image is not a row, so there is
   nothing to be absent. The same answer `tags/list` gives.
-- **`{image}` and `{package}` may contain slashes**, and both spellings resolve: `build-images%2Fci-base`
-  and `build-images/ci-base`, `@qits%2Fui-components` and `@qits/ui-components`. `qits/build-images/ci-base`
-  is repository `qits`, image `build-images/ci-base`; every scoped npm name has a slash in it too.
+- **`{image}`, `{package}` and `{site}` may contain slashes**, and both spellings resolve:
+  `build-images%2Fci-base`
+  and `build-images/ci-base`, `@qits%2Fui-components` and `@qits/ui-components`,
+  `@userflows%2Fqits-artifacts` and `@userflows/qits-artifacts`. `qits/build-images/ci-base`
+  is repository `qits`, image `build-images/ci-base`; every scoped npm name has a slash in it too,
+  and a docs site like `@userflows/qits-artifacts` is **one site name**, not a scope and a name.
+  **The docs *wire* accepts only the literal spelling** — `DocsPaths` deliberately has no
+  percent-encoded separator, because its publishers are `curl` and qits-docs — while this surface is
+  reached from a browser and has to answer both. `{daemon}` is the exception and takes a plain
+  segment: a daemon name is bounded to `[a-z0-9][a-z0-9._-]{0,63}` and cannot contain a slash, so
+  the question does not arise.
+- **The daemon and docs listings are the answer to a question their wires cannot be asked.**
+  `/artifacts/daemons` 404s on the bare segment and every route under it is version-addressed, so
+  nothing there enumerates what exists. Docs has an open wire catalog (`GET /artifacts/docs/<repo>`,
+  tokenless because qits-platform-docs renders it) which carries no size — a byte figure on an open
+  route is an inventory of the store to anyone who can reach it — so these are two readers over the
+  same rows rather than one reader with a flag. **Listing a docs version's files is deliberately
+  absent here**: the wire answers it at `GET /artifacts/docs/<repo>/<site>/-/<version>`, and a
+  second spelling would be a third place the same list is assembled.
+- **Every size on those four routes is a union over distinct blob ids, never a sum**, and that
+  matters most exactly here. Two daemon versions built from identical bytes (a rebuild that changed
+  nothing, a calver re-tag of an adopted digest row) are one blob; docs versions share fonts and
+  unchanged chunks byte-for-byte across releases, so summing `docs_file.size_bytes` overstates a
+  Storybook-shaped site several times over. `DocsSite.totalBytes` *is* that sum and is deliberately
+  not what is reported: it sizes the bundle as published, not the disk. The one row-level exception
+  is a daemon *version*, which is one blob and has nothing to double-count; `fileCount` likewise
+  stays a row count, because it answers "how many paths does this version serve".
+- **`accessedAt` is null until a versioned download**, on both, and null means *never read since
+  tracking began* rather than "read long ago" — which is why it is nullable rather than zero. A
+  daemon's version-addressed `GET`/`HEAD` moves it; the digest-addressed `/v2` blob route
+  deliberately does not, exactly as layers are unattributed. Any file `GET` of a docs version moves
+  that version's. Both coalesce to at most one write per row per hour.
+- **An unknown daemon or site is `200` with an empty list, not a 404** — neither is a row, so there
+  is nothing to be absent; only the repository can be. `404` is an unknown repository and `400` is a
+  repository of the wrong type, the same two answers the image and package listings give.
+- **A daemon version's `digest` is the wire spelling `sha256:<hex>`**, not the stored hex — the
+  exact string `DaemonRoutes` echoes as `Docker-Content-Digest` and returns in the publish receipt,
+  which is what a deployment pins. An operator copying it out of this listing must not end up
+  pinning a value the wire never uttered.
+- **A docs version's `metadata` is the flat `X-Artifacts-Meta-*` map the publisher rode in with** —
+  `git.branch.name`, `git.commit.hash`, whatever else it chose. Never null: a version published
+  without any is an empty map, because "no metadata" and "metadata not read here" must not look the
+  same on this surface.
 - **`digest` is the wire form** `sha256:<hex>`, not the bare hex the database stores — it is what a
   person pastes into a pull by digest.
 - **`createdAt` on a tag is `oci_tag.updated_at`**, when the tag last came to name that digest. A tag
@@ -873,10 +935,13 @@ one still in grace is therefore withheld whole: rows stay, the next run re-plans
 file mature out of the window together. On a store younger than the window a sweep provably
 deletes nothing, and that no-op receipt is the mechanism's own safety proof.
 
-The `POST` is a write under the `gc` prefix, so it inherits `ArtifactsTokenFilter`'s
-`X-Artifacts-Token` check — stated honestly: the live deployment ships `qits.artifacts.token`
-blank, which makes that guard inert until the platform's auth posture lands (the standing qits-platform-idp
-direction; per the recorded decision, no interim token scheme is invented meanwhile). The
+The `POST` is `@RolesAllowed("qits:system")` — a sweep is a machine's call, made by
+qits-platform-orchestrator — and, as a write under the `gc` prefix, it also passes through
+`AdminWriteGuard`'s `MachineAuth.require()`. Stated honestly: that second belt is inert while the
+`qits.auth.machine.required` rollout gate ships off, which is the standing qits-platform-idp
+direction and the reason the guard could ship before the idp was deployed. The retired
+`X-Artifacts-Token` filter it replaced is gone; per the recorded decision, no interim token scheme
+is invented meanwhile. The
 registries' `405` on client deletes (`/v2` manifests, npm unpublish) is untouched: no client gains
 deletion semantics from any of this.
 
@@ -1461,9 +1526,12 @@ Details a reader trips over otherwise:
   unlink may happen, not about what a rule structurally frees, and a strategy's worth should not read
   as zero because its content was pushed this morning.
 
-Reads are unguarded like their neighbours (`ArtifactsTokenFilter` covers write methods only). The
-sweep `POST` is the write the `gc` prefix was pre-listed for, and it inherits the guard by
-construction — with the blank-token honesty stated at the top of this section still applying.
+`GET /gc/plan` is `@RolesAllowed("qits:admin")` like every other read on this API; its `POST` twin
+allows `qits:admin` **or** `qits:system`, because the orchestrator that sends a pin set is a machine
+and is already allowed to run the sweep this plan feeds. `AdminWriteGuard` covers write methods
+only, so no read passes through it — the sweep `POST` is the write the `gc` prefix was pre-listed
+for and inherits it by construction, with the rollout-gate honesty stated at the top of this
+section still applying.
 
 ## The boundary
 
