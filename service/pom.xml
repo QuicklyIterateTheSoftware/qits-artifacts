@@ -202,12 +202,14 @@
             <scope>test</scope>
         </dependency>
         <dependency>
-            <!-- The user-story framework: TokenValidationBootstrapIT and ExplorerBrowseIT are
-                 written as @UserStory classes, so the packaged-process proofs double as
-                 documentation — steps, interactions and a sequence diagram emitted under
-                 target/userstories/. The token story is browserless; the explorer story takes a
-                 Flow, which is what launches headless Chromium (from PLAYWRIGHT_BROWSERS_PATH
-                 where an image bakes one — the workspace image and CI's userflows-base both do). -->
+            <!-- The user-story framework: TokenValidationBootstrapIT and every class under
+                 eu.wohlben.qits.stories.* are written as @UserStory classes, so the
+                 packaged-process proofs double as documentation — steps, interactions, command
+                 transcripts and a sequence diagram emitted under target/userstories/. The publish
+                 and consume stories are browserless (Interactions + Commands); the explore story
+                 of each category takes a Flow, which is what launches headless Chromium (from
+                 PLAYWRIGHT_BROWSERS_PATH where an image bakes one — the workspace image and CI's
+                 userflows-base both do). -->
             <groupId>${project.groupId}</groupId>
             <artifactId>qits-userflows</artifactId>
             <scope>test</scope>
@@ -279,6 +281,22 @@
                                      the ITs run on every `mvn verify` (skipITs above), the default
                                      would collide there on every build. -->
                                 <quarkus.http.test-port>0</quarkus.http.test-port>
+                                <!-- The command-line tools the user stories drive, told to the
+                                     suite rather than looked for. A story runs the REAL tool (npm
+                                     publish, mvn deploy) and a build agent frequently has neither
+                                     on PATH while the build itself is running under one: ${maven.home}
+                                     is the launcher maven was started with, and .quinoa/node is
+                                     where Quinoa unpacks a managed node distribution when the SPA
+                                     build asks for one.
+
+                                     Both are hints, never requirements. eu.wohlben.qits.stories
+                                     .support.Cli falls through to PATH when a value names nothing
+                                     executable — which is the normal case for .quinoa/node on a
+                                     machine whose Quinoa uses the system node — and a story whose
+                                     tool is missing everywhere SKIPS through @EnabledIf rather
+                                     than failing. -->
+                                <qits.userflows.mvn>${maven.home}/bin/mvn</qits.userflows.mvn>
+                                <qits.userflows.quinoa-node-dir>${project.basedir}/.quinoa/node</qits.userflows.quinoa-node-dir>
                                 <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
                             </systemPropertyVariables>
                         </configuration>

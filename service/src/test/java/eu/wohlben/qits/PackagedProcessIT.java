@@ -62,10 +62,15 @@ import org.junit.jupiter.api.Test;
  * <p>The git smart-HTTP cases that used to live here went to qits-githost with the host, and JGit
  * — the reason this suite was written — went with them. What is left is still the only place the
  * binary is exercised at all.
+ *
+ * <p><b>The class is public only so {@link TargetDirState} can be named from another package.</b>
+ * Every user story under {@code eu.wohlben.qits.stories.*} shares this profile — one launched
+ * process for the whole IT phase — and a nested type is no more visible than the class around it.
+ * The test methods themselves stay package-private.
  */
 @QuarkusIntegrationTest
 @TestProfile(PackagedProcessIT.TargetDirState.class)
-class PackagedProcessIT {
+public class PackagedProcessIT {
 
   /**
    * Gives the launched process a database, because the shipped config deliberately has none: the
