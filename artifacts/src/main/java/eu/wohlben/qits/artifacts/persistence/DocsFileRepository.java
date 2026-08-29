@@ -70,4 +70,46 @@ public class DocsFileRepository implements PanacheRepositoryBase<DocsFile, DocsF
         .setParameter("repository", repository)
         .getResultList();
   }
+
+  /**
+   * The same union narrowed to one site — what a site's own size is.
+   *
+   * <p>Narrowed in the query rather than filtered in Java, because {@code distinct} has to run over
+   * the narrowed set: the font every version of this site ships is one blob and is counted once
+   * here, while the same font shipped by a <em>different</em> site must not be added at all.
+   * Summing the per-site answers therefore over-counts against {@link #listDistinctBlobs(String)},
+   * which is the honest arithmetic and not a bug.
+   */
+  public List<Object[]> listDistinctBlobs(String repository, String name) {
+    return getEntityManager()
+        .createQuery(
+            "select distinct f.blobId, f.sizeBytes from DocsFile f"
+                + " where f.repository = :repository and f.name = :name",
+            Object[].class)
+        .setParameter("repository", repository)
+        .setParameter("name", name)
+        .getResultList();
+  }
+
+  /**
+   * One site's distinct blobs <b>tagged with the version that names them</b> — every version's size
+   * in a single query.
+   *
+   * <p>{@code (version, blobId, sizeBytes)}, distinct within a version because a bundle may ship the
+   * same bytes at two paths, and <em>not</em> distinct across versions, which is the point: the
+   * shared font appears once per version that carries it, so folding these rows per version gives
+   * each version its own union and folding them all together would not. One query rather than one
+   * per version, on {@code listAllByRepository}'s reasoning — a site holds a handful of retained
+   * versions, so the grouping is free in Java and the round trips are not.
+   */
+  public List<Object[]> listDistinctBlobsByVersion(String repository, String name) {
+    return getEntityManager()
+        .createQuery(
+            "select distinct f.version, f.blobId, f.sizeBytes from DocsFile f"
+                + " where f.repository = :repository and f.name = :name",
+            Object[].class)
+        .setParameter("repository", repository)
+        .setParameter("name", name)
+        .getResultList();
+  }
 }

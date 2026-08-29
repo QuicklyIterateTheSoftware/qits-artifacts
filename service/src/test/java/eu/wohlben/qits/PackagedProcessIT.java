@@ -20,6 +20,9 @@ import io.quarkus.test.junit.QuarkusIntegrationTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import com.fasterxml.jackson.databind.JsonNode;
+import eu.wohlben.qits.daemon.DaemonClient;
+import eu.wohlben.qits.daemon.TinyDaemon;
+import eu.wohlben.qits.docs.TinyBundle;
 import eu.wohlben.qits.maven.MavenClient;
 import eu.wohlben.qits.maven.TinyArtifact;
 import eu.wohlben.qits.npm.NpmClient;
@@ -115,6 +118,12 @@ class PackagedProcessIT {
 
   /** The string that identifies a response as the CLIENT's index.html rather than anything else. */
   private static final String BASE_HREF = "<base href=\"/\">";
+
+  /** The daemon this suite publishes and browses — its own name, so no other case's rows are in it. */
+  private static final String BROWSE_DAEMON = "packaged-it-browse-daemon";
+
+  /** A scoped docs site, so the browse template's two spellings have something to resolve. */
+  private static final String BROWSE_SITE = "@qits/packaged-it-browse-docs";
 
   /**
    * The gateway's asserted identity, played by this suite for the JSON API. Every read there is
@@ -461,15 +470,17 @@ class PackagedProcessIT {
 
   @Test
   void theBrowseEndpointsSurviveTheCompileOverContentPushedThroughTheWire() {
-    // Six new response shapes, every one of them a Jackson-serialised record — which is the
+    // Ten response shapes, every one of them a Jackson-serialised record — which is the
     // dto/UploadResult trap restated: a bound type reaches the native build only through the
     // provider chain that discovers it, and a gap there is a green `mvn verify` and a 500 in the
-    // binary. Asserting the FIELDS is what catches it; a status code would not.
+    // binary. Asserting the FIELDS is what catches it; a status code would not. The four newest
+    // families carry an Instant, a nullable Instant and — DocsVersionSummary — a Map read off a
+    // LAZY @ElementCollection, which is three more ways a native compile can lose a type.
     //
-    // The subjects are pushed through the registry and the npm registry rather than written into
-    // the database, because the sizes are the point: they are read out of the stored manifest
-    // document and off the blob files, so a fixture that skipped the wire would not prove the
-    // parse happens in the binary at all.
+    // The subjects are pushed through the registry, the npm registry, the daemon wire and the docs
+    // wire rather than written into the database, because the sizes are the point: they are read out
+    // of the stored manifest document, off the blob rows and out of a real tar.gz, so a fixture that
+    // skipped the wire would not prove the parse happens in the binary at all.
     ensureOciRepository();
     try (OciClient client = new OciClient(URI.create(root.toString()))) {
       client.push("qits/browse-it", "v1", TinyImage.of("browse-it"));
@@ -479,6 +490,19 @@ class PackagedProcessIT {
       assertEquals(
           201, npm.publish("npm", "@qits%2fbrowse-it", subject.publishDocument("latest")).statusCode());
     }
+    // Two daemon releases, header-free like every wire case here: tokenless on qits-net is the
+    // contract. Different bytes, so the version listing's per-row size is a real reading.
+    byte[] firstBinary = TinyDaemon.binary("browse-it-one", 2048);
+    byte[] secondBinary = TinyDaemon.binary("browse-it-two", 4096);
+    try (DaemonClient daemons = new DaemonClient(URI.create(root.toString()))) {
+      assertEquals(201, daemons.put(BROWSE_DAEMON, "2026.828.1", firstBinary).statusCode());
+      assertEquals(201, daemons.put(BROWSE_DAEMON, "2026.828.2", secondBinary).statusCode());
+    }
+    // Two docs versions of one scoped site. TinyBundle's font is byte-identical across bundles, so
+    // the two versions really do share a blob — which is what makes the site's size a union in the
+    // binary rather than only in the unit suite's fixture.
+    publishDocsVersion("1.0.0", "browse-a");
+    publishDocsVersion("1.0.1", "browse-b");
 
     asOperator()
         .when()
@@ -544,8 +568,90 @@ class PackagedProcessIT {
         .body("ociMirrorBytes", equalTo(0))
         .body("mavenProxyBytes", equalTo(0));
 
+    // The daemon listing. The URL reads oddly — /repositories/daemons/daemons — because the wire
+    // has no repository segment and the explorer's subject is a repository throughout.
+    asOperator()
+        .when()
+        .get("/artifacts/api/repositories/daemons/daemons")
+        .then()
+        .statusCode(200)
+        .body("daemons.find { it.name == '" + BROWSE_DAEMON + "' }.versionCount", equalTo(2))
+        .body(
+            "daemons.find { it.name == '" + BROWSE_DAEMON + "' }.latestVersion",
+            equalTo("2026.828.2"))
+        .body(
+            "daemons.find { it.name == '" + BROWSE_DAEMON + "' }.latestPublishedAt",
+            notNullValue())
+        .body("daemons.find { it.name == '" + BROWSE_DAEMON + "' }.sizeBytes", greaterThan(0));
+
+    // The digest asserted EXACTLY, not merely as a prefix: this is the string an operator pins, and
+    // it has to be the same one the publish receipt and Docker-Content-Digest carried.
+    asOperator()
+        .when()
+        .get("/artifacts/api/repositories/daemons/daemons/" + BROWSE_DAEMON + "/versions")
+        .then()
+        .statusCode(200)
+        .body("versions", hasSize(2))
+        .body("versions[0].version", equalTo("2026.828.2"))
+        .body("versions[0].digest", equalTo("sha256:" + TinyDaemon.sha256(secondBinary)))
+        .body("versions[0].sizeBytes", equalTo(secondBinary.length))
+        .body("versions[0].publishedAt", notNullValue())
+        // Nothing has downloaded it by version, so the column is null — the honest answer, and a
+        // field a native compile can still drop even though it carries nothing.
+        .body("versions[0].accessedAt", nullValue())
+        .body("versions[1].version", equalTo("2026.828.1"))
+        .body("versions[1].digest", equalTo("sha256:" + TinyDaemon.sha256(firstBinary)))
+        .body("versions[1].sizeBytes", equalTo(firstBinary.length));
+
+    int siteBytes =
+        asOperator()
+            .when()
+            .get("/artifacts/api/repositories/docs/docs")
+            .then()
+            .statusCode(200)
+            .body("sites.find { it.name == '" + BROWSE_SITE + "' }.versionCount", equalTo(2))
+            .body("sites.find { it.name == '" + BROWSE_SITE + "' }.latestVersion", equalTo("1.0.1"))
+            .body("sites.find { it.name == '" + BROWSE_SITE + "' }.latestPublishedAt", notNullValue())
+            .body("sites.find { it.name == '" + BROWSE_SITE + "' }.sizeBytes", greaterThan(0))
+            .extract()
+            .path("sites.find { it.name == '" + BROWSE_SITE + "' }.sizeBytes");
+
+    // Both spellings, on the JAX-RS surface. The docs WIRE accepts only the literal one — DocsPaths
+    // has no percent-encoded separator — so this template is the only thing answering for the other.
+    int newestVersionBytes = 0;
+    int olderVersionBytes = 0;
+    for (String spelling : new String[] {BROWSE_SITE.replace("/", "%2F"), BROWSE_SITE}) {
+      var answered =
+          asOperator()
+              .urlEncodingEnabled(false)
+              .when()
+              .get("/artifacts/api/repositories/docs/docs/" + spelling + "/versions")
+              .then()
+              .statusCode(200)
+              .body("versions", hasSize(2))
+              .body("versions[0].version", equalTo("1.0.1"))
+              .body("versions[0].fileCount", equalTo(3))
+              .body("versions[0].sizeBytes", greaterThan(0))
+              .body("versions[0].publishedAt", notNullValue())
+              .body("versions[0].accessedAt", nullValue())
+              // The LAZY @ElementCollection, read through the browse surface in the binary.
+              .body("versions[0].metadata.'git.branch.name'", equalTo("main"))
+              .body("versions[1].version", equalTo("1.0.0"))
+              .extract();
+      newestVersionBytes = answered.path("versions[0].sizeBytes");
+      olderVersionBytes = answered.path("versions[1].sizeBytes");
+    }
+    assertTrue(
+        siteBytes < newestVersionBytes + olderVersionBytes,
+        "a site is the union of its versions: the font both bundles ship is counted once, and this"
+            + " is the arithmetic measured in the binary rather than over a fixture");
+
     asOperator().when().get("/artifacts/api/repositories/no-such-repo/images").then().statusCode(404);
     asOperator().when().get("/artifacts/api/repositories/npm/images").then().statusCode(400);
+    asOperator().when().get("/artifacts/api/repositories/no-such-repo/daemons").then().statusCode(404);
+    asOperator().when().get("/artifacts/api/repositories/no-such-repo/docs").then().statusCode(404);
+    asOperator().when().get("/artifacts/api/repositories/npm/daemons").then().statusCode(400);
+    asOperator().when().get("/artifacts/api/repositories/npm/docs").then().statusCode(400);
   }
 
   @Test
@@ -651,7 +757,7 @@ class PackagedProcessIT {
     // member, and the ?meta.* filter — the whole chain a JVM-green build could still lose to a
     // native compile if anything reflective crept in. An unscoped site name on purpose, so this
     // asserts the feature rather than RestAssured's path encoding.
-    byte[] bundle = eu.wohlben.qits.docs.TinyBundle.storybookLike("packaged-meta").toTarGz();
+    byte[] bundle = TinyBundle.storybookLike("packaged-meta").toTarGz();
     given()
         .header("X-Artifacts-Meta-git.branch.name", "main")
         .header("X-Artifacts-Meta-git.commit.hash", "f".repeat(40))
@@ -677,6 +783,22 @@ class PackagedProcessIT {
         .then()
         .statusCode(200)
         .body("versions", hasSize(0));
+  }
+
+  /**
+   * One docs release through the WIRE, header-free apart from the metadata a publisher rides in
+   * with — the tokenless-on-qits-net contract every wire case here keeps.
+   */
+  private void publishDocsVersion(String version, String salt) {
+    given()
+        .urlEncodingEnabled(false)
+        .header("X-Artifacts-Meta-git.branch.name", "main")
+        .header("X-Artifacts-Meta-git.commit.hash", "a".repeat(40))
+        .body(TinyBundle.storybookLike(salt).toTarGz())
+        .when()
+        .put("/artifacts/docs/docs/" + BROWSE_SITE + "/-/" + version)
+        .then()
+        .statusCode(201);
   }
 
   private void ensureOciRepository() {

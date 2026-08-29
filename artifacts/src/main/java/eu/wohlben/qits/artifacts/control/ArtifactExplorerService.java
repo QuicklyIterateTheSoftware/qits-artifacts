@@ -1,5 +1,9 @@
 package eu.wohlben.qits.artifacts.control;
 
+import eu.wohlben.qits.artifacts.dto.DaemonSummary;
+import eu.wohlben.qits.artifacts.dto.DaemonVersionSummary;
+import eu.wohlben.qits.artifacts.dto.DocsSiteSummary;
+import eu.wohlben.qits.artifacts.dto.DocsVersionSummary;
 import eu.wohlben.qits.artifacts.dto.ImageSummary;
 import eu.wohlben.qits.artifacts.dto.ImageManifestSummary;
 import eu.wohlben.qits.artifacts.dto.ImageTagSummary;
@@ -10,6 +14,8 @@ import eu.wohlben.qits.artifacts.dto.MavenVersionSummary;
 import eu.wohlben.qits.artifacts.dto.RepositorySummary;
 import eu.wohlben.qits.artifacts.dto.StoreSummary;
 import eu.wohlben.qits.artifacts.entity.ArtifactRepository;
+import eu.wohlben.qits.artifacts.entity.DaemonBinary;
+import eu.wohlben.qits.artifacts.entity.DocsSite;
 import eu.wohlben.qits.artifacts.entity.RepositoryTypeProfile;
 import eu.wohlben.qits.artifacts.entity.NpmDistTag;
 import eu.wohlben.qits.artifacts.entity.OciManifest;
@@ -58,6 +64,17 @@ import java.util.TreeMap;
 public class ArtifactExplorerService {
 
   private static final String LATEST = "latest";
+
+  /**
+   * The digest prefix, spelled here rather than borrowed from {@code OciDigest}.
+   *
+   * <p>{@code DaemonRoutes} writes this literal into its {@code Docker-Content-Digest} header and
+   * into its publish receipt, and the daemon plane is not OCI — routing a daemon's digest through
+   * the registry's helper would make one type's wire spelling depend on another's. The two are the
+   * same four characters and must stay so; a daemon browse listing an operator pins from has to
+   * match the header the download echoed.
+   */
+  private static final String SHA256 = "sha256:";
 
   @Inject ArtifactRepositoryRepository repositories;
   @Inject ArtifactRecordRepository records;
@@ -255,6 +272,154 @@ public class ArtifactExplorerService {
   }
 
   /**
+   * The daemons of the {@code daemon-binaries} repository, by name.
+   *
+   * <p>There is no daemon table, so this is a distinct scan over {@code daemon_binary} — the shape
+   * {@link #listImages} has over {@code oci_manifest}. The wire has no repository segment (the
+   * seeded {@code daemons} row is the only namespace, {@code DaemonPaths}' one departure from npm's
+   * grammar), but the listing hangs off a repository like every other browse surface here: the
+   * explorer's subject is an {@code artifact_repository} row throughout, and inventing a second
+   * addressing scheme for the one type whose wire happens to elide it would make the SPA's
+   * repository drill-down a special case.
+   *
+   * <p>The size per daemon is the union over its own distinct blobs, so Σ(per daemon) may exceed
+   * {@link #sizeOf}'s figure for the repository — two daemons built from identical bytes share one
+   * blob. That is the same honest over-count a per-image sum has against the store union.
+   *
+   * @throws NotFoundException there is no such repository
+   * @throws BadRequestException it is not a daemon repository
+   */
+  public List<DaemonSummary> listDaemons(String repository) {
+    requireDaemons(repository);
+    List<DaemonSummary> daemons = new ArrayList<>();
+    for (String name : daemonBinaries.listNames(repository)) {
+      // Newest first, so the head row IS the latest — the ordering is the query's responsibility,
+      // and a daemon with no versions cannot be enumerated because the name came from a row.
+      List<DaemonBinary> published = daemonBinaries.listVersions(repository, name);
+      DaemonBinary newest = published.getFirst();
+      daemons.add(
+          new DaemonSummary(
+              name,
+              published.size(),
+              newest.version,
+              newest.publishedAt,
+              daemonBytes(repository, name)));
+    }
+    return daemons;
+  }
+
+  /**
+   * Every published version of one daemon, newest first.
+   *
+   * <p>The order is {@code published_at desc}, matching {@code DaemonRegistryService.listVersions} —
+   * the wire listing and this one must agree, or an operator comparing the two reads a release
+   * history that changed shape depending on which URL asked for it.
+   *
+   * <p>An unknown daemon is an empty list rather than a 404, {@link #listTags}' stance: a daemon is
+   * not a row, so there is nothing to be absent. Only the repository can be unknown.
+   */
+  public List<DaemonVersionSummary> listDaemonVersions(String repository, String name) {
+    requireDaemons(repository);
+    List<DaemonVersionSummary> versions = new ArrayList<>();
+    for (DaemonBinary row : daemonBinaries.listVersions(repository, name)) {
+      versions.add(
+          new DaemonVersionSummary(
+              row.version,
+              SHA256 + row.blobId,
+              row.sizeBytes,
+              row.publishedAt,
+              row.accessedAt));
+    }
+    return versions;
+  }
+
+  /**
+   * The documentation sites of a {@code docs} repository, by name.
+   *
+   * <p><b>Deliberately not a delegation to {@code DocsRegistryService.listCatalog}</b>, although the
+   * fold is the same one: the wire catalog answers what exists and this answers what it costs, and
+   * the catalog's omission of a size is a decision rather than a gap — qits-platform-docs renders it
+   * on an open, tokenless route and a byte figure there would be an inventory of the store to
+   * anybody who can reach it. Sharing the record would make the size either present on both or
+   * absent from both. What <em>is</em> shared is the reasoning: the rows arrive by name then
+   * newest-first, so the first row of each run is that site's newest and no comparison is needed.
+   *
+   * <p><b>{@code DocsSite.metadata} is not touched here, and must not be.</b> It is {@code LAZY} for
+   * exactly this reader — one repository's every version — so initialising it would be one extra
+   * query per row, which the {@code @BatchSize(50)} mitigates rather than removes. The version
+   * listing below is where metadata is read, over one site's handful of rows.
+   *
+   * @throws NotFoundException there is no such repository
+   * @throws BadRequestException it is not a docs repository
+   */
+  public List<DocsSiteSummary> listDocsSites(String repository) {
+    requireDocs(repository);
+    List<DocsSiteSummary> sites = new ArrayList<>();
+    String current = null;
+    long count = 0;
+    DocsSite newest = null;
+    for (DocsSite row : docsSites.listAllByRepository(repository)) {
+      if (!row.name.equals(current)) {
+        if (current != null) {
+          sites.add(siteSummary(repository, current, count, newest));
+        }
+        current = row.name;
+        count = 0;
+        newest = row;
+      }
+      count++;
+    }
+    if (current != null) {
+      sites.add(siteSummary(repository, current, count, newest));
+    }
+    return sites;
+  }
+
+  /**
+   * Every published version of one site, newest first, with the metadata its publisher rode in on.
+   *
+   * <p>This is the reader {@code DocsSite.metadata}'s laziness was written for: one site's versions,
+   * initialised inside the request context and batched fifty at a time, which is why touching it
+   * here is right and touching it in {@link #listDocsSites} would not be.
+   *
+   * <p>The order is {@code published_at desc}, matching {@code DocsRegistryService.listVersions} and
+   * the daemon listing above — the wire and the explorer must not disagree about a release history.
+   *
+   * <p>An unknown site is an empty list rather than a 404, for the reason a version <em>is</em> a
+   * row and a site is not: only the repository can be absent.
+   */
+  public List<DocsVersionSummary> listDocsVersions(String repository, String name) {
+    requireDocs(repository);
+    Map<String, Map<String, Long>> blobsByVersion = new HashMap<>();
+    for (Object[] row : docsFiles.listDistinctBlobsByVersion(repository, name)) {
+      blobsByVersion
+          .computeIfAbsent((String) row[0], ignored -> new TreeMap<>())
+          .putIfAbsent((String) row[1], (Long) row[2]);
+    }
+    List<DocsVersionSummary> versions = new ArrayList<>();
+    for (DocsSite row : docsSites.listVersions(repository, name)) {
+      versions.add(
+          new DocsVersionSummary(
+              row.version,
+              row.fileCount,
+              // The version's own union, NOT row.totalBytes — that column is the sum over the
+              // bundle as published and double-counts bytes shipped at two paths.
+              OciManifestFootprints.sum(blobsByVersion.getOrDefault(row.version, Map.of())),
+              row.publishedAt,
+              row.accessedAt,
+              Map.copyOf(row.metadata)));
+    }
+    return versions;
+  }
+
+  /** One run of the {@link #listDocsSites} fold, priced. */
+  private DocsSiteSummary siteSummary(
+      String repository, String name, long versionCount, DocsSite newest) {
+    return new DocsSiteSummary(
+        name, versionCount, newest.version, newest.publishedAt, docsBytes(repository, name));
+  }
+
+  /**
    * The figures that do not reconcile, and the gaps between them.
    *
    * <p>One disk walk and one pass over the manifests answers all of it, and that pass is {@link
@@ -315,6 +480,24 @@ public class ArtifactExplorerService {
     if (!MavenPackagesProfile.KEY.equals(repository.type)) {
       throw new BadRequestException(
           "Repository '" + name + "' is " + wireName(repository) + ", not maven-packages");
+    }
+    return repository;
+  }
+
+  private ArtifactRepository requireDaemons(String name) {
+    ArtifactRepository repository = require(name);
+    if (!DaemonBinariesProfile.KEY.equals(repository.type)) {
+      throw new BadRequestException(
+          "Repository '" + name + "' is " + wireName(repository) + ", not daemon-binaries");
+    }
+    return repository;
+  }
+
+  private ArtifactRepository requireDocs(String name) {
+    ArtifactRepository repository = require(name);
+    if (!DocsProfile.KEY.equals(repository.type)) {
+      throw new BadRequestException(
+          "Repository '" + name + "' is " + wireName(repository) + ", not docs");
     }
     return repository;
   }
@@ -450,10 +633,34 @@ public class ArtifactExplorerService {
     return OciManifestFootprints.sum(distinct);
   }
 
+  /**
+   * Distinct content of one site — the repository union, narrowed.
+   *
+   * <p>Σ over the sites of a repository is ≥ {@link #docsBytes(String)}, and the gap is whatever two
+   * sites share (a font vendored by both). Neither figure is wrong: this one answers "what would
+   * this site cost on its own", the other answers "what does this repository occupy".
+   */
+  private long docsBytes(String repository, String name) {
+    Map<String, Long> distinct = new TreeMap<>();
+    for (Object[] blob : docsFiles.listDistinctBlobs(repository, name)) {
+      distinct.putIfAbsent((String) blob[0], (Long) blob[1]);
+    }
+    return OciManifestFootprints.sum(distinct);
+  }
+
   /** Distinct content of a daemon repository — the maven half verbatim, sized from the rows. */
   private long daemonBytes(String repository) {
     Map<String, Long> distinct = new TreeMap<>();
     for (Object[] blob : daemonBinaries.listDistinctBlobs(repository)) {
+      distinct.putIfAbsent((String) blob[0], (Long) blob[1]);
+    }
+    return OciManifestFootprints.sum(distinct);
+  }
+
+  /** Distinct content of one daemon — the repository union narrowed, {@link #docsBytes}' twin. */
+  private long daemonBytes(String repository, String name) {
+    Map<String, Long> distinct = new TreeMap<>();
+    for (Object[] blob : daemonBinaries.listDistinctBlobs(repository, name)) {
       distinct.putIfAbsent((String) blob[0], (Long) blob[1]);
     }
     return OciManifestFootprints.sum(distinct);

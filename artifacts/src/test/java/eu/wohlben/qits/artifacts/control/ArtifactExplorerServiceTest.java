@@ -6,12 +6,19 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import eu.wohlben.qits.artifacts.dto.DaemonSummary;
+import eu.wohlben.qits.artifacts.dto.DaemonVersionSummary;
+import eu.wohlben.qits.artifacts.dto.DocsSiteSummary;
+import eu.wohlben.qits.artifacts.dto.DocsVersionSummary;
 import eu.wohlben.qits.artifacts.dto.ImageSummary;
 import eu.wohlben.qits.artifacts.dto.ImageTagSummary;
 import eu.wohlben.qits.artifacts.dto.PackageSummary;
 import eu.wohlben.qits.artifacts.dto.PackageVersionSummary;
 import eu.wohlben.qits.artifacts.dto.RepositorySummary;
 import eu.wohlben.qits.artifacts.dto.StoreSummary;
+import eu.wohlben.qits.artifacts.entity.DaemonBinary;
+import eu.wohlben.qits.artifacts.entity.DocsFile;
+import eu.wohlben.qits.artifacts.entity.DocsSite;
 import eu.wohlben.qits.artifacts.entity.MavenArtifact;
 import eu.wohlben.qits.artifacts.entity.NpmDistTag;
 import eu.wohlben.qits.artifacts.entity.NpmVersion;
@@ -55,6 +62,16 @@ class ArtifactExplorerServiceTest extends ArtifactsTestSupport {
   private static final int L2 = 200;
   private static final int L3 = 300;
   private static final int ORPHAN = 500;
+  // The daemon half: one binary only qits-ci-daemon has, one both daemons were built from.
+  private static final int DAEMON_OWN = 700;
+  private static final int DAEMON_SHARED = 800;
+  // The docs half: the font every bundle ships, and one chunk per version that no other has.
+  private static final int FONT = 1300;
+  private static final int CHUNK_A = 1100;
+  private static final int CHUNK_B = 1200;
+
+  private static final String SITE = "@userflows/qits-artifacts";
+  private static final String OTHER_SITE = "@qits/ui-components";
 
   /** What seedImages() built, so the expectations can be written as arithmetic over it. */
   private record Fixture(long ma1, long ma2, long mb1) {}
@@ -192,6 +209,127 @@ class ArtifactExplorerServiceTest extends ArtifactsTestSupport {
   }
 
   @Test
+  void daemonsAreEnumeratedFromTheBinaryRowsWithTheirNewestVersion() {
+    // There is no daemon table either: a daemon exists exactly as long as a row names it, so this
+    // is a distinct scan and the "latest" is the head of a newest-first list rather than a column.
+    seedDaemons();
+
+    List<DaemonSummary> daemons = explorer.listDaemons("daemons");
+    assertEquals(
+        List.of("qits-ci-daemon", "qits-workspace-daemon"),
+        daemons.stream().map(DaemonSummary::name).toList(),
+        "by name, so the listing is stable without the caller sorting it");
+    assertEquals(2, daemons.get(0).versionCount());
+    assertEquals("2026.2.0", daemons.get(0).latestVersion(), "newest by published_at, not lexical");
+    assertEquals(1, daemons.get(1).versionCount());
+    assertEquals("2026.1.0", daemons.get(1).latestVersion());
+  }
+
+  @Test
+  void aDaemonsSizeIsTheUnionOverItsVersionsAndTheRepositoryDedupesAcrossDaemons() {
+    // The dishonest number, reported honestly, on the daemon plane. qits-workspace-daemon was built
+    // from bytes identical to qits-ci-daemon's 2026.2.0 — one blob in the store — so adding the two
+    // daemons' figures counts DAEMON_SHARED twice and the repository's union must not be their sum.
+    seedDaemons();
+
+    List<DaemonSummary> daemons = explorer.listDaemons("daemons");
+    assertEquals(DAEMON_OWN + DAEMON_SHARED, daemons.get(0).sizeBytes());
+    assertEquals(DAEMON_SHARED, daemons.get(1).sizeBytes());
+
+    long repository = byName(explorer.listRepositories()).get("daemons").sizeBytes();
+    assertEquals(DAEMON_OWN + DAEMON_SHARED, repository);
+    assertEquals(
+        DAEMON_SHARED,
+        daemons.get(0).sizeBytes() + daemons.get(1).sizeBytes() - repository,
+        "the gap is exactly the binary the two daemons were built from");
+  }
+
+  @Test
+  void daemonVersionsAreNewestFirstWithTheWireDigestAndANullAccessTime() {
+    seedDaemons();
+
+    List<DaemonVersionSummary> versions = explorer.listDaemonVersions("daemons", "qits-ci-daemon");
+    assertEquals(
+        List.of("2026.2.0", "2026.1.0"),
+        versions.stream().map(DaemonVersionSummary::version).toList(),
+        "published_at desc, the order DaemonRegistryService.listVersions answers");
+    assertTrue(
+        versions.get(0).digest().startsWith("sha256:"),
+        "the spelling DaemonRoutes echoes as Docker-Content-Digest, not the stored hex");
+    assertEquals(DAEMON_SHARED, versions.get(0).sizeBytes(), "the row's own size — a version is one blob");
+    assertEquals(DAEMON_OWN, versions.get(1).sizeBytes());
+    assertNull(versions.get(0).accessedAt(), "never served since tracking began, not 'read at zero'");
+    // An unknown daemon is an empty list rather than a 404: a daemon is not a row.
+    assertEquals(List.of(), explorer.listDaemonVersions("daemons", "never-published"));
+  }
+
+  @Test
+  void docsSitesAreFoldedFromTheVersionRowsWithoutTouchingMetadata() {
+    // The same fold DocsRegistryService.listCatalog does over the same query — deliberately not a
+    // delegation to it, because the wire catalog carries no size and this one is the reason to ask.
+    seedDocs();
+
+    List<DocsSiteSummary> sites = explorer.listDocsSites("docs");
+    assertEquals(
+        List.of(OTHER_SITE, SITE),
+        sites.stream().map(DocsSiteSummary::name).toList(),
+        "by name, then newest-first inside each run — the query's single responsibility");
+    assertEquals(2, sites.get(1).versionCount());
+    assertEquals("1.0.1", sites.get(1).latestVersion());
+    assertEquals(1, sites.get(0).versionCount());
+  }
+
+  @Test
+  void aDocsSitesSizeIsTheUnionOverItsVersionsWhereTheSumDoubleCountsTheFont() {
+    // Docs versions share blobs by design: the font is byte-identical across releases and is stored
+    // once. Adding the two versions' figures counts FONT twice, which is why a site is their union.
+    seedDocs();
+
+    List<DocsVersionSummary> versions = explorer.listDocsVersions("docs", SITE);
+    assertEquals(FONT + CHUNK_B, versions.get(0).sizeBytes());
+    assertEquals(FONT + CHUNK_A, versions.get(1).sizeBytes());
+
+    DocsSiteSummary site = explorer.listDocsSites("docs").get(1);
+    assertEquals(FONT + CHUNK_A + CHUNK_B, site.sizeBytes());
+    assertEquals(
+        FONT,
+        versions.get(0).sizeBytes() + versions.get(1).sizeBytes() - site.sizeBytes(),
+        "the gap is exactly the font both versions ship");
+    assertNotEquals(
+        versions.get(0).sizeBytes() + versions.get(1).sizeBytes(),
+        site.sizeBytes(),
+        "a site is the union of its versions, never the sum of their published totals");
+
+    // And one level up: @qits/ui-components vendors the same font, so Σ(per site) over-counts it
+    // against the repository's own union in exactly the same way.
+    long repository = byName(explorer.listRepositories()).get("docs").sizeBytes();
+    assertEquals(FONT + CHUNK_A + CHUNK_B, repository);
+    assertEquals(
+        FONT,
+        site.sizeBytes() + explorer.listDocsSites("docs").get(0).sizeBytes() - repository,
+        "the gap is the font the two sites both vendor");
+  }
+
+  @Test
+  void docsVersionsCarryTheirFileCountAndTheMetadataThePublisherRodeInWith() {
+    // The reader DocsSite.metadata's laziness was written for: one site's versions, batched. The
+    // listing above must not touch it, and this one must.
+    seedDocs();
+
+    List<DocsVersionSummary> versions = explorer.listDocsVersions("docs", SITE);
+    assertEquals(
+        List.of("1.0.1", "1.0.0"),
+        versions.stream().map(DocsVersionSummary::version).toList(),
+        "published_at desc, the order DocsRegistryService.listVersions answers");
+    assertEquals(2, versions.get(0).fileCount(), "paths served, not distinct blobs");
+    assertEquals("main", versions.get(0).metadata().get("git.branch.name"));
+    assertEquals(Map.of(), versions.get(1).metadata(), "no metadata is an empty map, never null");
+    assertNull(versions.get(0).accessedAt(), "never served since tracking began");
+    // An unknown site is an empty list rather than a 404: a site is not a row.
+    assertEquals(List.of(), explorer.listDocsVersions("docs", "@qits/never-published"));
+  }
+
+  @Test
   void aVersionWhoseTarballIsGoneReportsAnUnknownSizeRatherThanZero() {
     // A row can outlive its bytes. Zero would read as an empty tarball; null says the file is not
     // there, which is the only honest answer with no size column to fall back on.
@@ -238,6 +376,15 @@ class ArtifactExplorerServiceTest extends ArtifactsTestSupport {
     repositoryService.ensure("qits", OciImagesProfile.KEY);
     assertThrows(BadRequestException.class, () -> explorer.listImages("npm"));
     assertThrows(BadRequestException.class, () -> explorer.listPackages("qits"));
+
+    // The daemon and docs surfaces answer the same two ways, and the guards are copies of
+    // requireMaven's for that reason: the split is a client-visible contract, not an internal one.
+    assertThrows(NotFoundException.class, () -> explorer.listDaemons("no-such-repo"));
+    assertThrows(NotFoundException.class, () -> explorer.listDocsSites("no-such-repo"));
+    assertThrows(NotFoundException.class, () -> explorer.listDaemonVersions("no-such-repo", "d"));
+    assertThrows(NotFoundException.class, () -> explorer.listDocsVersions("no-such-repo", "s"));
+    assertThrows(BadRequestException.class, () -> explorer.listDaemons("npm"));
+    assertThrows(BadRequestException.class, () -> explorer.listDocsSites("npm"));
   }
 
   @Test
@@ -325,6 +472,126 @@ class ArtifactExplorerServiceTest extends ArtifactsTestSupport {
               npmDistTags.persist(distTag("npm", "@qits/thing", "latest", "1.1.0"));
               npmDistTags.persist(distTag("npm", "@qits/thing", "main", "1.0.0"));
             });
+  }
+
+  /**
+   * Two daemons over two binaries, one of which both were built from.
+   *
+   * <p>{@code qits-workspace-daemon}'s only release hashes to the same blob as {@code
+   * qits-ci-daemon}'s newest — the case a per-daemon sum gets wrong. The published timestamps are
+   * deliberately not in version order, so an implementation reading "latest" lexically fails.
+   */
+  private void seedDaemons() {
+    repositoryService.ensure("daemons", DaemonBinariesProfile.KEY);
+    String own = store(filled(DAEMON_OWN, (byte) 31));
+    String shared = store(filled(DAEMON_SHARED, (byte) 32));
+    Instant now = Instant.now();
+
+    QuarkusTransaction.requiringNew()
+        .run(
+            () -> {
+              daemonBinaries.persist(
+                  daemon("qits-ci-daemon", "2026.1.0", own, DAEMON_OWN, now.minusSeconds(60)));
+              daemonBinaries.persist(
+                  daemon(
+                      "qits-ci-daemon", "2026.2.0", shared, DAEMON_SHARED, now.minusSeconds(30)));
+              daemonBinaries.persist(
+                  daemon(
+                      "qits-workspace-daemon",
+                      "2026.1.0",
+                      shared,
+                      DAEMON_SHARED,
+                      now.minusSeconds(90)));
+            });
+  }
+
+  /**
+   * Two sites over three blobs, arranged so every level of the union gives a different answer.
+   *
+   * <p>{@link #SITE} ships the font in both of its versions and one chunk in each; {@link
+   * #OTHER_SITE} vendors the same font. So a version, a site and the repository are three distinct
+   * figures over the same content — the docs restatement of what {@code seedImages} does for OCI.
+   */
+  private void seedDocs() {
+    repositoryService.ensure("docs", DocsProfile.KEY);
+    String font = store(filled(FONT, (byte) 41));
+    String chunkA = store(filled(CHUNK_A, (byte) 42));
+    String chunkB = store(filled(CHUNK_B, (byte) 43));
+    Instant now = Instant.now();
+
+    QuarkusTransaction.requiringNew()
+        .run(
+            () -> {
+              docsSites.persist(
+                  site(
+                      SITE,
+                      "1.0.0",
+                      2,
+                      FONT + CHUNK_A,
+                      now.minusSeconds(60),
+                      Map.of()));
+              docsFiles.persist(docsFile(SITE, "1.0.0", "sb-assets/font.woff2", font, FONT));
+              docsFiles.persist(docsFile(SITE, "1.0.0", "assets/a.js", chunkA, CHUNK_A));
+              docsSites.persist(
+                  site(
+                      SITE,
+                      "1.0.1",
+                      2,
+                      FONT + CHUNK_B,
+                      now.minusSeconds(30),
+                      Map.of("git.branch.name", "main")));
+              docsFiles.persist(docsFile(SITE, "1.0.1", "sb-assets/font.woff2", font, FONT));
+              docsFiles.persist(docsFile(SITE, "1.0.1", "assets/b.js", chunkB, CHUNK_B));
+              // The same font, vendored by a second site — what makes Σ(per site) over-count.
+              docsSites.persist(
+                  site(OTHER_SITE, "1.0.0", 1, FONT, now.minusSeconds(10), Map.of()));
+              docsFiles.persist(
+                  docsFile(OTHER_SITE, "1.0.0", "sb-assets/font.woff2", font, FONT));
+            });
+  }
+
+  private static DaemonBinary daemon(
+      String name, String version, String blobId, long size, Instant publishedAt) {
+    DaemonBinary row = new DaemonBinary();
+    row.repository = "daemons";
+    row.name = name;
+    row.version = version;
+    row.blobId = blobId;
+    row.sizeBytes = size;
+    row.publishedAt = publishedAt;
+    return row;
+  }
+
+  private static DocsSite site(
+      String name,
+      String version,
+      int fileCount,
+      long totalBytes,
+      Instant publishedAt,
+      Map<String, String> metadata) {
+    DocsSite row = new DocsSite();
+    row.repository = "docs";
+    row.name = name;
+    row.version = version;
+    row.fileCount = fileCount;
+    // The bundle as published — the sum this suite proves the explorer does NOT report.
+    row.totalBytes = totalBytes;
+    row.publishedAt = publishedAt;
+    row.metadata.putAll(metadata);
+    return row;
+  }
+
+  private static DocsFile docsFile(
+      String name, String version, String path, String blobId, long size) {
+    DocsFile row = new DocsFile();
+    row.repository = "docs";
+    row.name = name;
+    row.version = version;
+    row.path = path;
+    row.blobId = blobId;
+    row.sizeBytes = size;
+    row.mediaType = "application/octet-stream";
+    return row;
   }
 
   private String store(byte[] bytes) {

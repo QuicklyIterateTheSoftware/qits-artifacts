@@ -40,6 +40,24 @@ public class DaemonBinaryRepository
   }
 
   /**
+   * Every daemon this repository holds, by name — the explorer's enumeration.
+   *
+   * <p>A distinct scan rather than a table of its own, because there is no daemon table: a daemon
+   * exists exactly as long as a row names it, the same way an image exists as long as a manifest
+   * names it ({@code OciManifestRepository.listImageNames}). Ordered by name so the listing is
+   * stable across calls without the caller sorting it.
+   */
+  public List<String> listNames(String repository) {
+    return getEntityManager()
+        .createQuery(
+            "select distinct d.name from DaemonBinary d where d.repository = :repository"
+                + " order by d.name",
+            String.class)
+        .setParameter("repository", repository)
+        .getResultList();
+  }
+
+  /**
    * The distinct blobs a repository references, with their sizes — the daemon half of a size union.
    *
    * <p>{@code (blobId, sizeBytes)} pairs, sized from the row rather than from disk, exactly as
@@ -53,6 +71,27 @@ public class DaemonBinaryRepository
                 + " where d.repository = :repository",
             Object[].class)
         .setParameter("repository", repository)
+        .getResultList();
+  }
+
+  /**
+   * The same union narrowed to one daemon — what a daemon's own size is.
+   *
+   * <p>Narrowed in the query rather than filtered in Java, because {@code distinct} has to run over
+   * the narrowed set: two versions of <em>this</em> daemon built from identical bytes are one blob,
+   * and a version of a <em>different</em> daemon naming those same bytes must not be added here at
+   * all. Summing the per-daemon answers therefore over-counts against {@link
+   * #listDistinctBlobs(String)}, which is the honest arithmetic and not a bug — the same
+   * relationship a per-image union has to the store-wide one.
+   */
+  public List<Object[]> listDistinctBlobs(String repository, String name) {
+    return getEntityManager()
+        .createQuery(
+            "select distinct d.blobId, d.sizeBytes from DaemonBinary d"
+                + " where d.repository = :repository and d.name = :name",
+            Object[].class)
+        .setParameter("repository", repository)
+        .setParameter("name", name)
         .getResultList();
   }
 }
