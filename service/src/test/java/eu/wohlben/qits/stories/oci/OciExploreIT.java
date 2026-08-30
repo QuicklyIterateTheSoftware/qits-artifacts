@@ -1,10 +1,12 @@
 package eu.wohlben.qits.stories.oci;
 
 import eu.wohlben.qits.PackagedProcessIT;
+import eu.wohlben.qits.stories.support.AccessLogSource;
 import eu.wohlben.qits.stories.support.Cli;
 import eu.wohlben.qits.stories.support.StoryBrowser;
 import eu.wohlben.qits.userflows.Flow;
 import eu.wohlben.qits.userflows.Interactions;
+import eu.wohlben.qits.userflows.NetworkEdge;
 import eu.wohlben.qits.userflows.UserStory;
 import eu.wohlben.qits.userflows.UserStoryDescription;
 import eu.wohlben.qits.userflows.UserflowContext;
@@ -16,6 +18,7 @@ import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusIntegrationTest;
 import io.quarkus.test.junit.TestProfile;
 import java.net.URL;
+import java.util.List;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.condition.EnabledIf;
 
@@ -43,6 +46,9 @@ public class OciExploreIT {
   static final String CATEGORY = "qits";
   static final String SLUG = "an-operator-finds-a-pushed-image-and-the-tag-it-published";
 
+  /** How the diagram names the initiator of everything this story's browser fetches. */
+  static final String ACTOR = "an operator";
+
   @TestHTTPResource("/")
   URL root;
 
@@ -66,6 +72,12 @@ public class OciExploreIT {
 
     // The gateway's job, played for the browser, before the first navigate.
     StoryBrowser.asOperator(flow);
+    // A browser is a caller like any other and the launched process' access log records everything
+    // it fetches, so this story names its initiator too. `http` and not `package`: what this
+    // operator's browser asks for is the explorer's own screens rather than an artifact — and
+    // setting it here is also what stops a preceding package story's kind carrying over, since the
+    // framework resets the actor for us and nothing can reset a kind this repository invented.
+    AccessLogSource.attribute(ACTOR, NetworkEdge.HTTP);
 
     story.note("the image this operator is looking for was pushed by a real client, not seeded");
 
@@ -99,5 +111,11 @@ public class OciExploreIT {
     ReportAssertions.assertStepId(CATEGORY, SLUG, "repositories-listed");
     ReportAssertions.assertStepId(CATEGORY, SLUG, "image-listed");
     ReportAssertions.assertStepId(CATEGORY, SLUG, "tags-shown");
+    // No edge is pinned by name — a browser story fetches the SPA's own build-hashed bundle beside
+    // the reads it is about, and NpmExploreIT carries the long form of that decision. What every
+    // explore story does close is its initiator: every arrow here is the operator's, which is the
+    // one failure a screen assertion cannot see (a dropped attribute() call leaves the screens
+    // passing and the diagram reading `a caller`).
+    ReportAssertions.assertOnlyEdgesFrom(CATEGORY, SLUG, List.of(ACTOR));
   }
 }

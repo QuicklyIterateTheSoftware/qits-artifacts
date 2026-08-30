@@ -5,11 +5,13 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import eu.wohlben.qits.PackagedProcessIT;
+import eu.wohlben.qits.stories.support.AccessLogSource;
 import eu.wohlben.qits.stories.support.Cli;
 import eu.wohlben.qits.stories.support.StoryMedia;
 import eu.wohlben.qits.stories.support.StoryTarget;
 import eu.wohlben.qits.userflows.Commands;
 import eu.wohlben.qits.userflows.Interactions;
+import eu.wohlben.qits.userflows.NetworkEdge;
 import eu.wohlben.qits.userflows.UserStory;
 import eu.wohlben.qits.userflows.UserStoryDescription;
 import eu.wohlben.qits.userflows.UserflowContext;
@@ -60,6 +62,15 @@ public class DocsPublishIT {
   static final String BRANCH = "main";
   static final String COMMIT = "b".repeat(40);
 
+  /** How the diagram names the initiator of everything this story sends. */
+  static final String ACTOR = "a release pipeline";
+
+  /** {@code /artifacts/docs/docs/<site>} — the site's wire path, slashes spelled literally. */
+  public static final String SITE_PATH = StoryTarget.DOCS_PATH + "/docs/" + SITE;
+
+  /** The version-addressed publish target under it. */
+  public static final String VERSION_PATH = SITE_PATH + "/-/" + VERSION;
+
   private static final ObjectMapper JSON = new ObjectMapper();
 
   @TestHTTPResource("/")
@@ -77,6 +88,11 @@ public class DocsPublishIT {
   void aReleasePipelinePublishesADocumentationBundle(
       Interactions story, Commands commands, UserflowContext context) throws IOException {
     StoryTarget target = new StoryTarget(root);
+
+    // Who the access log's next line belongs to, and what kind of traffic it is. `package`: a
+    // documentation bundle is an artifact — published whole, immutable, addressed by version — and
+    // curl is only what carries it.
+    AccessLogSource.attribute(ACTOR, NetworkEdge.PACKAGE);
 
     // workDir() creates and wipes the scratch on first use, so it is taken before anything is
     // written into it.
@@ -108,12 +124,12 @@ public class DocsPublishIT {
         BRANCH,
         receipt.path("metadata").path("git.branch.name").asText(),
         "the metadata the publisher declared, echoed back");
+    // The narrative the wire cannot carry: a whole site went up in one request, and the version it
+    // created is what makes a link to these docs safe to hand out.
     story
-        .happened(
-            "a release pipeline",
-            "qits-artifacts",
-            "PUT /artifacts/docs/docs/" + SITE + "/-/" + VERSION + " -> 201")
+        .note("one PUT published the whole site at " + VERSION + ", and that version never changes")
         .as("publish-recorded");
+    AccessLogSource.awaitLogged("PUT " + VERSION_PATH);
 
     context.put("story.docs.site", SITE);
     context.put("story.docs.version", VERSION);
@@ -131,11 +147,15 @@ public class DocsPublishIT {
     ReportAssertions.assertStepId(CATEGORY, SLUG, "bundle-published");
     ReportAssertions.assertCommandOutputContains(CATEGORY, SLUG, "-X PUT", "201");
     ReportAssertions.assertStepId(CATEGORY, SLUG, "publish-recorded");
-    ReportAssertions.assertInteraction(
+    // Observed, and counted: "a version is published WHOLE" is the claim, so one edge is the
+    // evidence for it and a second would falsify the sentence the description opens with.
+    ReportAssertions.assertEdge(
         CATEGORY,
         SLUG,
-        "a release pipeline",
-        "qits-artifacts",
-        "PUT /artifacts/docs/docs/" + SITE + "/-/" + VERSION + " -> 201");
+        NetworkEdge.PACKAGE,
+        ACTOR,
+        AccessLogSource.SERVICE,
+        "PUT " + VERSION_PATH + " -> 201");
+    ReportAssertions.assertEdgeCount(CATEGORY, SLUG, 1);
   }
 }

@@ -7,10 +7,12 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import eu.wohlben.qits.PackagedProcessIT;
 import eu.wohlben.qits.registry.TinyImage;
+import eu.wohlben.qits.stories.support.AccessLogSource;
 import eu.wohlben.qits.stories.support.Cli;
 import eu.wohlben.qits.stories.support.StoryTarget;
 import eu.wohlben.qits.userflows.Commands;
 import eu.wohlben.qits.userflows.Interactions;
+import eu.wohlben.qits.userflows.NetworkEdge;
 import eu.wohlben.qits.userflows.UserStory;
 import eu.wohlben.qits.userflows.UserStoryDescription;
 import eu.wohlben.qits.userflows.UserflowContext;
@@ -24,6 +26,7 @@ import java.io.IOException;
 import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.condition.EnabledIf;
 
@@ -50,6 +53,9 @@ public class OciPullIT {
   static final String CATEGORY = "qits";
   static final String SLUG = "a-deployment-pulls-the-image-it-was-told-to-run";
 
+  /** How the diagram names the initiator of everything this story sends. */
+  static final String ACTOR = "a deployment";
+
   private static final ObjectMapper JSON = new ObjectMapper();
 
   @TestHTTPResource("/")
@@ -71,6 +77,10 @@ public class OciPullIT {
     String image = context.require("story.qits.image", String.class);
     String tag = context.require("story.qits.tag", String.class);
     String pushed = context.require("story.qits.manifest-digest", String.class);
+
+    // Whose traffic the access log's next lines are, and what kind. Read at drain time, and the
+    // actor is reset at every story border, so this never inherits the push story's pipeline.
+    AccessLogSource.attribute(ACTOR, NetworkEdge.PACKAGE);
 
     Path work = commands.workDir();
     Path pulled = work.resolve("pulled");
@@ -110,12 +120,12 @@ public class OciPullIT {
         .note("the pulled manifest digest and the layer bytes are the ones that were pushed")
         .as("digest-verified");
 
+    // The narrative half: a pull is the reverse order of a push — the tag first, then every blob
+    // the manifest names, each fetched by the digest it must hash to.
     story
-        .happened(
-            "a deployment",
-            "qits-artifacts",
-            "GET /v2/" + OciPushIT.NAME + "/manifests/" + OciPushIT.TAG + " -> 200")
+        .note("a pull resolves the tag first and then fetches each blob by its own digest")
         .as("pull-recorded");
+    AccessLogSource.awaitLogged("GET " + OciPushIT.MANIFEST_PATH);
   }
 
   /** One blob out of a pulled layout, addressed the way the layout addresses it. */
@@ -137,11 +147,18 @@ public class OciPullIT {
     ReportAssertions.assertCommand(CATEGORY, SLUG, "copy --src-tls-verify=false", 0);
     ReportAssertions.assertStepId(CATEGORY, SLUG, "digest-verified");
     ReportAssertions.assertStepId(CATEGORY, SLUG, "pull-recorded");
-    ReportAssertions.assertInteraction(
+    // The tag resolution, observed. The blob fetches beside it are digest-addressed, so their
+    // labels scrub to `{digest}` and pinning one would pin the scrubber rather than the pull; the
+    // bytes are proved in the story body, against the layer the pipeline built.
+    ReportAssertions.assertEdge(
         CATEGORY,
         SLUG,
-        "a deployment",
-        "qits-artifacts",
-        "GET /v2/" + OciPushIT.NAME + "/manifests/" + OciPushIT.TAG + " -> 200");
+        NetworkEdge.PACKAGE,
+        ACTOR,
+        AccessLogSource.SERVICE,
+        "GET " + OciPushIT.MANIFEST_PATH + " -> 200");
+    // The digest-addressed blob fetches are unpinned by name, but not unclaimed: they were this
+    // deployment's, and no other actor may appear beside them.
+    ReportAssertions.assertOnlyEdgesFrom(CATEGORY, SLUG, List.of(ACTOR));
   }
 }

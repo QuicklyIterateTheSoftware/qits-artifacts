@@ -15,8 +15,32 @@ import java.net.URL;
  * <p>Every prefix here is a literal in the service's own sources — {@code NpmPaths.BASE}, {@code
  * MavenPaths.BASE}, {@code DaemonPaths.BASE}, {@code DocsPaths.BASE} and the {@code /v2} root — so
  * this class is the stories' single copy of them rather than nine.
+ *
+ * <p>Each prefix exists in two shapes and both come off the same constant. The <b>URL</b> accessors
+ * are what a story hands a tool; the <b>PATH</b> constants are what the launched process writes into
+ * its access log, and therefore what a network assertion in a static {@code @AfterAll} — where no
+ * instance and no port exist — has to spell. Deriving one from the other is the point: a wire that
+ * moves moves in both places at once.
  */
 public final class StoryTarget {
+
+  /** {@code /artifacts/api} — the JAX-RS explorer surface, as the access log records it. */
+  public static final String API_PATH = "/artifacts/api";
+
+  /** {@code /artifacts/npm/npm/} — the npm registry's base plus the {@code npm} repository row. */
+  public static final String NPM_PATH = "/artifacts/npm/npm/";
+
+  /** {@code /artifacts/maven/maven} — the maven repository's base plus the {@code maven} row. */
+  public static final String MAVEN_PATH = "/artifacts/maven/maven";
+
+  /** {@code /artifacts/daemons} — no repository segment; the next segment is the daemon's name. */
+  public static final String DAEMONS_PATH = "/artifacts/daemons";
+
+  /** {@code /artifacts/docs} — the repository segment IS present here, unlike the daemon wire. */
+  public static final String DOCS_PATH = "/artifacts/docs";
+
+  /** {@code /v2} — the OCI Distribution API, at the host root and movable by no configuration. */
+  public static final String OCI_PATH = "/v2";
 
   /** Always with a trailing slash, so every accessor below is a plain concatenation. */
   private final String root;
@@ -36,7 +60,7 @@ public final class StoryTarget {
 
   /** {@code /artifacts/api} — the JAX-RS explorer surface, every read of it admin-only. */
   public String apiBase() {
-    return root + "artifacts/api";
+    return root + API_PATH.substring(1);
   }
 
   /**
@@ -45,7 +69,7 @@ public final class StoryTarget {
    * and the one its {@code _authToken} key is derived from.
    */
   public String npmRegistry() {
-    return root + "artifacts/npm/npm/";
+    return root + NPM_PATH.substring(1);
   }
 
   /**
@@ -60,7 +84,7 @@ public final class StoryTarget {
 
   /** The maven repository URL — the {@code maven} repository row inside {@code /artifacts/maven}. */
   public String mavenRepository() {
-    return root + "artifacts/maven/maven";
+    return root + MAVEN_PATH.substring(1);
   }
 
   /**
@@ -77,7 +101,7 @@ public final class StoryTarget {
    * this base is the daemon's name.
    */
   public String daemonBase() {
-    return root + "artifacts/daemons";
+    return root + DAEMONS_PATH.substring(1);
   }
 
   /**
@@ -85,6 +109,6 @@ public final class StoryTarget {
    * present here (unlike the daemon wire), so a caller spells {@code docsBase() + "/docs/…"}.
    */
   public String docsBase() {
-    return root + "artifacts/docs";
+    return root + DOCS_PATH.substring(1);
   }
 }

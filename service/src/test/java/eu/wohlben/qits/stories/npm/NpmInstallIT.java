@@ -6,10 +6,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import eu.wohlben.qits.PackagedProcessIT;
+import eu.wohlben.qits.stories.support.AccessLogSource;
 import eu.wohlben.qits.stories.support.Cli;
 import eu.wohlben.qits.stories.support.StoryTarget;
 import eu.wohlben.qits.userflows.Commands;
 import eu.wohlben.qits.userflows.Interactions;
+import eu.wohlben.qits.userflows.NetworkEdge;
 import eu.wohlben.qits.userflows.UserStory;
 import eu.wohlben.qits.userflows.UserStoryDescription;
 import eu.wohlben.qits.userflows.UserflowContext;
@@ -23,6 +25,7 @@ import java.io.IOException;
 import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.condition.EnabledIf;
 
@@ -42,6 +45,24 @@ public class NpmInstallIT {
 
   static final String CATEGORY = "npm";
   static final String SLUG = "a-build-installs-the-published-package-from-the-platform-registry";
+
+  /** How the diagram names the initiator of everything this story sends. */
+  static final String ACTOR = "a build";
+
+  /**
+   * The tarball's wire path — derived here rather than parsed out of the packument, because it is
+   * exactly what the diagram has to name and a story that read it back from the answer could not
+   * fail when the registry advertised the wrong one. The <b>unencoded</b> separator is npm's own
+   * spelling for a tarball URL: only a packument READ carries {@code %2f}.
+   */
+  static final String TARBALL_PATH =
+      StoryTarget.NPM_PATH
+          + NpmPublishIT.PACKAGE
+          + "/-/"
+          + NpmPublishIT.PACKAGE.substring(NpmPublishIT.PACKAGE.indexOf('/') + 1)
+          + "-"
+          + NpmPublishIT.VERSION
+          + ".tgz";
 
   private static final ObjectMapper JSON = new ObjectMapper();
 
@@ -65,6 +86,11 @@ public class NpmInstallIT {
     StoryTarget target = new StoryTarget(root);
     String name = context.require("story.npm.name", String.class);
     String version = context.require("story.npm.version", String.class);
+
+    // Whose traffic the access log's next lines are, and what kind. Set before the first request
+    // because the framework reads both when it drains, and the actor is reset at every story
+    // border — this story never inherits the publish story's pipeline.
+    AccessLogSource.attribute(ACTOR, NetworkEdge.PACKAGE);
 
     commands.env("HOME", commands.workDir().toAbsolutePath().toString());
     // A cache of its own, inside the scratch that is wiped per run: an install that answered from
@@ -120,9 +146,14 @@ public class NpmInstallIT {
         .note("node_modules holds " + NpmPublishIT.PACKAGE + " at the version the pipeline published")
         .as("contents-verified");
 
+    // The narrative half — the two requests behind an `npm install`, named the way a build engineer
+    // would. The edges themselves are the launched process' own record of them.
     story
-        .happened("a build", "qits-artifacts", "npm install " + NpmPublishIT.PACKAGE + " -> 200")
+        .note(
+            "one `npm install` is two requests: the packument that resolves the version, then the"
+                + " tarball it advertises")
         .as("install-recorded");
+    AccessLogSource.awaitLogged(TARBALL_PATH);
   }
 
   @AfterAll
@@ -137,11 +168,24 @@ public class NpmInstallIT {
     ReportAssertions.assertCommand(CATEGORY, SLUG, "install " + NpmPublishIT.PACKAGE, 0);
     ReportAssertions.assertStepId(CATEGORY, SLUG, "contents-verified");
     ReportAssertions.assertStepId(CATEGORY, SLUG, "install-recorded");
-    ReportAssertions.assertInteraction(
+    // What `npm install` actually is on the wire, observed in the launched process' access log:
+    // the packument, then the tarball it advertises. A story that only proved the exit code could
+    // not tell the two apart, and the second is the one that carries bytes.
+    ReportAssertions.assertEdge(
         CATEGORY,
         SLUG,
-        "a build",
-        "qits-artifacts",
-        "npm install " + NpmPublishIT.PACKAGE + " -> 200");
+        NetworkEdge.PACKAGE,
+        ACTOR,
+        AccessLogSource.SERVICE,
+        "GET " + StoryTarget.NPM_PATH + NpmPublishIT.ENCODED + " -> 200");
+    ReportAssertions.assertEdge(
+        CATEGORY, SLUG, NetworkEdge.PACKAGE, ACTOR, AccessLogSource.SERVICE,
+        "GET " + TARBALL_PATH + " -> 200");
+    // No count, for the reason NpmPublishIT spells out: npm's own update-notifier fetches the
+    // package named `npm` from whatever registry it was pointed at, so a third edge nothing here
+    // asked for rides along, and its status was measured differing between runs. What IS closed is
+    // the set of initiators — the update-notifier's request is still this build's, and no other
+    // actor may appear in this diagram.
+    ReportAssertions.assertOnlyEdgesFrom(CATEGORY, SLUG, List.of(ACTOR));
   }
 }

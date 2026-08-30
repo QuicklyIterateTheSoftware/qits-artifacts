@@ -6,10 +6,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import eu.wohlben.qits.PackagedProcessIT;
 import eu.wohlben.qits.registry.OciClient;
 import eu.wohlben.qits.registry.TinyImage;
+import eu.wohlben.qits.stories.support.AccessLogSource;
 import eu.wohlben.qits.stories.support.Cli;
 import eu.wohlben.qits.stories.support.StoryTarget;
 import eu.wohlben.qits.userflows.Commands;
 import eu.wohlben.qits.userflows.Interactions;
+import eu.wohlben.qits.userflows.NetworkEdge;
 import eu.wohlben.qits.userflows.UserStory;
 import eu.wohlben.qits.userflows.UserStoryDescription;
 import eu.wohlben.qits.userflows.UserflowContext;
@@ -22,6 +24,7 @@ import java.net.URI;
 import java.net.URL;
 import java.net.http.HttpResponse;
 import java.nio.file.Path;
+import java.util.List;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.condition.EnabledIf;
 
@@ -81,6 +84,13 @@ public class OciPushIT {
   /** The tag inside the on-disk layout, which is a layout annotation rather than a directory. */
   static final String LAYOUT_REF = "story";
 
+  /** How the diagram names the initiator of everything this story sends. */
+  static final String ACTOR = "a release pipeline";
+
+  /** {@code /v2/<repository>/<image>/manifests/<tag>} — the wire path, as the access log spells it. */
+  public static final String MANIFEST_PATH =
+      StoryTarget.OCI_PATH + "/" + NAME + "/manifests/" + TAG;
+
   @TestHTTPResource("/")
   URL root;
 
@@ -99,6 +109,10 @@ public class OciPushIT {
       Interactions story, Commands commands, UserflowContext context) {
     StoryTarget target = new StoryTarget(root);
 
+    // Who the access log's next lines belong to, and what kind of traffic they are. Read at drain
+    // time, so it is set before the first request — skopeo's and this story's alike.
+    AccessLogSource.attribute(ACTOR, NetworkEdge.PACKAGE);
+
     // workDir() creates and wipes the scratch on first use, so it is taken before anything is
     // written into it.
     Path work = commands.workDir();
@@ -116,7 +130,9 @@ public class OciPushIT {
     try (OciClient client = new OciClient(URI.create(root.toString()))) {
       assertEquals(200, client.versionProbe(), "the registry's version probe");
     }
-    story.happened("a release pipeline", "qits-artifacts", "GET /v2/ -> 200").as("registry-ready");
+    story
+        .note("the registry answered the version probe every image client makes first")
+        .as("registry-ready");
 
     // --insecure-policy is global and precedes the subcommand; the layout path is absolute because
     // skopeo resolves it, not this JVM. Both the path and the host ride as {} arguments, so the
@@ -152,12 +168,12 @@ public class OciPushIT {
           client.blobExists(NAME, image.layer().digest()),
           "the layer blob the client uploaded must be in the store");
     }
+    // The narrative the wire cannot carry: a push is finished when the MANIFEST lands, and the
+    // digest a deploy plan pins is the one the registry echoed rather than the one skopeo held.
     story
-        .happened(
-            "a release pipeline",
-            "qits-artifacts",
-            "PUT /v2/" + NAME + "/manifests/" + TAG + " -> 201")
+        .note("the manifest is the last thing a push writes, and the tag resolves to it from now on")
         .as("push-recorded");
+    AccessLogSource.awaitLogged("PUT " + MANIFEST_PATH);
 
     context.put("story.qits.image", IMAGE);
     context.put("story.qits.tag", TAG);
@@ -172,16 +188,31 @@ public class OciPushIT {
     ReportAssertions.assertComplete(CATEGORY, SLUG, UserflowReport.PASSED);
     ReportAssertions.assertStepId(CATEGORY, SLUG, "image-built");
     ReportAssertions.assertStepId(CATEGORY, SLUG, "registry-ready");
-    ReportAssertions.assertInteraction(
-        CATEGORY, SLUG, "a release pipeline", "qits-artifacts", "GET /v2/ -> 200");
     ReportAssertions.assertStepId(CATEGORY, SLUG, "image-pushed");
     ReportAssertions.assertCommand(CATEGORY, SLUG, "copy --dest-tls-verify=false", 0);
     ReportAssertions.assertStepId(CATEGORY, SLUG, "push-recorded");
-    ReportAssertions.assertInteraction(
+    // Observed in the launched process' own access log — which is the only place a push by an
+    // external binary exists at all, since nothing in this JVM is on that socket.
+    //
+    // No assertEdgeCount: a push is a conversation whose length is the CLIENT's — a blob already in
+    // the store is a HEAD and no upload, and how a client chunks a PATCH is its own business. What
+    // this repository owes a reader is the handshake and the manifest, and both are pinned exactly.
+    ReportAssertions.assertEdge(
         CATEGORY,
         SLUG,
-        "a release pipeline",
-        "qits-artifacts",
-        "PUT /v2/" + NAME + "/manifests/" + TAG + " -> 201");
+        NetworkEdge.PACKAGE,
+        ACTOR,
+        AccessLogSource.SERVICE,
+        "GET " + StoryTarget.OCI_PATH + "/ -> 200");
+    ReportAssertions.assertEdge(
+        CATEGORY,
+        SLUG,
+        NetworkEdge.PACKAGE,
+        ACTOR,
+        AccessLogSource.SERVICE,
+        "PUT " + MANIFEST_PATH + " -> 201");
+    // The negative half a count would have carried: however skopeo chose to chunk the blobs, every
+    // request in that conversation was this pipeline's.
+    ReportAssertions.assertOnlyEdgesFrom(CATEGORY, SLUG, List.of(ACTOR));
   }
 }

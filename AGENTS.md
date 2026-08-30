@@ -641,7 +641,9 @@ precisely because it is harness plumbing and not a step in anybody's story.
   `quarkus.quinoa.ignored-path-prefixes`.
   Its `@TestProfile` hands the launched process a database, because the shipped config deliberately
   has none: the `QITS_RESOURCE_DB_*` expressions are unresolvable outside a deployment, so without
-  the profile the binary dies at Flyway. It passes the suite's own embedded-postgres url, username
+  the profile the binary dies at Flyway. **It also turns the access log on** — that is the story
+  catalogue's network tap, and the whole of it is in `stories/support/AccessLogSource`; see "The
+  network diagram is observed, never narrated" below. It passes the suite's own embedded-postgres url, username
   and password as `-D` flags. That works across the **two classloaders** a `QuarkusTestProfile` is
   instantiated in because `EmbeddedPg` publishes its port to a system property, which the two copies
   of that class share; a static field alone would start a second postgres. Do not add a build-time
@@ -721,11 +723,87 @@ two CI media planes `ci-screenshots` and `ci-videos`. Every category is the same
   extension has already opened a report by the time the body runs, so an aborted test writes a
   FAILED report, and that report is then published in the bundle. A skipped class emits nothing at
   all, which is the honest answer for "this machine has no image client".
-- **`stories/support/` is four classes and no more.** `Cli` resolves each program once per JVM
+- **`stories/support/` is five classes and no more.** `Cli` resolves each program once per JVM
   (explicit `-D` from the pom → Quinoa's managed node dir → `PATH`); `StoryTarget` holds the single
-  copy of every wire prefix and derives them off the random `@TestHTTPResource` port; `StoryBrowser`
+  copy of every wire prefix, in both its URL shape (what a story hands a tool) and its `*_PATH`
+  shape (what the access log records, and therefore what a static `@AfterAll` asserts); `StoryBrowser`
   plays the gateway on the browser context; `StoryMedia` synthesises the PNG/webm/tarball fixtures
-  and hashes them.
+  and hashes them; `AccessLogSource` is the network tap — see below.
+
+### The network diagram is observed, never narrated
+
+Every story emits a `## Network` section beside its steps, and **no story draws it**. `Interactions`
+records notes only — its old `happened(from, to, description)` verb was removed from the framework in
+qits-userflows `2026.829.201516` (the pin in the root pom), because an edge that an author typed is
+a claim and a diagram must be evidence. Two taps feed it, and which one a story gets follows from
+where its traffic actually is:
+
+- **`TokenValidationBootstrapIT`** talks to the launched process through RestAssured, in this JVM, so
+  the framework's own `NetworkTaps.restAssured("qits-artifacts")` — installed from that class's
+  `@BeforeAll`, which is what bounds the tap to the stories it belongs to — observes every request it
+  makes, and `MockIdp`'s recording is registered as a cumulative `NetworkCapture.source` for what the
+  service sent *out*. Both ends, both assertable. Its two stories are `@Order`ed, and that is
+  load-bearing: a cursor attributes each recorded request to exactly one story, so the **startup**
+  JWKS fetch lands in whichever story drains first and that must be the story about it.
+  **The tap is the framework's, not this repository's, and no local copy of it may come back.** Four
+  service repositories had each hand-copied the same twenty lines as a `StoryNetworkFilter` beside
+  their own IT before `2026.829.201516` shipped one; this repository went straight to the shipped
+  tap and never committed a copy. Its default skip is any path with a `/q/` **segment**, right for
+  `quarkus.http.non-application-root-path=/artifacts/q` — the overload taking a `Predicate<String>`
+  is what a service that moved its probes would need instead. Do **not** install it from anywhere but
+  a story class's `@BeforeAll`: `RestAssured.filters` is JVM-global across the whole failsafe fork,
+  so an installation with no story border around it observes traffic that drains into no story.
+- **The 21 story classes** drive a real external tool — `npm`, `mvn`, `skopeo`, `curl` — over a socket
+  this JVM is not on. Nothing here can see that traffic, so the observation is the **server's own
+  access log**: `PackagedProcessIT.TargetDirState` turns on `quarkus.http.access-log.*` with the
+  pattern `%m %U %s` into an absolute directory under `service/target/`, and
+  `stories/support/AccessLogSource` parses it back into edges. Five facts about it are load-bearing:
+  - **`%U` is `HttpServerRequest.uri()`, so it carries the query string.** That is deliberate: the CI
+    media plane's golden lookup *is* a query, and `%R` (path only) would have collapsed the predicate
+    that matches and the one that does not into one arrow. Use `%R` only if that stops mattering.
+  - **Every access-log key is RUNTIME config**, so it reaches an already-built artifact as a `-D`
+    flag. A build-time key there would be silently ignored.
+  - **A story calls `AccessLogSource.attribute(actor, kind)` once, before its first request.** Both
+    halves are read when the framework *drains*, at story end — so a story gets one initiator and one
+    kind for all of its lines, which is exactly right for one tool doing one job and is the mechanism's
+    real limitation. They travel in one call because the framework resets the actor at every story
+    border and nothing can reset a kind this repository invented: setting only the actor would
+    silently inherit the previous story's kind.
+  - **`kind` is `package` for every artifact flow** — npm, maven, OCI, daemon binaries, docs bundles —
+    whatever transport carries it, and **`http`** for the CI media plane (a JSON API a run POSTs to,
+    nothing resolved or pinned by a client) and for the browser stories.
+  - **A floor is taken when the first story attributes anything**, so the log's earlier lines —
+    `PackagedProcessIT`'s, and any previous build's — belong to no story. That depends on
+    `PackagedProcessIT` sorting ahead of every story class, which `UserflowClassOrderer`'s by-name
+    tiebreak gives us (`eu.wohlben.qits.PackagedProcessIT` < `eu.wohlben.qits.stories.…`). **A new
+    non-story IT under this profile whose name sorts after `stories` would land its traffic in the
+    first story's diagram** — that is the one thing to re-check when one is added.
+- **`assertEdgeCount` is used where the count is this repository's to promise and nowhere else.** A
+  daemon publish, a docs publish and both CI intakes are one request and say so; a docs read is
+  exactly four. It is deliberately absent from the npm, maven and OCI stories, and the reason is the
+  same each time — how many requests a publish or a resolve *is* belongs to the client. Measured:
+  `npm` also fetches the package named `npm` from whatever registry it is pointed at (its
+  update-notifier), answering 200 in one invocation and 404 in the next against the same store; a
+  `deploy-file` is eleven requests including a checksum sidecar per algorithm; a push may skip a blob
+  upload it finds already stored. Those diagrams record what really happened and the assertions pin
+  the edges that *are* the story.
+- **Where the count is the client's, `assertOnlyEdgesFrom` is what closes the diagram instead**, and
+  every story without an `assertEdgeCount` carries one. It says nobody else initiated anything —
+  which is still exactly this repository's promise when the *number* of requests is npm's or maven's
+  or skopeo's — and the failure it catches is the one no presence check can: a story that forgot
+  `AccessLogSource.attribute` leaks the framework's default `a caller` into its diagram while every
+  other assertion in the class still passes. Six stories use it that way, and
+  `TokenValidationBootstrapIT` uses it over the two actor sets its two stories admit.
+- **The browser stories pin no edge BY NAME**, and that is a decision: a `*ExploreIT` fetches the
+  SPA's own bundle beside the reads it is about, and those filenames carry a build hash. What they
+  do pin is their initiator — `assertOnlyEdgesFrom(CATEGORY, SLUG, List.of(ACTOR))`, so the diagram
+  provably reads `an operator -> qits-artifacts` rather than `a caller`. That is the whole network
+  claim a browser story can honestly make, and it is the one a screen assertion cannot make for it.
+- **A step id survives the migration.** Where a story used to close with `happened(…).as("x-recorded")`
+  it now closes with `note(…).as("x-recorded")` — the narrative the wire cannot carry (which package,
+  why an open surface is safe, that a filter matching nothing is still an answer) — and the edge is
+  asserted in `@AfterAll` instead. `(qits-net trust)` used to ride inside an edge label in
+  `TokenValidationBootstrapIT`; a posture is a reason, not an observation, so it is a note now.
 - **The fingerprint rule for `Commands` templates: programs and URLs are `{}` ARGUMENTS, never
   spelled into the template.** A story writes `commands.run("{} publish --registry {}", Cli.npm(),
   target.npmRegistry())`. The display line then shows the real program and the real URL while the

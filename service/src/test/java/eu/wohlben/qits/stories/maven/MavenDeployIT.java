@@ -6,11 +6,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import eu.wohlben.qits.PackagedProcessIT;
 import eu.wohlben.qits.maven.MavenClient;
 import eu.wohlben.qits.maven.TinyArtifact;
+import eu.wohlben.qits.stories.support.AccessLogSource;
 import eu.wohlben.qits.stories.support.Cli;
 import eu.wohlben.qits.stories.support.StoryMedia;
 import eu.wohlben.qits.stories.support.StoryTarget;
 import eu.wohlben.qits.userflows.Commands;
 import eu.wohlben.qits.userflows.Interactions;
+import eu.wohlben.qits.userflows.NetworkEdge;
 import eu.wohlben.qits.userflows.UserStory;
 import eu.wohlben.qits.userflows.UserStoryDescription;
 import eu.wohlben.qits.userflows.UserflowContext;
@@ -25,6 +27,7 @@ import java.net.URL;
 import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.condition.EnabledIf;
 
@@ -66,6 +69,9 @@ public class MavenDeployIT {
   static final String CATEGORY = "maven";
   static final String SLUG = "a-release-pipeline-deploys-a-jar-to-the-platform-repository";
 
+  /** How the diagram names the initiator of everything this story sends. */
+  static final String ACTOR = "a release pipeline";
+
   /** The subject the whole maven chain shares; the resolve and explore stories read it back. */
   public static final String GROUP_ID = "eu.wohlben.qits.stories";
 
@@ -88,6 +94,13 @@ public class MavenDeployIT {
           + "-"
           + VERSION
           + ".jar";
+
+  /**
+   * The coordinate-level {@code maven-metadata.xml}, repository-relative — the document the store
+   * <b>derives</b> from the files it holds rather than storing what a client PUT.
+   */
+  public static final String METADATA_PATH =
+      GROUP_ID.replace('.', '/') + "/" + ARTIFACT_ID + "/maven-metadata.xml";
 
   /**
    * The jar's content, and it is <b>fixed rather than salted</b> — the one place this category
@@ -116,6 +129,11 @@ public class MavenDeployIT {
   void aReleasePipelineDeploysAJar(
       Interactions story, Commands commands, UserflowContext context) throws IOException {
     StoryTarget target = new StoryTarget(root);
+
+    // Who the launched process' access log is about to be recording, and what kind of traffic it
+    // is. Both are read when the framework drains at story end, and the actor is reset at every
+    // story border, so this is set before the first request rather than beside its assertion.
+    AccessLogSource.attribute(ACTOR, NetworkEdge.PACKAGE);
 
     // workDir() creates and wipes the scratch on first use, so it is taken before anything is
     // written into it.
@@ -150,8 +168,7 @@ public class MavenDeployIT {
     // of those reads because the plugin PUT one of its own and the repository DERIVES the document
     // it serves from the files it holds — so this asserts the server rather than the echo.
     try (MavenClient maven = new MavenClient(URI.create(root.toString()))) {
-      String coordinateDir = GROUP_ID.replace('.', '/') + "/" + ARTIFACT_ID;
-      HttpResponse<String> metadata = maven.getText("maven", coordinateDir + "/maven-metadata.xml");
+      HttpResponse<String> metadata = maven.getText("maven", METADATA_PATH);
       assertEquals(200, metadata.statusCode(), metadata.body());
       assertTrue(
           metadata.body().contains("<release>" + VERSION + "</release>"),
@@ -160,12 +177,16 @@ public class MavenDeployIT {
           metadata.body().contains("<version>" + VERSION + "</version>"),
           () -> "the derived metadata must list the version:\n" + metadata.body());
     }
+    // The narrative the wire cannot carry: which coordinate, and that the document behind it is the
+    // repository's own arithmetic rather than the plugin's upload. The edges are observed.
     story
-        .happened(
-            "a release pipeline",
-            "qits-artifacts",
-            "PUT /artifacts/maven/maven/" + JAR_PATH + " -> 201")
+        .note(
+            "the repository now holds " + COORDINATE + ":" + VERSION + " and derives its"
+                + " maven-metadata.xml from the files it received")
         .as("deploy-recorded");
+    // The access log is written off the request thread, so the deploy's last line can still be in
+    // flight. Waiting for the jar's PUT is what keeps this story's edges in this story's diagram.
+    AccessLogSource.awaitLogged("PUT " + StoryTarget.MAVEN_PATH + "/" + JAR_PATH);
 
     context.put("story.maven.coordinate", COORDINATE);
     context.put("story.maven.version", VERSION);
@@ -222,11 +243,30 @@ public class MavenDeployIT {
     ReportAssertions.assertStepId(CATEGORY, SLUG, "artifact-deployed");
     ReportAssertions.assertCommand(CATEGORY, SLUG, "deploy-file", 0);
     ReportAssertions.assertStepId(CATEGORY, SLUG, "deploy-recorded");
-    ReportAssertions.assertInteraction(
+    // Observed, not claimed: the launched process' own access log. `package`, because a deploy IS a
+    // package-manager exchange whatever transport carries it.
+    //
+    // No assertEdgeCount here, and that is the honest answer rather than an omission: a
+    // `deploy-file` is a whole conversation — the artifacts, a checksum sidecar per algorithm the
+    // client is configured for, the metadata merge and the read that precedes it — and how many
+    // requests that is belongs to the maven the machine happens to run. What this repository owes a
+    // reader is that the jar and the derived document are on the wire, and that is asserted exactly.
+    ReportAssertions.assertEdge(
         CATEGORY,
         SLUG,
-        "a release pipeline",
-        "qits-artifacts",
-        "PUT /artifacts/maven/maven/" + JAR_PATH + " -> 201");
+        NetworkEdge.PACKAGE,
+        ACTOR,
+        AccessLogSource.SERVICE,
+        "PUT " + StoryTarget.MAVEN_PATH + "/" + JAR_PATH + " -> 201");
+    ReportAssertions.assertEdge(
+        CATEGORY,
+        SLUG,
+        NetworkEdge.PACKAGE,
+        ACTOR,
+        AccessLogSource.SERVICE,
+        "GET " + StoryTarget.MAVEN_PATH + "/" + METADATA_PATH + " -> 200");
+    // The half of "exactly this and nothing else" that survives the count belonging to the client:
+    // every one of that conversation's requests was this pipeline's, whatever their number.
+    ReportAssertions.assertOnlyEdgesFrom(CATEGORY, SLUG, List.of(ACTOR));
   }
 }
