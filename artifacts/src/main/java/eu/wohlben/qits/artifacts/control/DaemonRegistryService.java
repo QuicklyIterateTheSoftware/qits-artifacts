@@ -1,9 +1,10 @@
 package eu.wohlben.qits.artifacts.control;
 
-import eu.wohlben.qits.artifacts.entity.ArtifactRepository;
+import eu.wohlben.qits.blobstore.control.ArtifactAccessTracker;
+import eu.wohlben.qits.blobstore.entity.ArtifactRepository;
 import eu.wohlben.qits.artifacts.entity.DaemonBinary;
 import eu.wohlben.qits.artifacts.error.DaemonException;
-import eu.wohlben.qits.artifacts.persistence.ArtifactRepositoryRepository;
+import eu.wohlben.qits.blobstore.persistence.ArtifactRepositoryRepository;
 import eu.wohlben.qits.artifacts.persistence.DaemonBinaryRepository;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.context.control.ActivateRequestContext;

@@ -1,5 +1,6 @@
 package eu.wohlben.qits.artifacts.control;
 
+import eu.wohlben.qits.blobstore.control.BlobReclaim;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 

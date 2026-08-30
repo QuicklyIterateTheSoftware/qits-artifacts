@@ -1,10 +1,10 @@
 package eu.wohlben.qits.artifacts.gc;
 
-import eu.wohlben.qits.artifacts.control.ArtifactRepositoryService;
+import eu.wohlben.qits.blobstore.control.ArtifactRepositoryService;
 import eu.wohlben.qits.artifacts.control.LiveBlobCensus;
-import eu.wohlben.qits.artifacts.entity.ArtifactRepository;
-import eu.wohlben.qits.artifacts.control.RepositoryTypeProfiles;
-import eu.wohlben.qits.artifacts.entity.RepositoryTypeProfile;
+import eu.wohlben.qits.blobstore.entity.ArtifactRepository;
+import eu.wohlben.qits.blobstore.control.RepositoryTypeProfiles;
+import eu.wohlben.qits.blobstore.entity.RepositoryTypeProfile;
 import eu.wohlben.qits.artifacts.gc.dto.GcPlanReport;
 import eu.wohlben.qits.artifacts.gc.dto.GcRepositoriesPlanResponse;
 import eu.wohlben.qits.artifacts.gc.dto.GcRepositoryPlanReport;
@@ -124,7 +124,7 @@ public class GcPlanner {
    * it does in a full report, which is what makes the figures here identical to this repository's
    * row in {@link #planForRepositories()} rather than merely similar.
    *
-   * @throws eu.wohlben.qits.artifacts.error.NotFoundException no repository of that name
+   * @throws eu.wohlben.qits.blobstore.error.NotFoundException no repository of that name
    */
   public GcRepositoryPlanReport planForRepository(String name) {
     ArtifactRepository row = repositories.require(name);

@@ -1,8 +1,8 @@
 package eu.wohlben.qits.artifacts.gc;
 
-import eu.wohlben.qits.artifacts.control.ArtifactRepositoryService;
-import eu.wohlben.qits.artifacts.control.BlobDiskIndex;
-import eu.wohlben.qits.artifacts.control.BlobStore;
+import eu.wohlben.qits.blobstore.control.ArtifactRepositoryService;
+import eu.wohlben.qits.blobstore.control.BlobDiskIndex;
+import eu.wohlben.qits.blobstore.control.BlobStore;
 import eu.wohlben.qits.artifacts.control.LiveBlobCensus;
 import eu.wohlben.qits.artifacts.control.OciMediaTypes;
 import eu.wohlben.qits.artifacts.entity.DaemonBinary;
@@ -16,9 +16,9 @@ import eu.wohlben.qits.artifacts.entity.OciTag;
 import eu.wohlben.qits.artifacts.control.MavenPackagesProfile;
 import eu.wohlben.qits.artifacts.control.NpmPackagesProfile;
 import eu.wohlben.qits.artifacts.control.OciImagesProfile;
-import eu.wohlben.qits.artifacts.entity.RepositoryTypeProfile;
-import eu.wohlben.qits.artifacts.persistence.ArtifactRecordRepository;
-import eu.wohlben.qits.artifacts.persistence.ArtifactRepositoryRepository;
+import eu.wohlben.qits.blobstore.entity.RepositoryTypeProfile;
+import eu.wohlben.qits.blobstore.persistence.ArtifactRecordRepository;
+import eu.wohlben.qits.blobstore.persistence.ArtifactRepositoryRepository;
 import eu.wohlben.qits.artifacts.persistence.DaemonBinaryRepository;
 import eu.wohlben.qits.artifacts.persistence.MavenArtifactRepository;
 import eu.wohlben.qits.artifacts.persistence.MavenProxyMetadataRepository;

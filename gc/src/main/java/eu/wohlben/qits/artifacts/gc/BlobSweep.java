@@ -1,7 +1,7 @@
 package eu.wohlben.qits.artifacts.gc;
 
-import eu.wohlben.qits.artifacts.control.BlobReclaim;
-import eu.wohlben.qits.artifacts.control.BlobStore;
+import eu.wohlben.qits.blobstore.control.BlobReclaim;
+import eu.wohlben.qits.blobstore.control.BlobStore;
 import eu.wohlben.qits.artifacts.control.LiveBlobCensus;
 import eu.wohlben.qits.artifacts.gc.dto.GcSweepOutcome;
 import eu.wohlben.qits.artifacts.gc.dto.GcSweepPlan;

@@ -8,10 +8,10 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.artifacts.control.LiveBlobCensus;
-import eu.wohlben.qits.artifacts.control.CiVideosProfile;
+import eu.wohlben.qits.blobstore.control.CiVideosProfile;
 import eu.wohlben.qits.artifacts.control.NpmPackagesProfile;
 import eu.wohlben.qits.artifacts.control.OciImagesProfile;
-import eu.wohlben.qits.artifacts.entity.RepositoryTypeProfile;
+import eu.wohlben.qits.blobstore.entity.RepositoryTypeProfile;
 import eu.wohlben.qits.artifacts.gc.dto.GcIdentity;
 import eu.wohlben.qits.artifacts.gc.dto.GcPlanReport;
 import eu.wohlben.qits.artifacts.gc.dto.GcPlanSummary;
@@ -517,7 +517,7 @@ class GcPlanTest extends GcFixture {
     assertNotNull(report.untouchable().reason());
 
     assertThrows(
-        eu.wohlben.qits.artifacts.error.NotFoundException.class,
+        eu.wohlben.qits.blobstore.error.NotFoundException.class,
         () -> planner.planForRepository("no-such-repository"),
         "a name that is not a repository is a 404, never a wider scope");
   }

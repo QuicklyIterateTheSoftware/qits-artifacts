@@ -1,5 +1,6 @@
 package eu.wohlben.qits.artifacts.control;
 
+import eu.wohlben.qits.blobstore.control.MediaTypeSniffer;
 import java.util.Locale;
 import java.util.Map;
 

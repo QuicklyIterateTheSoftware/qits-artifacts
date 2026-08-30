@@ -1,7 +1,7 @@
 package eu.wohlben.qits.artifacts.gc;
 
 import eu.wohlben.qits.artifacts.control.LiveBlobCensus;
-import eu.wohlben.qits.artifacts.entity.RepositoryTypeProfile;
+import eu.wohlben.qits.blobstore.entity.RepositoryTypeProfile;
 import jakarta.inject.Inject;
 import java.time.Instant;
 import java.util.List;

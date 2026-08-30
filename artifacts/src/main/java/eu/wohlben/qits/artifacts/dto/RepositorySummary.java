@@ -1,5 +1,6 @@
 package eu.wohlben.qits.artifacts.dto;
 
+import eu.wohlben.qits.blobstore.dto.ArtifactRepositoryDto;
 import java.time.Instant;
 
 /**

@@ -1,11 +1,11 @@
 package eu.wohlben.qits.artifacts.api;
 
 import eu.wohlben.qits.artifacts.control.ArtifactExplorerService;
-import eu.wohlben.qits.artifacts.control.ArtifactRepositoryService;
-import eu.wohlben.qits.artifacts.dto.ArtifactRepositoryDto;
-import eu.wohlben.qits.artifacts.control.RepositoryTypeProfiles;
+import eu.wohlben.qits.blobstore.control.ArtifactRepositoryService;
+import eu.wohlben.qits.blobstore.dto.ArtifactRepositoryDto;
+import eu.wohlben.qits.blobstore.control.RepositoryTypeProfiles;
 import eu.wohlben.qits.artifacts.dto.RepositorySummary;
-import eu.wohlben.qits.artifacts.mapper.ArtifactRepositoryMapper;
+import eu.wohlben.qits.blobstore.mapper.ArtifactRepositoryMapper;
 import jakarta.inject.Inject;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotNull;

@@ -1,6 +1,6 @@
 package eu.wohlben.qits.docs;
 
-import eu.wohlben.qits.artifacts.control.BlobStore;
+import eu.wohlben.qits.blobstore.control.BlobStore;
 import eu.wohlben.qits.artifacts.control.DocsMediaTypes;
 import eu.wohlben.qits.artifacts.control.DocsRegistryService.BundleFile;
 import eu.wohlben.qits.artifacts.error.DocsException;

@@ -1,7 +1,7 @@
 package eu.wohlben.qits.artifacts.gc;
 
 import eu.wohlben.qits.artifacts.control.NpmPackagesProfile;
-import eu.wohlben.qits.artifacts.entity.RepositoryTypeProfile;
+import eu.wohlben.qits.blobstore.entity.RepositoryTypeProfile;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;

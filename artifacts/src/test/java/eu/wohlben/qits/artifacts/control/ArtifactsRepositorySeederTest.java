@@ -1,5 +1,8 @@
 package eu.wohlben.qits.artifacts.control;
 
+import eu.wohlben.qits.blobstore.control.ArtifactRepositoryService;
+import eu.wohlben.qits.blobstore.control.CiScreenshotsProfile;
+import eu.wohlben.qits.blobstore.control.CiVideosProfile;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import io.quarkus.test.junit.QuarkusTest;

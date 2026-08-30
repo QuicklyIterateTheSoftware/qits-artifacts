@@ -1,4 +1,4 @@
-# qits-artifacts — working notes
+# qits-artifacts-service — working notes
 
 Read `README.md` first: it defines what this repo owns (the hosted byte plane — the OCI registry at
 `/v2`, the npm registry at `/artifacts/npm`, the maven repository at `/artifacts/maven`, the daemon
@@ -6,7 +6,7 @@ binaries, the docs bundles and the CI media, plus the GC over all of them), the 
 config surface. This file is the working conventions on top of it.
 
 **Git hosting is not here.** The smart-HTTP host, its DFS storage over blobs and its post-receive
-fan-out are **qits-githost**'s. No `eu.wohlben.qits.githost` package, no `git-storage` module and no
+fan-out are **qits-githost-service**'s. No `eu.wohlben.qits.githost` package, no `git-storage` module and no
 JGit dependency remain in this tree, so anything below that names a git route, a pack table or a
 push hook is a fact about that repository and not about this one. The lineage no longer *creates*
 its three tables either — the PostgreSQL baseline dropped them; see "Schema changes".
@@ -136,7 +136,7 @@ covers them. `RegistryTest`, `NpmRegistryTest`, `MavenRegistryTest`, `DaemonRegi
 their paths out absolutely.
 
 **The post-receive fan-out is not an address this service holds any more.** `qits.ci.intake-url`,
-`qits.projects.intake-url` and `qits.post-receive.retry-delays` went to qits-githost with the hook
+`qits.projects.intake-url` and `qits.post-receive.retry-delays` went to qits-githost-service with the hook
 that fired them, and there they are durable domain events rather than an HTTP call. Setting any of
 them on a deployment of this service does nothing.
 
@@ -144,9 +144,15 @@ them on a deployment of this service does nothing.
 
 One top-level package with a subpackage kept deliberately apart from it, plus the wire stacks:
 
-- `eu.wohlben.qits.artifacts.*` — the blob store. `artifacts/` holds `entity`, `persistence`, `dto`,
-  `mapper`, `control`, `error`; `service/` holds only `api`. Entities are Panache active-record with
-  public fields; mappers are MapStruct `@Mapper(componentModel = "jakarta")`.
+- `eu.wohlben.qits.artifacts.*` — what this repository owns: the docs and daemon registries, the
+  store explorer, the live blob census and the seeder. `artifacts/` holds `entity`, `persistence`,
+  `dto`, `mapper`, `control`, `error`; `service/` holds only `api`. Entities are Panache
+  active-record with public fields; mappers are MapStruct `@Mapper(componentModel = "jakarta")`.
+  - The blob store itself is **not** in this package any more. It lives in the `qits-blobstore` jar
+    under `eu.wohlben.qits.blobstore.*` (same six subpackages) since the store folded into the
+    qits-registries reactor. Its config keys stay `qits.artifacts.*`. The three format jars keep
+    `eu.wohlben.qits.artifacts.*`, so both prefixes are on the classpath and a package claim that
+    names one name is claiming half.
   - `eu.wohlben.qits.artifacts.gc` and `.gc.dto` (module `gc`) are **garbage collection** — a
     process modelled from within this service rather than artifacts domain (the 2026-08-05 GC
     settlement). A subpackage rather than a sibling top-level name, and
@@ -228,7 +234,7 @@ argument for each:
    rewritten; qits-githost owns that data in its own database, and a fresh baseline is the one place
    they could go.
 2. **The four cache tables stay, and stay empty** — `oci_mirror_upstream`, `oci_mirror_tag_check`,
-   `npm_proxy_packument`, `maven_proxy_metadata`. The caches went to qits-platform-mirror, but their
+   `npm_proxy_packument`, `maven_proxy_metadata`. The caches went to qits-mirror-platform-service, but their
    repositories are live beans on the qits-registries jars: excluding a profile from bean discovery
    does not unregister a DAO. `OciRegistryService.resolveForPull` reads the upstream table on every
    pull whose first segment names no repository row, and `collectTag` deletes a freshness row for
@@ -252,15 +258,16 @@ because every `@QuarkusTest` here wipes the tables, so what the chain leaves beh
 all of them.
 
 **The blob store's three tables are in this lineage too** (`blob`, `blob_content`, `blob_chunk`),
-copied verbatim from qits-blobstore's `src/main/resources/db/blobstore-tables.sql` — which is what
+copied verbatim from `qits-registries-javalib`'s `blobstore/src/main/resources/db/blobstore-tables.sql` — which is what
 that library tells its consumers to do, and which its own suite applies unedited so the DDL is
 exercised on every build of the jar. Keep the text identical, so a later diff between the two is
 readable. `qits.artifacts.blobs-datasource=artifacts` is what points the store at them.
 
 The persistence unit is the artifacts jar's own: `quarkus.hibernate-orm.artifacts.packages` names
-`eu.wohlben.qits.artifacts.entity` in that jar's `microprofile-config.properties`, and `service`
-no longer overrides it — the override existed only to add the git host's entity package, and it
-**replaces** rather than extends, so re-adding one means spelling both.
+`eu.wohlben.qits.blobstore.entity` AND `eu.wohlben.qits.artifacts.entity` in that jar's
+`microprofile-config.properties` — the store's entities and the formats' plus this repo's — and
+`service` no longer overrides it. The key **replaces** rather than extends, so every name it must
+cover is spelled on that one line.
 
 **`@Lob` is banned on every entity this service maps.** On H2 it was a clob and everything agreed;
 on PostgreSQL it means a LARGE OBJECT, which Hibernate binds as an oid and the driver refuses to
@@ -322,8 +329,8 @@ collection" section is the contract; these are the rules that get "helpfully" re
   cache holds re-fetchable content, so everything unaccessed past the window goes) and
   `OwnArtifactsStrategy` (own artifacts keep the last 2 released versions per identity group, the
   rest ages out), mapped onto types by configuration. **Only `OwnArtifactsStrategy` is in this
-  repository** — the cache engine and its three adapters went to qits-platform-mirror with the types
-  they collect, in phase 4 of the byte-plane split. The doctrine is stated in both halves anyway,
+  repository** — the cache engine and its three adapters went to qits-mirror-platform-service with
+  the types they collect, in phase 4 of the byte-plane split. The doctrine is stated in both halves anyway,
   because the rule below is what stops the surviving engine being re-split. **The superseded rule was "one bespoke
   strategy per type, no shared policy code, no retention-rule framework"** — it is history, and
   re-splitting an engine back into per-type rules is now the wrong change, in the same words the
@@ -490,8 +497,8 @@ Two things are npm's alone, and the plan is explicit that docker needs neither:
   pointing at a version the packument no longer lists is a broken package to every npm client). It
   shipped ahead of its caller so the tombstone was never a step someone had to remember.
   The proxy's twins — `evictProxiedVersion`/`evictProxiedPackument`, which write **no** tombstone —
-  are still on the shared jar but have no caller here; they went to qits-platform-mirror with the
-  cache engine.
+  are still on the shared jar but have no caller here; they went to qits-mirror-platform-service
+  with the cache engine.
   `DaemonRegistryService.collect` is the daemon twin behind `DaemonRegistryCollection`, and it
   deliberately writes **no** tombstone.
   `OciRegistryService.collectTag`/`collectManifest` are the OCI twins — package-private behind
@@ -551,7 +558,7 @@ precisely because it is harness plumbing and not a step in anybody's story.
   `eu.wohlben.qits.stories` are **userflows** and `target/userstories/` is a build product a plain
   verify regenerates. `.config/qits/ci-event-userflows.yml` runs the
   same verify per commit in ONE step on `userflows-base` (Maven + baked Chromium + skopeo,
-  `user: pwuser` for zonky's initdb, the step-image contract since qits-oci 2026.828.162434) — one step because
+  `user: pwuser` for zonky's initdb, the step-image contract since qits-build-images-oci 2026.828.162434) — one step because
   step containers share no workspace (each clones for itself), so the SPA bundle must be built in
   the same container that packages it: the lockfile origin swap runs in the script and Quinoa's
   managed node (the pinned 22.22.0) does the real `npm ci` + build with `npm_config_*` registries
@@ -597,7 +604,7 @@ precisely because it is harness plumbing and not a step in anybody's story.
   for the packument routes specifically — it re-encodes a path, and the whole question there is
   whether `@qits%2fangular` reaches the router with its escape intact. **There is no network**, and
   there is no proxy suite here any more — `StubNpmRegistry`, `StubMavenRepository` and
-  `StubOciRegistry` went to qits-platform-mirror with the cache halves they stand in for. The rule
+  `StubOciRegistry` went to qits-mirror-platform-service with the cache halves they stand in for. The rule
   they were built on still governs anything new: a stub is driven over HTTP rather than by touching
   its fields, because Quarkus instantiates a `QuarkusTestProfile` in **two** classloaders, so a
   static singleton exists twice and the application ends up talking to a different instance than the
@@ -931,7 +938,7 @@ where its traffic actually is:
   `qits.artifacts.daemon.max-binary-size`, config knobs
   because they have to move with the wire ceiling.
 The five bullets that follow are about the OCI **mirror** path. It is not this service's feature any
-more — the type, the upstream admin API and the eviction went to qits-platform-mirror — but the code
+more — the type, the upstream admin API and the eviction went to qits-mirror-platform-service — but the code
 is on this classpath regardless, in the `qits-registries-oci` jar, and excluding a profile does not
 unregister a route's `@Inject`. **V14 took the rows away, which is what makes the path unreachable
 rather than merely unwanted** — no `oci-mirror` row resolves and `mirrors.hub()` answers nothing, so

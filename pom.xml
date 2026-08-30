@@ -44,7 +44,7 @@
          and the mandatory -Dqits.variant=oauth|forwardauth|local auth profiles. -->
     <groupId>eu.wohlben.qits</groupId>
     <artifactId>qits-artifacts</artifactId>
-    <version>2026.830.144406</version>
+    <version>2026.830.191748</version>
     <packaging>pom</packaging>
     <name>qits-artifacts</name>
 
@@ -66,9 +66,13 @@
 
              The blob store's only backend is PostgreSQL now, and every consumer moved with it in the
              same campaign. That campaign has released, so both are pinned at their calver. The two
-             move together: qits-registries is built against this blobstore. -->
-        <qits.blobstore.version>2026.827.71232</qits.blobstore.version>
-        <qits.registries.version>2026.818.45443</qits.registries.version>
+             move together: qits-registries is built against this blobstore.
+             ONE VERSION FOR BOTH since 2026.830.175757: the store builds inside the qits-registries
+             reactor and ships on its version. The coordinate is unchanged, the config keys are
+             unchanged, and the store's packages are eu.wohlben.qits.blobstore.* — so the pins
+             cannot be moved one at a time. -->
+        <qits.blobstore.version>2026.830.175757</qits.blobstore.version>
+        <qits.registries.version>2026.830.175757</qits.registries.version>
         <!-- The platform's datasource resilience baseline: qits-db-core carries PatientPgDriver,
              which the datasource block in the artifacts jar's microprofile-config.properties names,
              and DbRetry. Published by libs/qits-integrations-quarkus, so it is one of the few

@@ -1,7 +1,7 @@
 package eu.wohlben.qits.artifacts.api;
 
-import eu.wohlben.qits.artifacts.control.ArtifactListFilter;
-import eu.wohlben.qits.artifacts.error.BadRequestException;
+import eu.wohlben.qits.blobstore.control.ArtifactListFilter;
+import eu.wohlben.qits.blobstore.error.BadRequestException;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 

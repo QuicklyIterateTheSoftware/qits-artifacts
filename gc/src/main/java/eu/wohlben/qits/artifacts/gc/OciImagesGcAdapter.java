@@ -2,12 +2,12 @@ package eu.wohlben.qits.artifacts.gc;
 
 import eu.wohlben.qits.artifacts.control.OciManifestFootprints;
 import eu.wohlben.qits.artifacts.control.OciRegistryCollection;
-import eu.wohlben.qits.artifacts.entity.ArtifactRepository;
+import eu.wohlben.qits.blobstore.entity.ArtifactRepository;
 import eu.wohlben.qits.artifacts.entity.OciManifest;
 import eu.wohlben.qits.artifacts.entity.OciTag;
 import eu.wohlben.qits.artifacts.control.OciImagesProfile;
 import eu.wohlben.qits.artifacts.gc.dto.GcIdentity;
-import eu.wohlben.qits.artifacts.persistence.ArtifactRepositoryRepository;
+import eu.wohlben.qits.blobstore.persistence.ArtifactRepositoryRepository;
 import eu.wohlben.qits.artifacts.persistence.OciManifestRepository;
 import eu.wohlben.qits.artifacts.persistence.OciTagRepository;
 import jakarta.inject.Inject;

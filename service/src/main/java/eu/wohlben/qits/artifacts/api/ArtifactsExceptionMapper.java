@@ -1,6 +1,6 @@
 package eu.wohlben.qits.artifacts.api;
 
-import eu.wohlben.qits.artifacts.error.ArtifactsException;
+import eu.wohlben.qits.blobstore.error.ArtifactsException;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.ext.ExceptionMapper;

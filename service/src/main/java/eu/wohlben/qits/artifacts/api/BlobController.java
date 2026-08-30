@@ -1,11 +1,11 @@
 package eu.wohlben.qits.artifacts.api;
 
-import eu.wohlben.qits.artifacts.control.ArtifactMetadataHeaders;
-import eu.wohlben.qits.artifacts.control.ArtifactQueryService;
-import eu.wohlben.qits.artifacts.control.BlobService;
-import eu.wohlben.qits.artifacts.dto.ArtifactRecordDto;
-import eu.wohlben.qits.artifacts.dto.UploadResult;
-import eu.wohlben.qits.artifacts.mapper.ArtifactRecordMapper;
+import eu.wohlben.qits.blobstore.control.ArtifactMetadataHeaders;
+import eu.wohlben.qits.blobstore.control.ArtifactQueryService;
+import eu.wohlben.qits.blobstore.control.BlobService;
+import eu.wohlben.qits.blobstore.dto.ArtifactRecordDto;
+import eu.wohlben.qits.blobstore.dto.UploadResult;
+import eu.wohlben.qits.blobstore.mapper.ArtifactRecordMapper;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.HeaderParam;

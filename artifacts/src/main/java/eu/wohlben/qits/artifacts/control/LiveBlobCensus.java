@@ -1,8 +1,9 @@
 package eu.wohlben.qits.artifacts.control;
 
-import eu.wohlben.qits.artifacts.entity.ArtifactRepository;
-import eu.wohlben.qits.artifacts.persistence.ArtifactRecordRepository;
-import eu.wohlben.qits.artifacts.persistence.ArtifactRepositoryRepository;
+import eu.wohlben.qits.blobstore.control.BlobDiskIndex;
+import eu.wohlben.qits.blobstore.entity.ArtifactRepository;
+import eu.wohlben.qits.blobstore.persistence.ArtifactRecordRepository;
+import eu.wohlben.qits.blobstore.persistence.ArtifactRepositoryRepository;
 import eu.wohlben.qits.artifacts.persistence.DaemonBinaryRepository;
 import eu.wohlben.qits.artifacts.persistence.MavenArtifactRepository;
 import eu.wohlben.qits.artifacts.persistence.NpmVersionRepository;
