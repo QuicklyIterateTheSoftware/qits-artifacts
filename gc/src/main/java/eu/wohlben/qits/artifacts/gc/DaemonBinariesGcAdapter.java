@@ -1,11 +1,11 @@
 package eu.wohlben.qits.artifacts.gc;
 
 import eu.wohlben.qits.artifacts.control.DaemonRegistryCollection;
-import eu.wohlben.qits.artifacts.entity.ArtifactRepository;
+import eu.wohlben.qits.blobstore.entity.ArtifactRepository;
 import eu.wohlben.qits.artifacts.entity.DaemonBinary;
 import eu.wohlben.qits.artifacts.control.DaemonBinariesProfile;
 import eu.wohlben.qits.artifacts.gc.dto.GcIdentity;
-import eu.wohlben.qits.artifacts.persistence.ArtifactRepositoryRepository;
+import eu.wohlben.qits.blobstore.persistence.ArtifactRepositoryRepository;
 import eu.wohlben.qits.artifacts.persistence.DaemonBinaryRepository;
 import jakarta.inject.Inject;
 import jakarta.inject.Singleton;

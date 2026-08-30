@@ -1,6 +1,6 @@
 package eu.wohlben.qits.artifacts.gc;
 
-import eu.wohlben.qits.artifacts.entity.RepositoryTypeProfile;
+import eu.wohlben.qits.blobstore.entity.RepositoryTypeProfile;
 import io.smallrye.config.ConfigMapping;
 import io.smallrye.config.WithParentName;
 import java.time.Duration;

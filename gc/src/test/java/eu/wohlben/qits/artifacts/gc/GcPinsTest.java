@@ -7,10 +7,10 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.artifacts.entity.NpmVersion;
-import eu.wohlben.qits.artifacts.control.CiVideosProfile;
+import eu.wohlben.qits.blobstore.control.CiVideosProfile;
 import eu.wohlben.qits.artifacts.control.NpmPackagesProfile;
 import eu.wohlben.qits.artifacts.control.OciImagesProfile;
-import eu.wohlben.qits.artifacts.entity.RepositoryTypeProfile;
+import eu.wohlben.qits.blobstore.entity.RepositoryTypeProfile;
 import eu.wohlben.qits.artifacts.gc.dto.GcPinSource;
 import eu.wohlben.qits.artifacts.gc.dto.GcPlanReport;
 import eu.wohlben.qits.artifacts.gc.dto.GcSweepReport;

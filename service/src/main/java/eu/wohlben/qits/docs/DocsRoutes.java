@@ -1,11 +1,11 @@
 package eu.wohlben.qits.docs;
 
-import eu.wohlben.qits.artifacts.control.ArtifactMetadataHeaders;
+import eu.wohlben.qits.blobstore.control.ArtifactMetadataHeaders;
 import eu.wohlben.qits.artifacts.control.ArtifactsRepositorySeeder;
-import eu.wohlben.qits.artifacts.control.BlobStore;
+import eu.wohlben.qits.blobstore.control.BlobStore;
 import eu.wohlben.qits.artifacts.control.DocsRegistryService;
 import eu.wohlben.qits.artifacts.control.DocsRegistryService.BundleFile;
-import eu.wohlben.qits.artifacts.control.ScratchBlob;
+import eu.wohlben.qits.blobstore.control.ScratchBlob;
 import eu.wohlben.qits.artifacts.error.DocsException;
 import eu.wohlben.qits.registry.BlobSender;
 import eu.wohlben.qits.registry.OciRequestBody;

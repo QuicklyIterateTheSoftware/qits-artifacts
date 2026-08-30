@@ -1,5 +1,7 @@
 package eu.wohlben.qits.artifacts.error;
 
+import eu.wohlben.qits.blobstore.error.ArtifactsException;
+
 /**
  * A docs error, carrying the status the wire should answer with.
  *

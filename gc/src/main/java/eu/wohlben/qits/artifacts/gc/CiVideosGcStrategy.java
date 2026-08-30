@@ -1,10 +1,10 @@
 package eu.wohlben.qits.artifacts.gc;
 
 import eu.wohlben.qits.artifacts.control.LiveBlobCensus;
-import eu.wohlben.qits.artifacts.entity.ArtifactRepository;
-import eu.wohlben.qits.artifacts.control.CiVideosProfile;
-import eu.wohlben.qits.artifacts.persistence.ArtifactRecordRepository;
-import eu.wohlben.qits.artifacts.persistence.ArtifactRepositoryRepository;
+import eu.wohlben.qits.blobstore.entity.ArtifactRepository;
+import eu.wohlben.qits.blobstore.control.CiVideosProfile;
+import eu.wohlben.qits.blobstore.persistence.ArtifactRecordRepository;
+import eu.wohlben.qits.blobstore.persistence.ArtifactRepositoryRepository;
 import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
 import java.util.List;

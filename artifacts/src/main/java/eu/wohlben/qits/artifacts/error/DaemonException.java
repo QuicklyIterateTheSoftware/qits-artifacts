@@ -1,5 +1,7 @@
 package eu.wohlben.qits.artifacts.error;
 
+import eu.wohlben.qits.blobstore.error.ArtifactsException;
+
 /**
  * A daemon-binaries error, carrying the status the wire should answer with.
  *

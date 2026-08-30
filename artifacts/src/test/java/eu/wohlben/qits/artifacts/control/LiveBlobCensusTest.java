@@ -1,5 +1,7 @@
 package eu.wohlben.qits.artifacts.control;
 
+import eu.wohlben.qits.blobstore.control.CiScreenshotsProfile;
+import eu.wohlben.qits.blobstore.control.CiVideosProfile;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 

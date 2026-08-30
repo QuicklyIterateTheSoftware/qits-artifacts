@@ -1,11 +1,11 @@
 package eu.wohlben.qits.artifacts.gc;
 
 import eu.wohlben.qits.artifacts.control.DocsRegistryCollection;
-import eu.wohlben.qits.artifacts.entity.ArtifactRepository;
+import eu.wohlben.qits.blobstore.entity.ArtifactRepository;
 import eu.wohlben.qits.artifacts.entity.DocsSite;
 import eu.wohlben.qits.artifacts.control.DocsProfile;
 import eu.wohlben.qits.artifacts.gc.dto.GcIdentity;
-import eu.wohlben.qits.artifacts.persistence.ArtifactRepositoryRepository;
+import eu.wohlben.qits.blobstore.persistence.ArtifactRepositoryRepository;
 import eu.wohlben.qits.artifacts.persistence.DocsFileRepository;
 import eu.wohlben.qits.artifacts.persistence.DocsSiteRepository;
 import jakarta.inject.Inject;

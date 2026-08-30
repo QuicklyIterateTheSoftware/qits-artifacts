@@ -1,7 +1,7 @@
 package eu.wohlben.qits.artifacts.api;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import eu.wohlben.qits.artifacts.error.BadRequestException;
+import eu.wohlben.qits.blobstore.error.BadRequestException;
 import eu.wohlben.qits.artifacts.gc.GcPlanner;
 import eu.wohlben.qits.artifacts.gc.GcSuppliedPins;
 import eu.wohlben.qits.artifacts.gc.GcSweepExecutor;

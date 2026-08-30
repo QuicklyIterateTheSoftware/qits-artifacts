@@ -144,9 +144,15 @@ them on a deployment of this service does nothing.
 
 One top-level package with a subpackage kept deliberately apart from it, plus the wire stacks:
 
-- `eu.wohlben.qits.artifacts.*` — the blob store. `artifacts/` holds `entity`, `persistence`, `dto`,
-  `mapper`, `control`, `error`; `service/` holds only `api`. Entities are Panache active-record with
-  public fields; mappers are MapStruct `@Mapper(componentModel = "jakarta")`.
+- `eu.wohlben.qits.artifacts.*` — what this repository owns: the docs and daemon registries, the
+  store explorer, the live blob census and the seeder. `artifacts/` holds `entity`, `persistence`,
+  `dto`, `mapper`, `control`, `error`; `service/` holds only `api`. Entities are Panache
+  active-record with public fields; mappers are MapStruct `@Mapper(componentModel = "jakarta")`.
+  - The blob store itself is **not** in this package any more. It lives in the `qits-blobstore` jar
+    under `eu.wohlben.qits.blobstore.*` (same six subpackages) since the store folded into the
+    qits-registries reactor. Its config keys stay `qits.artifacts.*`. The three format jars keep
+    `eu.wohlben.qits.artifacts.*`, so both prefixes are on the classpath and a package claim that
+    names one name is claiming half.
   - `eu.wohlben.qits.artifacts.gc` and `.gc.dto` (module `gc`) are **garbage collection** — a
     process modelled from within this service rather than artifacts domain (the 2026-08-05 GC
     settlement). A subpackage rather than a sibling top-level name, and
@@ -258,9 +264,10 @@ exercised on every build of the jar. Keep the text identical, so a later diff be
 readable. `qits.artifacts.blobs-datasource=artifacts` is what points the store at them.
 
 The persistence unit is the artifacts jar's own: `quarkus.hibernate-orm.artifacts.packages` names
-`eu.wohlben.qits.artifacts.entity` in that jar's `microprofile-config.properties`, and `service`
-no longer overrides it — the override existed only to add the git host's entity package, and it
-**replaces** rather than extends, so re-adding one means spelling both.
+`eu.wohlben.qits.blobstore.entity` AND `eu.wohlben.qits.artifacts.entity` in that jar's
+`microprofile-config.properties` — the store's entities and the formats' plus this repo's — and
+`service` no longer overrides it. The key **replaces** rather than extends, so every name it must
+cover is spelled on that one line.
 
 **`@Lob` is banned on every entity this service maps.** On H2 it was a clob and everything agreed;
 on PostgreSQL it means a LARGE OBJECT, which Hibernate binds as an oid and the driver refuses to

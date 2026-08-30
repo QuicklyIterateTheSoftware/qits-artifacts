@@ -1,10 +1,11 @@
 package eu.wohlben.qits.artifacts.control;
 
-import eu.wohlben.qits.artifacts.entity.ArtifactRepository;
+import eu.wohlben.qits.blobstore.control.ArtifactMetadataHeaders;
+import eu.wohlben.qits.blobstore.entity.ArtifactRepository;
 import eu.wohlben.qits.artifacts.entity.DocsFile;
 import eu.wohlben.qits.artifacts.entity.DocsSite;
 import eu.wohlben.qits.artifacts.error.DocsException;
-import eu.wohlben.qits.artifacts.persistence.ArtifactRepositoryRepository;
+import eu.wohlben.qits.blobstore.persistence.ArtifactRepositoryRepository;
 import eu.wohlben.qits.artifacts.persistence.DocsFileRepository;
 import eu.wohlben.qits.artifacts.persistence.DocsSiteRepository;
 import jakarta.enterprise.context.ApplicationScoped;

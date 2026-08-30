@@ -1,7 +1,7 @@
 package eu.wohlben.qits.daemon;
 
 import eu.wohlben.qits.artifacts.control.ArtifactsRepositorySeeder;
-import eu.wohlben.qits.artifacts.control.BlobStore;
+import eu.wohlben.qits.blobstore.control.BlobStore;
 import eu.wohlben.qits.artifacts.control.DaemonRegistryService;
 import eu.wohlben.qits.artifacts.error.DaemonException;
 import eu.wohlben.qits.registry.BlobSender;

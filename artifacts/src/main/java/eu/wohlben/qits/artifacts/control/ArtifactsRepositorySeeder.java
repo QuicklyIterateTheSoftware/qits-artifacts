@@ -1,5 +1,8 @@
 package eu.wohlben.qits.artifacts.control;
 
+import eu.wohlben.qits.blobstore.control.ArtifactRepositoryService;
+import eu.wohlben.qits.blobstore.control.CiScreenshotsProfile;
+import eu.wohlben.qits.blobstore.control.CiVideosProfile;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.context.control.ActivateRequestContext;
 import jakarta.inject.Inject;

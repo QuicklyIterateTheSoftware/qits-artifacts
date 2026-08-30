@@ -45,7 +45,7 @@ class GcPlanControllerTest {
   private static final String REPO = "gc-scope-case";
 
   @jakarta.inject.Inject
-  eu.wohlben.qits.artifacts.control.ArtifactRepositoryService repositories;
+  eu.wohlben.qits.blobstore.control.ArtifactRepositoryService repositories;
 
   @org.junit.jupiter.api.BeforeEach
   void seedRepository() {
