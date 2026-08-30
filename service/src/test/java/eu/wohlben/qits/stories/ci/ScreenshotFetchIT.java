@@ -5,11 +5,13 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import eu.wohlben.qits.PackagedProcessIT;
+import eu.wohlben.qits.stories.support.AccessLogSource;
 import eu.wohlben.qits.stories.support.Cli;
 import eu.wohlben.qits.stories.support.StoryMedia;
 import eu.wohlben.qits.stories.support.StoryTarget;
 import eu.wohlben.qits.userflows.Commands;
 import eu.wohlben.qits.userflows.Interactions;
+import eu.wohlben.qits.userflows.NetworkEdge;
 import eu.wohlben.qits.userflows.UserStory;
 import eu.wohlben.qits.userflows.UserStoryDescription;
 import eu.wohlben.qits.userflows.UserflowContext;
@@ -56,6 +58,18 @@ public class ScreenshotFetchIT {
   /** The reader every CI-media read in this chain is answered for. */
   static final String READER = "story-diff";
 
+  /** How the diagram names the initiator of everything this story sends. */
+  static final String ACTOR = "the diff loop";
+
+  /**
+   * The golden pairing key as a query, in the order a caller spells it — which is what the access
+   * log records and therefore what an edge's label carries. {@code latest} is a bare flag: a blank
+   * value is how a caller says "collapse", and the reader treats it as true.
+   */
+  static String goldenQuery(String branch, String flow) {
+    return "?meta.git.branch.name=" + branch + "&meta.qits.userflow.name=" + flow + "&latest";
+  }
+
   private static final ObjectMapper JSON = new ObjectMapper();
 
   @TestHTTPResource("/")
@@ -80,6 +94,10 @@ public class ScreenshotFetchIT {
     String branch = context.require("story.ci-screenshots.branch", String.class);
     String flow = context.require("story.ci-screenshots.flow", String.class);
 
+    // Whose traffic the access log's next lines are, and what kind. `http` for the reason the
+    // intake story gives: this is a JSON API a loop calls, not a package manager.
+    AccessLogSource.attribute(ACTOR, NetworkEdge.HTTP);
+
     Path work = commands.workDir();
     String blobs = target.apiBase() + "/repositories/" + ScreenshotPublishIT.REPOSITORY + "/blobs";
 
@@ -93,12 +111,7 @@ public class ScreenshotFetchIT {
             "X-Qits-User: " + READER,
             "X-Qits-Roles: qits:admin",
             "golden.json",
-            blobs
-                + "?meta.git.branch.name="
-                + branch
-                + "&meta.qits.userflow.name="
-                + flow
-                + "&latest")
+            blobs + goldenQuery(branch, flow))
         .as("golden-queried");
     assertEquals("200", commands.lastOutput().strip(), "the query's status");
 
@@ -131,14 +144,12 @@ public class ScreenshotFetchIT {
         "the bytes that arrived must hash to the id they were fetched by");
     story.note("the downloaded bytes hash to the id, which is the digest").as("bytes-verified");
 
+    // The narrative the wire cannot carry: this loop never knew an id — it asked a question and the
+    // answer told it which bytes to fetch.
     story
-        .happened(
-            "the diff loop",
-            "qits-artifacts",
-            "GET /artifacts/api/repositories/"
-                + ScreenshotPublishIT.REPOSITORY
-                + "/blobs?meta…&latest -> 200")
+        .note("the loop knew a branch and a flow, never an id: the query is what produced one")
         .as("fetch-recorded");
+    AccessLogSource.awaitLogged("GET " + ScreenshotPublishIT.BLOBS_PATH + "/");
   }
 
   @AfterAll
@@ -153,13 +164,28 @@ public class ScreenshotFetchIT {
     ReportAssertions.assertCommand(CATEGORY, SLUG, "golden.png", 0);
     ReportAssertions.assertStepId(CATEGORY, SLUG, "bytes-verified");
     ReportAssertions.assertStepId(CATEGORY, SLUG, "fetch-recorded");
-    ReportAssertions.assertInteraction(
+    // The two requests a diff loop makes, observed. The query rides in the label because the
+    // access-log pattern records the whole URL — so the golden PREDICATE, which is the thing this
+    // story is about, is in the diagram rather than summarised away as `?meta…`.
+    ReportAssertions.assertEdge(
         CATEGORY,
         SLUG,
-        "the diff loop",
-        "qits-artifacts",
-        "GET /artifacts/api/repositories/"
-            + ScreenshotPublishIT.REPOSITORY
-            + "/blobs?meta…&latest -> 200");
+        NetworkEdge.HTTP,
+        ACTOR,
+        AccessLogSource.SERVICE,
+        "GET "
+            + ScreenshotPublishIT.BLOBS_PATH
+            + goldenQuery(ScreenshotPublishIT.BRANCH, ScreenshotPublishIT.FLOW)
+            + " -> 200");
+    // The download is addressed by the digest the query answered with, so the scrubber templates it
+    // — which is right: the label is about the SHAPE of the read, and the bytes are proved above.
+    ReportAssertions.assertEdge(
+        CATEGORY,
+        SLUG,
+        NetworkEdge.HTTP,
+        ACTOR,
+        AccessLogSource.SERVICE,
+        "GET " + ScreenshotPublishIT.BLOBS_PATH + "/{digest} -> 200");
+    ReportAssertions.assertEdgeCount(CATEGORY, SLUG, 2);
   }
 }

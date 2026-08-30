@@ -6,11 +6,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import eu.wohlben.qits.PackagedProcessIT;
+import eu.wohlben.qits.stories.support.AccessLogSource;
 import eu.wohlben.qits.stories.support.Cli;
 import eu.wohlben.qits.stories.support.StoryMedia;
 import eu.wohlben.qits.stories.support.StoryTarget;
 import eu.wohlben.qits.userflows.Commands;
 import eu.wohlben.qits.userflows.Interactions;
+import eu.wohlben.qits.userflows.NetworkEdge;
 import eu.wohlben.qits.userflows.UserStory;
 import eu.wohlben.qits.userflows.UserStoryDescription;
 import eu.wohlben.qits.userflows.UserflowContext;
@@ -48,6 +50,12 @@ public class DocsReadIT {
   static final String CATEGORY = "docs";
   static final String SLUG = "a-reader-opens-the-published-documentation-by-version";
 
+  /** How the diagram names the initiator of everything this story sends. */
+  static final String ACTOR = "a reader";
+
+  /** The one file this reader opens, at its version-addressed wire path. */
+  static final String PAGE_PATH = DocsPublishIT.VERSION_PATH + "/index.html";
+
   private static final ObjectMapper JSON = new ObjectMapper();
 
   @TestHTTPResource("/")
@@ -68,6 +76,10 @@ public class DocsReadIT {
     String site = context.require("story.docs.site", String.class);
     String version = context.require("story.docs.version", String.class);
     String siteUrl = target.docsBase() + "/docs/" + site;
+
+    // Whose traffic the access log's next lines are, and what kind. Read at drain time, and the
+    // actor is reset at every story border, so this never inherits the publish story's pipeline.
+    AccessLogSource.attribute(ACTOR, NetworkEdge.PACKAGE);
 
     Path work = commands.workDir();
 
@@ -125,13 +137,14 @@ public class DocsReadIT {
         headerValue(headers, "cache-control").orElse("").contains("immutable"),
         () -> "a published version never changes and the response must say so:\n" + headers);
 
+    // The narrative the wire cannot carry: the shape of the journey. Ask what exists, narrow it by
+    // the branch a version came from, open the page — and the unmatched filter is an answer too.
     story
-        .happened(
-            "a reader",
-            "qits-artifacts",
-            "GET /artifacts/docs/docs/" + DocsPublishIT.SITE + "/-/" + DocsPublishIT.VERSION
-                + "/index.html -> 200")
+        .note(
+            "a reader asks what exists, narrows it by branch, and opens the page — and a filter that"
+                + " matches nothing is still a 200")
         .as("read-recorded");
+    AccessLogSource.awaitLogged("GET " + PAGE_PATH);
   }
 
   /** The first value of {@code name} in a raw {@code curl -D} dump, case-insensitively. */
@@ -154,12 +167,35 @@ public class DocsReadIT {
     ReportAssertions.assertStepId(CATEGORY, SLUG, "page-served");
     ReportAssertions.assertCommand(CATEGORY, SLUG, "index.html", 0);
     ReportAssertions.assertStepId(CATEGORY, SLUG, "read-recorded");
-    ReportAssertions.assertInteraction(
+    // The four requests this journey IS, observed in the launched process' access log. The two
+    // filtered listings are separate edges because the access-log pattern carries the query — which
+    // is the whole point here: "the docs for main" is a QUERY, and a path-only tap would have
+    // collapsed the predicate that matches and the one that does not into a single arrow.
+    ReportAssertions.assertEdge(
         CATEGORY,
         SLUG,
-        "a reader",
-        "qits-artifacts",
-        "GET /artifacts/docs/docs/" + DocsPublishIT.SITE + "/-/" + DocsPublishIT.VERSION
-            + "/index.html -> 200");
+        NetworkEdge.PACKAGE,
+        ACTOR,
+        AccessLogSource.SERVICE,
+        "GET " + DocsPublishIT.SITE_PATH + " -> 200");
+    ReportAssertions.assertEdge(
+        CATEGORY,
+        SLUG,
+        NetworkEdge.PACKAGE,
+        ACTOR,
+        AccessLogSource.SERVICE,
+        "GET " + DocsPublishIT.SITE_PATH + "?meta.git.branch.name=" + DocsPublishIT.BRANCH
+            + " -> 200");
+    ReportAssertions.assertEdge(
+        CATEGORY,
+        SLUG,
+        NetworkEdge.PACKAGE,
+        ACTOR,
+        AccessLogSource.SERVICE,
+        "GET " + DocsPublishIT.SITE_PATH + "?meta.git.branch.name=elsewhere -> 200");
+    ReportAssertions.assertEdge(
+        CATEGORY, SLUG, NetworkEdge.PACKAGE, ACTOR, AccessLogSource.SERVICE,
+        "GET " + PAGE_PATH + " -> 200");
+    ReportAssertions.assertEdgeCount(CATEGORY, SLUG, 4);
   }
 }

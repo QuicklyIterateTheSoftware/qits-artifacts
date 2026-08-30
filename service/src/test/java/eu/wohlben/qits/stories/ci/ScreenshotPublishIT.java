@@ -6,11 +6,13 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import eu.wohlben.qits.PackagedProcessIT;
+import eu.wohlben.qits.stories.support.AccessLogSource;
 import eu.wohlben.qits.stories.support.Cli;
 import eu.wohlben.qits.stories.support.StoryMedia;
 import eu.wohlben.qits.stories.support.StoryTarget;
 import eu.wohlben.qits.userflows.Commands;
 import eu.wohlben.qits.userflows.Interactions;
+import eu.wohlben.qits.userflows.NetworkEdge;
 import eu.wohlben.qits.userflows.UserStory;
 import eu.wohlben.qits.userflows.UserStoryDescription;
 import eu.wohlben.qits.userflows.UserflowContext;
@@ -97,6 +99,13 @@ public class ScreenshotPublishIT {
   /** Distinct content, so this blob is this story's rather than another case's already-stored one. */
   private static final int SALT = 0x5701;
 
+  /** How the diagram names the initiator of everything this story sends. */
+  static final String ACTOR = "a userflow run";
+
+  /** The intake's wire path, as the launched process' access log spells it. */
+  public static final String BLOBS_PATH =
+      StoryTarget.API_PATH + "/repositories/" + REPOSITORY + "/blobs";
+
   private static final ObjectMapper JSON = new ObjectMapper();
 
   @TestHTTPResource("/")
@@ -118,6 +127,12 @@ public class ScreenshotPublishIT {
   void aUserflowRunPublishesItsScreenshot(
       Interactions story, Commands commands, UserflowContext context) throws IOException {
     StoryTarget target = new StoryTarget(root);
+
+    // Who the access log's next line belongs to, and what kind of traffic it is. `http` and not
+    // `package`, unlike every other producer in this catalogue: the CI media plane is a JSON API
+    // that a run POSTs to, not a package manager — nothing here is resolved, versioned or pinned by
+    // a client, and calling it a package edge would put it in a family it does not belong to.
+    AccessLogSource.attribute(ACTOR, NetworkEdge.HTTP);
 
     // workDir() creates and wipes the scratch on first use, so it is taken before anything is
     // written into it.
@@ -167,12 +182,13 @@ public class ScreenshotPublishIT {
     assertFalse(
         receipt.path("existing").asBoolean(),
         "no earlier case in this run holds these bytes, so this upload stored them");
+    // The narrative the wire cannot carry: the id that came back IS the digest, which is what makes
+    // an unchanged screenshot cost nothing on the next run.
     story
-        .happened(
-            "a userflow run",
-            "qits-artifacts",
-            "POST /artifacts/api/repositories/" + REPOSITORY + "/blobs -> 201")
+        .note("the id the intake answered with is the digest of the bytes, so the same image twice"
+            + " is one blob")
         .as("publish-recorded");
+    AccessLogSource.awaitLogged("POST " + BLOBS_PATH);
 
     context.put("story.ci-screenshots.id", id);
     context.put("story.ci-screenshots.branch", BRANCH);
@@ -196,11 +212,16 @@ public class ScreenshotPublishIT {
     ReportAssertions.assertCommand(CATEGORY, SLUG, "-X POST", 0);
     ReportAssertions.assertCommandOutputContains(CATEGORY, SLUG, "-X POST", "201");
     ReportAssertions.assertStepId(CATEGORY, SLUG, "publish-recorded");
-    ReportAssertions.assertInteraction(
+    // Observed in the launched process' access log, and counted: the intake this story documents is
+    // ONE request carrying the bytes and the eight declared keys together, and a producer built to
+    // this contract should find nothing else here to imitate.
+    ReportAssertions.assertEdge(
         CATEGORY,
         SLUG,
-        "a userflow run",
-        "qits-artifacts",
-        "POST /artifacts/api/repositories/" + REPOSITORY + "/blobs -> 201");
+        NetworkEdge.HTTP,
+        ACTOR,
+        AccessLogSource.SERVICE,
+        "POST " + BLOBS_PATH + " -> 201");
+    ReportAssertions.assertEdgeCount(CATEGORY, SLUG, 1);
   }
 }

@@ -29,6 +29,7 @@ import eu.wohlben.qits.npm.NpmClient;
 import eu.wohlben.qits.npm.TinyPackage;
 import eu.wohlben.qits.registry.OciClient;
 import eu.wohlben.qits.registry.TinyImage;
+import eu.wohlben.qits.stories.support.AccessLogSource;
 import java.net.URI;
 import java.net.URL;
 import java.net.http.HttpResponse;
@@ -85,9 +86,18 @@ public class PackagedProcessIT {
    * a second copy — the system property is the one thing they share, and it is what keeps this at
    * one postgres rather than one per classloader.
    *
+   * <p><b>It also turns on the access log, and that is the story catalogue's network tap.</b> Every
+   * class under {@code eu.wohlben.qits.stories} shares this profile and drives a real external tool
+   * — npm, mvn, skopeo, curl — over a socket the test JVM is not on, so a RestAssured filter can see
+   * nothing and the server's own record is the only observation there is. {@link
+   * eu.wohlben.qits.stories.support.AccessLogSource} owns the pattern, the file name and the reading
+   * of it; this profile only asks for it.
+   *
    * <p>All of these are runtime config, so they reach the already-built artifact as {@code -D}
    * flags; nothing here re-augments. That is also why the datasource can move at all: url, username
    * and password are runtime keys, while {@code db-kind} is build-time and stays what the jar ships.
+   * The access-log block is runtime too ({@code VertxHttpConfig}, not {@code
+   * VertxHttpBuildTimeConfig}) — a build-time key here would be accepted and silently ignored.
    */
   public static class TargetDirState implements QuarkusTestProfile {
 
@@ -114,6 +124,13 @@ public class PackagedProcessIT {
       // oci jar still carries the miss path, and a closed port is what keeps a row put back by
       // accident from dialling quay.io or Docker Hub out of a test.
       overrides.put("qits.artifacts.oci.mirror.endpoint-override", "http://localhost:1");
+      // THE STORIES' NETWORK TAP. Every class under eu.wohlben.qits.stories shares this profile,
+      // and their subject is a real external tool — npm, mvn, skopeo, curl — talking to this
+      // process over a socket the test JVM is not on. Nothing in here can observe that, so the
+      // observation is the server's own access log; AccessLogSource owns the file name, the
+      // pattern and the reading of it, and registers the file as a NetworkCapture source. Every
+      // key it returns is runtime config, which is what lets it reach an already-built artifact.
+      overrides.putAll(AccessLogSource.configOverrides());
       return overrides;
     }
   }

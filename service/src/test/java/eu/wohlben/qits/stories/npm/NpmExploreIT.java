@@ -1,10 +1,12 @@
 package eu.wohlben.qits.stories.npm;
 
 import eu.wohlben.qits.PackagedProcessIT;
+import eu.wohlben.qits.stories.support.AccessLogSource;
 import eu.wohlben.qits.stories.support.Cli;
 import eu.wohlben.qits.stories.support.StoryBrowser;
 import eu.wohlben.qits.userflows.Flow;
 import eu.wohlben.qits.userflows.Interactions;
+import eu.wohlben.qits.userflows.NetworkEdge;
 import eu.wohlben.qits.userflows.UserStory;
 import eu.wohlben.qits.userflows.UserStoryDescription;
 import eu.wohlben.qits.userflows.UserflowContext;
@@ -16,6 +18,7 @@ import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusIntegrationTest;
 import io.quarkus.test.junit.TestProfile;
 import java.net.URL;
+import java.util.List;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.condition.EnabledIf;
 
@@ -42,6 +45,9 @@ public class NpmExploreIT {
   static final String CATEGORY = "npm";
   static final String SLUG = "an-operator-finds-a-published-package-and-its-immutable-versions";
 
+  /** How the diagram names the initiator of everything this story's browser fetches. */
+  static final String ACTOR = "an operator";
+
   @TestHTTPResource("/")
   URL root;
 
@@ -64,6 +70,12 @@ public class NpmExploreIT {
 
     // The gateway's job, played for the browser, before the first navigate.
     StoryBrowser.asOperator(flow);
+
+    // A browser is a caller like any other and the access log records everything it fetches, so
+    // this story names its initiator too. `http` and not `package`: what the operator's browser
+    // asks for is the explorer's own screens, not an artifact — and setting it here is also what
+    // stops the publish story's `package` kind carrying over, since only the actor is reset for us.
+    AccessLogSource.attribute(ACTOR, NetworkEdge.HTTP);
 
     story.note("the package this operator is looking for was published over the wire, not seeded");
 
@@ -93,5 +105,17 @@ public class NpmExploreIT {
     ReportAssertions.assertStepId(CATEGORY, SLUG, "repositories-listed");
     ReportAssertions.assertStepId(CATEGORY, SLUG, "package-listed");
     ReportAssertions.assertStepId(CATEGORY, SLUG, "versions-shown");
+    // No edge is pinned by NAME here, and that is a decision rather than a gap. A browser story
+    // fetches the SPA's own bundle beside the reads it is about, and those filenames carry a build
+    // hash — so the diagram records what the run really made and the assertions stay on the
+    // screens, which is what this story is about. The command-line halves of every chain are where
+    // the wire is pinned.
+    //
+    // The one network claim a browser story CAN make is about its initiator, and it makes it: every
+    // arrow in this diagram is the operator's. That is what stops a story silently emitting `a
+    // caller -> qits-artifacts` because a later edit dropped the attribute() call — the one failure
+    // mode a screen assertion cannot see, since the screens still pass without it. Every explore
+    // story in the catalogue closes the same way.
+    ReportAssertions.assertOnlyEdgesFrom(CATEGORY, SLUG, List.of(ACTOR));
   }
 }

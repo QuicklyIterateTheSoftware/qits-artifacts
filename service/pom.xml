@@ -204,8 +204,12 @@
         <dependency>
             <!-- The user-story framework: TokenValidationBootstrapIT and every class under
                  eu.wohlben.qits.stories.* are written as @UserStory classes, so the
-                 packaged-process proofs double as documentation — steps, interactions, command
-                 transcripts and a sequence diagram emitted under target/userstories/. The publish
+                 packaged-process proofs double as documentation — steps, command transcripts and
+                 an OBSERVED network diagram emitted under target/userstories/. No story draws that
+                 diagram: the framework's own NetworkTaps.restAssured filter, MockIdp's recording and
+                 this process' own access log feed it, and the framework drains them at story end.
+                 That tap needs rest-assured, which this jar declares <optional> — it is already a
+                 test dependency here (see io.rest-assured above), so nothing extra is owed. The publish
                  and consume stories are browserless (Interactions + Commands); the explore story
                  of each category takes a Flow, which is what launches headless Chromium (from
                  PLAYWRIGHT_BROWSERS_PATH where an image bakes one — the workspace image and CI's

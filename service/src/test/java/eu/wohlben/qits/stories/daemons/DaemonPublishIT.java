@@ -5,11 +5,13 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import eu.wohlben.qits.PackagedProcessIT;
+import eu.wohlben.qits.stories.support.AccessLogSource;
 import eu.wohlben.qits.stories.support.Cli;
 import eu.wohlben.qits.stories.support.StoryMedia;
 import eu.wohlben.qits.stories.support.StoryTarget;
 import eu.wohlben.qits.userflows.Commands;
 import eu.wohlben.qits.userflows.Interactions;
+import eu.wohlben.qits.userflows.NetworkEdge;
 import eu.wohlben.qits.userflows.UserStory;
 import eu.wohlben.qits.userflows.UserStoryDescription;
 import eu.wohlben.qits.userflows.UserflowContext;
@@ -54,6 +56,13 @@ public class DaemonPublishIT {
   /** Small enough to be free, large enough that the transfer is a real chunked body. */
   private static final int SIZE = 4096;
 
+  /** How the diagram names the initiator of everything this story sends. */
+  static final String ACTOR = "a release pipeline";
+
+  /** The version-addressed wire path, as the launched process' access log spells it. */
+  public static final String BINARY_PATH =
+      StoryTarget.DAEMONS_PATH + "/" + DAEMON + "/" + VERSION;
+
   private static final ObjectMapper JSON = new ObjectMapper();
 
   @TestHTTPResource("/")
@@ -71,6 +80,11 @@ public class DaemonPublishIT {
   void aColdBootstrapPublishesTheDaemonBinary(
       Interactions story, Commands commands, UserflowContext context) throws IOException {
     StoryTarget target = new StoryTarget(root);
+
+    // Who the access log's next line belongs to, and what kind of traffic it is. `package` because
+    // the platform's own executables are artifacts like any other — curl is only the transport, and
+    // the flow is a publish that a deployment later pins by digest.
+    AccessLogSource.attribute(ACTOR, NetworkEdge.PACKAGE);
 
     // workDir() creates and wipes the scratch on first use, so it has to be taken before anything
     // is written into it.
@@ -108,12 +122,12 @@ public class DaemonPublishIT {
         .note("the receipt's digest is the sha256 of the bytes the build produced")
         .as("digest-echoed");
 
+    // The narrative the wire cannot carry: one PUT is the whole publish, and the version it created
+    // can be added to but never changed — which is what stands in for write auth here.
     story
-        .happened(
-            "a release pipeline",
-            "qits-artifacts",
-            "PUT /artifacts/daemons/" + DAEMON + "/" + VERSION + " -> 201")
+        .note("one PUT is the whole publish, and " + DAEMON + "@" + VERSION + " can never be changed")
         .as("publish-recorded");
+    AccessLogSource.awaitLogged("PUT " + BINARY_PATH);
 
     context.put("story.daemon.name", DAEMON);
     context.put("story.daemon.version", VERSION);
@@ -132,11 +146,16 @@ public class DaemonPublishIT {
     ReportAssertions.assertCommandOutputContains(CATEGORY, SLUG, "-X PUT", "201");
     ReportAssertions.assertStepId(CATEGORY, SLUG, "digest-echoed");
     ReportAssertions.assertStepId(CATEGORY, SLUG, "publish-recorded");
-    ReportAssertions.assertInteraction(
+    // Observed in the launched process' own access log. The count is asserted because here it is a
+    // real claim rather than a client's business: this whole publish is ONE request, and a second
+    // edge would mean curl or this story did something the narrative does not admit to.
+    ReportAssertions.assertEdge(
         CATEGORY,
         SLUG,
-        "a release pipeline",
-        "qits-artifacts",
-        "PUT /artifacts/daemons/" + DAEMON + "/" + VERSION + " -> 201");
+        NetworkEdge.PACKAGE,
+        ACTOR,
+        AccessLogSource.SERVICE,
+        "PUT " + BINARY_PATH + " -> 201");
+    ReportAssertions.assertEdgeCount(CATEGORY, SLUG, 1);
   }
 }

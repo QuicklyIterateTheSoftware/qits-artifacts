@@ -5,11 +5,13 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import eu.wohlben.qits.PackagedProcessIT;
+import eu.wohlben.qits.stories.support.AccessLogSource;
 import eu.wohlben.qits.stories.support.Cli;
 import eu.wohlben.qits.stories.support.StoryMedia;
 import eu.wohlben.qits.stories.support.StoryTarget;
 import eu.wohlben.qits.userflows.Commands;
 import eu.wohlben.qits.userflows.Interactions;
+import eu.wohlben.qits.userflows.NetworkEdge;
 import eu.wohlben.qits.userflows.UserStory;
 import eu.wohlben.qits.userflows.UserStoryDescription;
 import eu.wohlben.qits.userflows.UserflowContext;
@@ -69,6 +71,13 @@ public class VideoPublishIT {
 
   private static final int SALT = 0x5702;
 
+  /** How the diagram names the initiator of everything this story sends. */
+  static final String ACTOR = "a userflow run";
+
+  /** The intake's wire path — the screenshots one with the repository segment changed, and only that. */
+  public static final String BLOBS_PATH =
+      StoryTarget.API_PATH + "/repositories/" + REPOSITORY + "/blobs";
+
   private static final ObjectMapper JSON = new ObjectMapper();
 
   @TestHTTPResource("/")
@@ -89,6 +98,11 @@ public class VideoPublishIT {
   void aUserflowRunPublishesItsRecording(
       Interactions story, Commands commands, UserflowContext context) throws IOException {
     StoryTarget target = new StoryTarget(root);
+
+    // Who the access log's next line belongs to, and what kind of traffic it is — `http` for the
+    // reason ScreenshotPublishIT gives, and identical to it, which is itself part of the point:
+    // the two CI types differ in what the store KEEPS, never in how a run reaches it.
+    AccessLogSource.attribute(ACTOR, NetworkEdge.HTTP);
 
     Path work = commands.workDir();
     byte[] webm = StoryMedia.webm(SALT);
@@ -128,12 +142,12 @@ public class VideoPublishIT {
     JsonNode receipt = JSON.readTree(Files.readString(work.resolve("publish-response.json")));
     String id = receipt.path("id").asText();
     assertEquals(expected, id, "the id is the sha256 of the bytes the store received");
+    // The narrative the wire cannot carry: what makes this a DIFFERENT type from a screenshot is
+    // one declared key and a retention rule, not anything visible in the request.
     story
-        .happened(
-            "a userflow run",
-            "qits-artifacts",
-            "POST /artifacts/api/repositories/" + REPOSITORY + "/blobs -> 201")
+        .note("the same intake, one key apart: a length where a still declares a resolution")
         .as("publish-recorded");
+    AccessLogSource.awaitLogged("POST " + BLOBS_PATH);
 
     context.put("story.ci-videos.id", id);
     context.put("story.ci-videos.branch", BRANCH);
@@ -151,11 +165,15 @@ public class VideoPublishIT {
     ReportAssertions.assertCommand(CATEGORY, SLUG, "-X POST", 0);
     ReportAssertions.assertCommandOutputContains(CATEGORY, SLUG, "-X POST", "201");
     ReportAssertions.assertStepId(CATEGORY, SLUG, "publish-recorded");
-    ReportAssertions.assertInteraction(
+    // Observed and counted, exactly as the screenshot intake is — and the two diagrams differing by
+    // one path segment is the cheapest possible statement that this is one mechanism over two types.
+    ReportAssertions.assertEdge(
         CATEGORY,
         SLUG,
-        "a userflow run",
-        "qits-artifacts",
-        "POST /artifacts/api/repositories/" + REPOSITORY + "/blobs -> 201");
+        NetworkEdge.HTTP,
+        ACTOR,
+        AccessLogSource.SERVICE,
+        "POST " + BLOBS_PATH + " -> 201");
+    ReportAssertions.assertEdgeCount(CATEGORY, SLUG, 1);
   }
 }

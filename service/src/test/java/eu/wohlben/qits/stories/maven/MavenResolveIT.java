@@ -5,11 +5,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.PackagedProcessIT;
 import eu.wohlben.qits.maven.MavenClient;
+import eu.wohlben.qits.stories.support.AccessLogSource;
 import eu.wohlben.qits.stories.support.Cli;
 import eu.wohlben.qits.stories.support.StoryMedia;
 import eu.wohlben.qits.stories.support.StoryTarget;
 import eu.wohlben.qits.userflows.Commands;
 import eu.wohlben.qits.userflows.Interactions;
+import eu.wohlben.qits.userflows.NetworkEdge;
 import eu.wohlben.qits.userflows.UserStory;
 import eu.wohlben.qits.userflows.UserStoryDescription;
 import eu.wohlben.qits.userflows.UserflowContext;
@@ -24,6 +26,7 @@ import java.net.URL;
 import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.condition.EnabledIf;
 
@@ -60,6 +63,9 @@ public class MavenResolveIT {
   static final String CATEGORY = "maven";
   static final String SLUG = "a-build-resolves-the-deployed-jar-from-the-platform-repository";
 
+  /** How the diagram names the initiator of everything this story sends. */
+  static final String ACTOR = "a build";
+
   @TestHTTPResource("/")
   URL root;
 
@@ -82,6 +88,10 @@ public class MavenResolveIT {
     String coordinate = context.require("story.maven.coordinate", String.class);
     String version = context.require("story.maven.version", String.class);
     String deployed = context.require("story.maven.jar-sha256", String.class);
+
+    // Whose traffic the access log's next lines are, and what kind. Read at drain time, and the
+    // actor is reset at every story border, so this never inherits the deploy story's pipeline.
+    AccessLogSource.attribute(ACTOR, NetworkEdge.PACKAGE);
 
     // The scratch is taken so the story owns a directory even though maven writes into the shared
     // local repository rather than here — the transcript still lands beside every other story's.
@@ -131,12 +141,14 @@ public class MavenResolveIT {
                 + " one digest")
         .as("bytes-verified");
 
+    // The narrative half. The edge below it is the launched process' own record of the fetch, which
+    // is what makes the remoteness claim in the class javadoc evidence rather than an inference:
+    // the jar was on the wire in THIS run, warm local repository or not.
     story
-        .happened(
-            "a build",
-            "qits-artifacts",
-            "GET /artifacts/maven/maven/" + MavenDeployIT.JAR_PATH + " -> 200")
+        .note("the jar and its derived checksum came off the platform repository in this run")
         .as("resolve-recorded");
+    AccessLogSource.awaitLogged(
+        "GET " + StoryTarget.MAVEN_PATH + "/" + MavenDeployIT.JAR_PATH + ".sha256");
   }
 
   @AfterAll
@@ -149,11 +161,25 @@ public class MavenResolveIT {
     ReportAssertions.assertCommand(CATEGORY, SLUG, "maven-dependency-plugin", 0);
     ReportAssertions.assertStepId(CATEGORY, SLUG, "bytes-verified");
     ReportAssertions.assertStepId(CATEGORY, SLUG, "resolve-recorded");
-    ReportAssertions.assertInteraction(
+    // Both halves of the story's own claim, observed in the access log: the jar, and the checksum
+    // the repository derived from its stored copy. No count, for the reason MavenDeployIT states —
+    // how many requests a resolve is belongs to the client, not to this repository.
+    ReportAssertions.assertEdge(
         CATEGORY,
         SLUG,
-        "a build",
-        "qits-artifacts",
-        "GET /artifacts/maven/maven/" + MavenDeployIT.JAR_PATH + " -> 200");
+        NetworkEdge.PACKAGE,
+        ACTOR,
+        AccessLogSource.SERVICE,
+        "GET " + StoryTarget.MAVEN_PATH + "/" + MavenDeployIT.JAR_PATH + " -> 200");
+    ReportAssertions.assertEdge(
+        CATEGORY,
+        SLUG,
+        NetworkEdge.PACKAGE,
+        ACTOR,
+        AccessLogSource.SERVICE,
+        "GET " + StoryTarget.MAVEN_PATH + "/" + MavenDeployIT.JAR_PATH + ".sha256 -> 200");
+    // What the missing count can still say: whatever else the forked maven asked for, it asked as
+    // this build and as nobody else.
+    ReportAssertions.assertOnlyEdgesFrom(CATEGORY, SLUG, List.of(ACTOR));
   }
 }

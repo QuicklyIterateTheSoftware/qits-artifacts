@@ -78,15 +78,27 @@
         <qits.db-core.version>2026.817.175344</qits.db-core.version>
         <!-- The user-story framework (test scope): the 21 story classes and
              TokenValidationBootstrapIT are userflows, so a `mvn verify` also regenerates
-             service/target/userstories/ — the stories' documentation, sequence diagrams and
-             command transcripts included. 2026.829.153120 is the first release carrying the
-             Commands facade the story chains run their real CLIs through; this repo is its
-             first consumer. -->
-        <qits.userflows.version>2026.829.153120</qits.userflows.version>
+             service/target/userstories/ — the stories' documentation, network diagrams and
+             command transcripts included. 2026.829.153120 carried the Commands facade the story
+             chains run their real CLIs through; this repo was its first consumer.
+
+             2026.829.201516 is the release in which the network became PASSIVE:
+             Interactions.happened() is gone, an edge is OBSERVED by a tap (a RestAssured filter, a
+             mock's recording, this service's own access log) and drained by the framework at story
+             end. Two things in it this repo consumes directly: NetworkTaps.restAssured(service),
+             which retires the StoryNetworkFilter every service had hand-copied, and the negative
+             assertions (assertNoEdgesFrom / assertNoEdgesTo / assertOnlyEdgesFrom /
+             assertEdgeCount) that let a story pin what did NOT happen. It also validates a
+             declared edge's fields against Labels.scrub — nothing here declares one. See
+             AGENTS.md, "The network diagram is observed, never narrated". -->
+        <qits.userflows.version>2026.829.201516</qits.userflows.version>
         <!-- The recording service mocks the same IT boots against (the generic MockService plus
              idp.MockIdp), released out of libs/qits-integrations-quarkus like qits-db-core above
-             (the same-string policy applies the day this repo consumes a newer reactor). -->
-        <qits.service-mock.version>2026.827.71232</qits.service-mock.version>
+             (the same-string policy applies the day this repo consumes a newer reactor).
+             2026.829.201505 is what makes a recorded request carry the STATUS the mock answered
+             with, which is the half TokenValidationBootstrapIT's far-side edge label needs: a
+             method and a path say the keys were asked for, the status says they were served. -->
+        <qits.service-mock.version>2026.829.201505</qits.service-mock.version>
         <qits.maven.repository.url>http://registry.dev.localhost:8080/artifacts/maven/maven</qits.maven.repository.url>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>

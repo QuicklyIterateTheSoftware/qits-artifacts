@@ -4,11 +4,13 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.PackagedProcessIT;
+import eu.wohlben.qits.stories.support.AccessLogSource;
 import eu.wohlben.qits.stories.support.Cli;
 import eu.wohlben.qits.stories.support.StoryMedia;
 import eu.wohlben.qits.stories.support.StoryTarget;
 import eu.wohlben.qits.userflows.Commands;
 import eu.wohlben.qits.userflows.Interactions;
+import eu.wohlben.qits.userflows.NetworkEdge;
 import eu.wohlben.qits.userflows.UserStory;
 import eu.wohlben.qits.userflows.UserStoryDescription;
 import eu.wohlben.qits.userflows.UserflowContext;
@@ -49,6 +51,9 @@ public class DaemonDownloadIT {
   static final String CATEGORY = "daemons";
   static final String SLUG = "a-runner-downloads-the-daemon-version-its-pin-names";
 
+  /** How the diagram names the initiator of everything this story sends. */
+  static final String ACTOR = "a runner";
+
   @TestHTTPResource("/")
   URL root;
 
@@ -69,6 +74,10 @@ public class DaemonDownloadIT {
     String daemon = context.require("story.daemon.name", String.class);
     String version = context.require("story.daemon.version", String.class);
     String pinned = context.require("story.daemon.digest", String.class);
+
+    // Whose traffic the access log's next line is, and what kind. Read at drain time, and the actor
+    // is reset at every story border, so this never inherits the publish story's pipeline.
+    AccessLogSource.attribute(ACTOR, NetworkEdge.PACKAGE);
 
     Path work = commands.workDir();
     commands
@@ -96,13 +105,12 @@ public class DaemonDownloadIT {
     assertEquals(pinned, echoed.orElseThrow(), "the digest the version-addressed route echoes");
     story.note("the downloaded bytes and the echoed digest both match the pin").as("digest-verified");
 
+    // The narrative the wire cannot carry: this one URL is the whole bootstrap, and what comes back
+    // is executed — so a 200 that was HTML rather than a binary would be the failure this documents.
     story
-        .happened(
-            "a runner",
-            "qits-artifacts",
-            "GET /artifacts/daemons/" + DaemonPublishIT.DAEMON + "/" + DaemonPublishIT.VERSION
-                + " -> 200")
+        .note("one URL is the whole bootstrap, and whatever it answers is what the machine executes")
         .as("download-recorded");
+    AccessLogSource.awaitLogged("GET " + DaemonPublishIT.BINARY_PATH);
   }
 
   /** The first value of {@code name} in a raw {@code curl -D} dump, case-insensitively. */
@@ -123,12 +131,15 @@ public class DaemonDownloadIT {
     ReportAssertions.assertCommand(CATEGORY, SLUG, DaemonPublishIT.DAEMON, 0);
     ReportAssertions.assertStepId(CATEGORY, SLUG, "digest-verified");
     ReportAssertions.assertStepId(CATEGORY, SLUG, "download-recorded");
-    ReportAssertions.assertInteraction(
+    // Observed, and counted: a cold bootstrap is exactly one request, so a second edge here would
+    // mean the path a machine actually takes is not the one this story describes.
+    ReportAssertions.assertEdge(
         CATEGORY,
         SLUG,
-        "a runner",
-        "qits-artifacts",
-        "GET /artifacts/daemons/" + DaemonPublishIT.DAEMON + "/" + DaemonPublishIT.VERSION
-            + " -> 200");
+        NetworkEdge.PACKAGE,
+        ACTOR,
+        AccessLogSource.SERVICE,
+        "GET " + DaemonPublishIT.BINARY_PATH + " -> 200");
+    ReportAssertions.assertEdgeCount(CATEGORY, SLUG, 1);
   }
 }

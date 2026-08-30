@@ -5,11 +5,13 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import eu.wohlben.qits.PackagedProcessIT;
+import eu.wohlben.qits.stories.support.AccessLogSource;
 import eu.wohlben.qits.stories.support.Cli;
 import eu.wohlben.qits.stories.support.StoryMedia;
 import eu.wohlben.qits.stories.support.StoryTarget;
 import eu.wohlben.qits.userflows.Commands;
 import eu.wohlben.qits.userflows.Interactions;
+import eu.wohlben.qits.userflows.NetworkEdge;
 import eu.wohlben.qits.userflows.UserStory;
 import eu.wohlben.qits.userflows.UserStoryDescription;
 import eu.wohlben.qits.userflows.UserflowContext;
@@ -47,6 +49,9 @@ public class VideoFetchIT {
   static final String CATEGORY = "ci-videos";
   static final String SLUG = "the-diff-loop-fetches-the-golden-recording-for-a-branch";
 
+  /** How the diagram names the initiator of everything this story sends. */
+  static final String ACTOR = "the diff loop";
+
   private static final ObjectMapper JSON = new ObjectMapper();
 
   @TestHTTPResource("/")
@@ -72,6 +77,10 @@ public class VideoFetchIT {
     String branch = context.require("story.ci-videos.branch", String.class);
     String flow = context.require("story.ci-videos.flow", String.class);
 
+    // Whose traffic the access log's next lines are, and what kind — the screenshot half verbatim,
+    // which is the claim this story exists to make.
+    AccessLogSource.attribute(ACTOR, NetworkEdge.HTTP);
+
     Path work = commands.workDir();
     String blobs = target.apiBase() + "/repositories/" + VideoPublishIT.REPOSITORY + "/blobs";
 
@@ -82,12 +91,7 @@ public class VideoFetchIT {
             "X-Qits-User: " + ScreenshotFetchIT.READER,
             "X-Qits-Roles: qits:admin",
             "golden.json",
-            blobs
-                + "?meta.git.branch.name="
-                + branch
-                + "&meta.qits.userflow.name="
-                + flow
-                + "&latest")
+            blobs + ScreenshotFetchIT.goldenQuery(branch, flow))
         .as("golden-queried");
     assertEquals("200", commands.lastOutput().strip(), "the query's status");
 
@@ -118,14 +122,11 @@ public class VideoFetchIT {
         "the bytes that arrived must hash to the id they were fetched by");
     story.note("the downloaded bytes hash to the id, which is the digest").as("bytes-verified");
 
+    // The narrative the wire cannot carry: nothing about this read had to know it was a recording.
     story
-        .happened(
-            "the diff loop",
-            "qits-artifacts",
-            "GET /artifacts/api/repositories/"
-                + VideoPublishIT.REPOSITORY
-                + "/blobs?meta…&latest -> 200")
+        .note("the same question, the same collapse, the same roles — only the repository differs")
         .as("fetch-recorded");
+    AccessLogSource.awaitLogged("GET " + VideoPublishIT.BLOBS_PATH + "/");
   }
 
   @AfterAll
@@ -140,13 +141,25 @@ public class VideoFetchIT {
     ReportAssertions.assertCommand(CATEGORY, SLUG, "golden.webm", 0);
     ReportAssertions.assertStepId(CATEGORY, SLUG, "bytes-verified");
     ReportAssertions.assertStepId(CATEGORY, SLUG, "fetch-recorded");
-    ReportAssertions.assertInteraction(
+    // The screenshot half's two edges with one segment changed — which is the whole assertion this
+    // story makes about the read surface, now made against observed traffic rather than a sentence.
+    ReportAssertions.assertEdge(
         CATEGORY,
         SLUG,
-        "the diff loop",
-        "qits-artifacts",
-        "GET /artifacts/api/repositories/"
-            + VideoPublishIT.REPOSITORY
-            + "/blobs?meta…&latest -> 200");
+        NetworkEdge.HTTP,
+        ACTOR,
+        AccessLogSource.SERVICE,
+        "GET "
+            + VideoPublishIT.BLOBS_PATH
+            + ScreenshotFetchIT.goldenQuery(VideoPublishIT.BRANCH, VideoPublishIT.FLOW)
+            + " -> 200");
+    ReportAssertions.assertEdge(
+        CATEGORY,
+        SLUG,
+        NetworkEdge.HTTP,
+        ACTOR,
+        AccessLogSource.SERVICE,
+        "GET " + VideoPublishIT.BLOBS_PATH + "/{digest} -> 200");
+    ReportAssertions.assertEdgeCount(CATEGORY, SLUG, 2);
   }
 }
