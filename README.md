@@ -1,4 +1,4 @@
-# qits-artifacts
+# qits-artifacts-service
 
 qits' **hosted byte plane**, env-scoped: the hosted OCI registry the platform pushes its images to,
 the hosted npm registry and maven repository its own libraries publish to, the daemon binaries every
@@ -14,8 +14,8 @@ This repository was `qits-platform-artifacts` and held three things it no longer
 
 | Left | Went to | Why |
 |---|---|---|
-| the pull-through caches — `npm-proxy`, `maven-proxy`, `oci-mirror`, their upstreams and the access-tracked eviction GC | **qits-platform-mirror** | a cache of somebody else's registry is shared across every environment, and holding it was the *only* reason this service was platform-scoped. Without it, this one is an env service again. |
-| the git smart-HTTP host — the `git-storage` module, `eu.wohlben.qits.githost*`, the post-receive fan-out | **qits-githost** | a repository is not an artifact. It only ever shared the storage layout, and every consumer of it (qits-ci, qits-deployments, qits-workspaces, the daemons) is an env service already. |
+| the pull-through caches — `npm-proxy`, `maven-proxy`, `oci-mirror`, their upstreams and the access-tracked eviction GC | **qits-mirror-platform-service** | a cache of somebody else's registry is shared across every environment, and holding it was the *only* reason this service was platform-scoped. Without it, this one is an env service again. |
+| the git smart-HTTP host — the `git-storage` module, `eu.wohlben.qits.githost*`, the post-receive fan-out | **qits-githost-service** | a repository is not an artifact. It only ever shared the storage layout, and every consumer of it (qits-ci, qits-deployments, qits-workspaces, the daemons) is an env service already. |
 | the content-addressed blob store and the three protocol implementations | the libraries **qits-blobstore** and **qits-registries-{common,npm,maven,oci}** | the mirror needs the same store and the same wire code; a library is what stops that being a fork. |
 
 So the two-endpoint topology a client sees: `@qits`-scoped npm packages, qits images and qits jars
@@ -142,7 +142,7 @@ Reads are never guarded — a blob must be usable directly as an `<img>`/`<video
 
 It is not here. The smart-HTTP host, the DFS storage over blobs and the post-receive fan-out are
 **qits-githost**'s, an env service of its own, where the fan-out is durable domain events rather
-than an HTTP call. Its README carries what this section used to.
+than an HTTP call. The `qits-githost-service` README carries what this section used to.
 
 ## The OCI registry
 
@@ -204,7 +204,7 @@ It is not here. The `oci-mirror` type, the upstream rows a mirrored namespace re
 miss path with its tag TTL and its anonymous-bearer dance, and the four `mirror-upstreams` admin
 routes are **qits-platform-mirror**'s — one cache warmed by every environment rather than a copy per
 tier, reached at its own address (`127.0.0.1:8082` on a deployment host, `/v2` at that root) and
-documented in its own README. Third-party images come from there; this service serves what the
+documented in `qits-mirror-platform-service`'s README. Third-party images come from there; this service serves what the
 platform pushed.
 
 Three things about the seam, none of them visible from either README alone:
@@ -455,7 +455,7 @@ while a configured value would be right for one caller and quietly wrong for the
 
 It is not here. The `npm-proxy` type, the `qits.artifacts.npm.proxy.*` keys, the packument TTL with
 its `ETag` revalidation and its serve-stale behaviour, and the tarball miss path are
-**qits-platform-mirror**'s, at its own address and in its own README. The `npmjs` row is seeded
+**qits-platform-mirror**'s, at its own address and in `qits-mirror-platform-service`'s README. The `npmjs` row is seeded
 there.
 
 What this side guarantees: the hosted registry above is unchanged, `NpmProxyProfile` is excluded
@@ -551,7 +551,7 @@ The deploy `PUT` streams rather than buffers, capped by `qits.artifacts.maven.ma
 It is not here. The `maven-proxy` type, the `qits.artifacts.maven.proxy.*` keys, the
 cached-rather-than-derived `maven-metadata.xml` with its TTL and revalidation, the pulled-through
 upstream checksums and the `central` row are **qits-platform-mirror**'s, at its own address and in
-its own README.
+`qits-mirror-platform-service`'s README.
 
 What this side guarantees: the hosted repository above is unchanged — the derived metadata, the
 derived checksums and the three path classes are exactly as described. `MavenProxyProfile` is
@@ -910,7 +910,7 @@ a migration cannot verify one against the running store. Until then: report it; 
 
 ## Garbage collection
 
-> **The cache engine is gone from this repo.** `CacheEvictionStrategy` and the three cache adapters went to qits-platform-mirror with the types they collect, and git pack GC went to qits-githost. What is left is the pin-based `OwnArtifactsStrategy` over the hosted types, the two CI stubs, and the reconciliation and sweep, which are type-agnostic and unchanged.
+> **The cache engine is gone from this repo.** `CacheEvictionStrategy` and the three cache adapters went to qits-mirror-platform-service with the types they collect, and git pack GC went to qits-githost-service. What is left is the pin-based `OwnArtifactsStrategy` over the hosted types, the two CI stubs, and the reconciliation and sweep, which are type-agnostic and unchanged.
 
 **Reading is the default; executing is a separate, deliberate act.** The dry-run plan shipped
 first, the user reviewed it, and only then did the execute route land. Nothing executes without the
@@ -1015,8 +1015,8 @@ not one bespoke rule per type, mapped onto the types by configuration.**
 
 - **`CacheEvictionStrategy`** — a pull-through cache holds somebody else's re-fetchable content, so
   everything unaccessed past the window goes and a live pin is the only thing that stays regardless.
-  **It is not on this classpath any more**: it went to qits-platform-mirror with the three types it
-  collected. The doctrine is named here because the other engine is one half of a pair, and because
+  **It is not on this classpath any more**: it went to qits-mirror-platform-service with the three
+  types it collected. The doctrine is named here because the other engine is one half of a pair, and because
   a `cache` value on the mapping key below is still what a deployment would be refused for.
 - **`OwnArtifactsStrategy`** — the platform's own artifacts keep the **last 2 released versions per
   identity group** whatever their age, plus everything a live pin names; the rest ages out. Anything
@@ -1320,8 +1320,8 @@ around them exists.
 everything unaccessed for longer than the configured window is evicted, a live pin outranks the
 window, and eviction writes no tombstone because re-fetching is what a cache is for. All of it — the
 engine, the three adapters, the proxy eviction doors on the npm and maven registry services, and the
-windows that mapped the types onto it — went to **qits-platform-mirror** with the types it collected.
-Its README carries the rules this section used to.
+windows that mapped the types onto it — went to **qits-mirror-platform-service** with the types it
+collected. Its README carries the rules this section used to.
 
 What is left here is the seam, and it is three sentences:
 
@@ -1604,7 +1604,8 @@ reach, with the single exception named under "The pull-through mirror": the OCI 
 timeouts are still read by wire code the excluded profile does not unregister.
 
 The git host's keys (`qits.repositories.git.*`, `qits.ci.intake-url`, `qits.projects.intake-url`,
-`qits.projects.name-resolver-url`) do not even resolve here any more — they left with qits-githost,
+`qits.projects.name-resolver-url`) do not even resolve here any more — they left with
+qits-githost-service,
 along with the `quarkus.oidc-client` extension whose only user was the post-receive bearer.
 
 `quarkus.http.enable-compression` is in the shipped `application.properties` and **cannot be moved to
@@ -1627,12 +1628,12 @@ carrying a copy, so the absolute paths the tests assert are the ones the process
 ## What is deliberately *not* here
 
 - **Git, in every sense.** Cloning, branches, commits, submodules, the smart-HTTP host and the
-  post-receive fan-out are **qits-githost**'s; the projects and repositories context, the GitHub
-  backup and the alias table are
-  [qits-projects](https://github.com/QuicklyIterateTheSoftware/qits-projects)'. This repo's git
-  history holds the host's files, which is the only trace left of it here.
+  post-receive fan-out are **qits-githost-service**'s; the projects and repositories context, the
+  GitHub backup and the alias table are
+  [qits-projects-service](https://github.com/QuicklyIterateTheSoftware/qits-projects-service)'. This
+  repo's git history holds the host's files, which is the only trace left of it here.
 - **CI.** Pipelines, runners and the intake live in
-  [qits-ci](https://github.com/QuicklyIterateTheSoftware/qits-ci). It reaches this service as an
+  [qits-ci-service](https://github.com/QuicklyIterateTheSoftware/qits-ci-service). It reaches this service as an
   ordinary client — pushing images, publishing packages, downloading a daemon binary.
 - **Building images.** The registry stores and serves them; nothing here produces one. qits-ci step
   containers get no docker socket by design, so `docker build` inside a step fails today and keeps
