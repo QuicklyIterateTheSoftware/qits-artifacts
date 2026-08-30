@@ -43,9 +43,9 @@
 # not roll.
 event: SCMRelease
 when:
-  - repository: { exact: qits-platform-artifacts }
+  - repository: { exact: qits-artifacts-service }
 artifacts:
-  - { type: docker, name: qits/qits-platform-artifacts }
+  - { type: docker, name: qits/qits-artifacts }
 steps:
     # node-docker-base, the image ci-event-build.yml already uses: node, npm and git for half one,
     # the docker CLI for half two — and node is also what reads the event payload, which is JSON.
@@ -70,7 +70,7 @@ steps:
       case "$version" in
         ''|*[!0-9A-Za-z._+-]*) echo "refusing an implausible version: $version" >&2; exit 1 ;;
       esac
-      echo "releasing qits/qits-platform-artifacts:$version"
+      echo "releasing qits/qits-artifacts:$version"
 
       # THE TAG IS THE CHECKOUT TARGET, and it is the only reason this run needs one. An
       # event-triggered run is cloned at the head of main, which is where the release commit is
