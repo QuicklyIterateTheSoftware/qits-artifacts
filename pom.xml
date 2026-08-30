@@ -44,7 +44,7 @@
          and the mandatory -Dqits.variant=oauth|forwardauth|local auth profiles. -->
     <groupId>eu.wohlben.qits</groupId>
     <artifactId>qits-artifacts</artifactId>
-    <version>2026.830.93406</version>
+    <version>2026.830.134244</version>
     <packaging>pom</packaging>
     <name>qits-artifacts</name>
 
@@ -59,7 +59,7 @@
     </modules>
 
     <properties>
-        <qits.auth-core.version>2026.817.175344</qits.auth-core.version>
+        <qits.auth-core.version>2026.830.133330</qits.auth-core.version>
         <!-- The two shared libraries the byte plane was carved into. Published from their own
              repositories (libs/qits-blobstore, libs/qits-registries) and consumed here like any
              other artifact.
