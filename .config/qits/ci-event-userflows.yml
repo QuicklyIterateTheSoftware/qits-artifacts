@@ -78,7 +78,11 @@
 # release file's discipline).
 event: SCMPublishCommit
 when:
-  - repoId: { exact: qits-artifacts }
+  # repoName, not repoId: the git host's own coordinate can be an opaque UUID since the
+  # identity cutover, so a name match on repoId is not dependable. The push event echoes the
+  # public name the push was addressed with, which always is; a rename updates this line in
+  # the same campaign.
+  - repoName: { exact: qits-artifacts-service }
     suppressCi: { exact: "false" }
 checkout:
   branch: branch
@@ -96,12 +100,12 @@ steps:
       # about now, and everything below — the submodule fetch, npm, maven, the docs PUT — dials it.
       sleep 120
 
-      # The submodule fetch under the OLD .gitmodules entry name, and the lockfile origin swap
+      # The submodule fetch under the .gitmodules entry name, and the lockfile origin swap
       # (broad proxy sed FIRST, narrow @qits sed SECOND) — ci-event-build.yml's half one carries
       # the long form of every rule here, and the two should keep matching. Origins are derived
       # with sed rather than node -p: this image deliberately carries no node of its own.
-      frontend_url="${QITS_CI_REPOSITORY_URL%/*}/qits-spa-artifacts"
-      git -c submodule.qits-platform-spa-artifacts.url="$frontend_url" submodule update --init service/src/main/webui
+      frontend_url="${QITS_CI_REPOSITORY_URL%/*}/qits-artifacts-frontend"
+      git -c submodule.qits-artifacts-frontend.url="$frontend_url" submodule update --init service/src/main/webui
       npm_hosted_origin=$(echo "$QITS_NPM_REGISTRY_URL" | sed -E 's#^(https?://[^/]+).*#\1#')
       npm_proxy_origin=$(echo "$QITS_NPM_PROXY_URL" | sed -E 's#^(https?://[^/]+).*#\1#')
       npm_hosted_path=$(echo "$QITS_NPM_REGISTRY_URL" | sed -E 's#^https?://[^/]+##')

@@ -16,6 +16,16 @@
 # held.
 deployment_target: environment
 
+# WHAT THIS REPOSITORY DEPLOYS AS, held still across the repository rename. The repository is
+# qits-artifacts-service now; the application is still qits-artifacts, so nothing that is running
+# moves: the swarm service and its wire alias, the container, the image qits/qits-artifacts the
+# build pushes, the provisioned database, the derived host label, the extras family and the
+# QITS_APPLICATION the container boots with all keep the names they have. Omitted, this name would
+# be DERIVED from the repository, and the rename would read as a decommission plus a new application
+# rather than a rename. Changing the value later is exactly that decommission, so it does not change
+# again.
+application: qits-artifacts
+
 # The machine surfaces. The edge path-routes both prefixes on every host, so a build reaches
 # /artifacts/npm and a docker client reaches /v2 wherever it asks. The browser surface is what this
 # service's own host serves at its root and needs no route entry.
