@@ -51,6 +51,8 @@ class LiveBlobCensusTest extends SeededStoreFixture {
         sorted(taken.live(NpmPackagesProfile.KEY).keySet()));
     assertEquals(Set.of(), taken.live(MavenPackagesProfile.KEY).keySet());
     assertEquals(Set.of(), taken.live(DaemonBinariesProfile.KEY).keySet());
+    assertEquals(Set.of(), taken.live(DocsProfile.KEY).keySet());
+    assertEquals(Set.of(), taken.live(SbomProfile.KEY).keySet());
     assertEquals(Set.of(), taken.live(CiScreenshotsProfile.KEY).keySet());
     assertEquals(Set.of(), taken.live(CiVideosProfile.KEY).keySet());
   }
@@ -74,6 +76,35 @@ class LiveBlobCensusTest extends SeededStoreFixture {
     assertTrue(
         taken.rowless().stream().noneMatch(Set.of(maven.jar(), maven.pom())::contains),
         "nothing maven deployed may be classified as an orphan");
+  }
+
+  @Test
+  void whatDocsPublishedIsLiveUnderItsOwnTypeRatherThanOrphaned() throws Exception {
+    // The docs slice was MISSING until the SBOM type landed beside it, and the miss was the daemon
+    // story a second time: every published bundle's file read as a row-less orphan, and a blob in
+    // rowless() is one BlobSweep skips — so a collected docs version could never free a byte.
+    String file = seedDocs();
+
+    LiveBlobCensus.Census taken = census.take();
+
+    assertEquals(Set.of(file), taken.live(DocsProfile.KEY).keySet());
+    assertEquals((long) DOCS_FILE, taken.liveBytes(DocsProfile.KEY), "sized from the row");
+    assertTrue(
+        taken.rowless().stream().noneMatch(file::equals),
+        "nothing a published bundle names may be classified as an orphan");
+  }
+
+  @Test
+  void aStoredSbomIsLiveUnderItsOwnTypeRatherThanOrphaned() throws Exception {
+    // The same claim for the new type, made before it has any bytes to lose: a document the census
+    // cannot see is a document the sweep can never reclaim, whatever the SBOM plan condemns.
+    String document = seedSbom();
+
+    LiveBlobCensus.Census taken = census.take();
+
+    assertEquals(Set.of(document), taken.live(SbomProfile.KEY).keySet());
+    assertEquals((long) SBOM_DOCUMENT, taken.liveBytes(SbomProfile.KEY), "sized from the row");
+    assertTrue(taken.rowless().stream().noneMatch(document::equals));
   }
 
   @Test
@@ -104,6 +135,8 @@ class LiveBlobCensusTest extends SeededStoreFixture {
   @Test
   void theStoreSummaryIsThisCensusRatherThanASecondReadingOfTheSameStore() throws Exception {
     seed();
+    seedDocs();
+    seedSbom();
 
     LiveBlobCensus.Census taken = census.take();
     StoreSummary summary = explorer.storeSummary();
@@ -114,7 +147,12 @@ class LiveBlobCensusTest extends SeededStoreFixture {
     assertEquals(0L, summary.npmProxyTarballBytes(), "nor can a row carry one");
     assertEquals(taken.liveBytes(MavenPackagesProfile.KEY), summary.mavenPublishedBytes());
     assertEquals(taken.liveBytes(DaemonBinariesProfile.KEY), summary.daemonBinaryBytes());
-    assertEquals(taken.rowlessBytes(), summary.orphanBytes());
+    assertEquals(taken.liveBytes(DocsProfile.KEY), summary.docsBytes());
+    assertEquals(taken.liveBytes(SbomProfile.KEY), summary.sbomBytes());
+    assertEquals(
+        taken.rowlessBytes(),
+        summary.orphanBytes(),
+        "the docs and sbom bytes are live under their own types — never inside this figure");
     assertEquals(taken.diskTotalBytes(), summary.diskTotalBytes());
     assertEquals(taken.ociPerImageSumBytes(), summary.ociPerImageSumBytes());
   }

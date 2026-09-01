@@ -87,6 +87,7 @@ abstract class GcFixture {
   @Inject DaemonBinaryRepository daemonBinaries;
   @Inject eu.wohlben.qits.artifacts.persistence.DocsSiteRepository docsSites;
   @Inject eu.wohlben.qits.artifacts.persistence.DocsFileRepository docsFiles;
+  @Inject eu.wohlben.qits.artifacts.persistence.SbomDocumentRepository sbomDocuments;
   @Inject OciMirrorUpstreamRepository mirrorUpstreams;
   @Inject OciMirrorTagCheckRepository mirrorTagChecks;
   @Inject BlobDiskIndex diskIndex;
@@ -122,6 +123,9 @@ abstract class GcFixture {
               // first anyway keeps the wipe legible.
               docsFiles.deleteAll();
               docsSites.deleteAll();
+              // The SBOM rows have no cascade to ride: fk_sbom_document_repository points straight
+              // at artifact_repository, so they go before the repositories do.
+              sbomDocuments.deleteAll();
               records.deleteAll();
               // The mirror upstreams too: their slug is a foreign key into artifact_repository, so
               // the pairing that makes a namespace resolvable is also what makes the wipe ordered.
@@ -402,6 +406,40 @@ abstract class GcFixture {
                 file.mediaType = "text/plain";
                 docsFiles.persist(file);
               }
+            });
+  }
+
+  /**
+   * One stored SBOM document, with both of V3's timestamps under the case's control — the SBOM half
+   * of what {@code docsSite} is for bundles and {@code daemonRow} is for binaries.
+   *
+   * <p>{@code accessedAt} may be null, which is what a document nothing has scanned since it was
+   * stored really carries: the adapter folds {@code created_at} in as the first access, and a
+   * fixture that always set both could not show that.
+   */
+  void sbomRow(
+      String repository,
+      String packageType,
+      String packageName,
+      String version,
+      String blobId,
+      Instant createdAt,
+      Instant accessedAt) {
+    QuarkusTransaction.requiringNew()
+        .run(
+            () -> {
+              eu.wohlben.qits.artifacts.entity.SbomDocument row =
+                  new eu.wohlben.qits.artifacts.entity.SbomDocument();
+              row.repository = repository;
+              row.packageType = packageType;
+              row.packageName = packageName;
+              row.version = version;
+              row.blobId = blobId;
+              row.sizeBytes = 1;
+              row.specVersion = "1.5";
+              row.createdAt = createdAt;
+              row.accessedAt = accessedAt;
+              sbomDocuments.persist(row);
             });
   }
 

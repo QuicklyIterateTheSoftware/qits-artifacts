@@ -42,8 +42,8 @@ import org.junit.jupiter.api.Test;
 @QuarkusTest
 class GcPinsTest extends GcFixture {
 
-  /** The seven types this deployment registers — see {@code GcPlanTest} for the arithmetic. */
-  private static final int REGISTERED_TYPES = 7;
+  /** The eight types this deployment registers — see {@code GcPlanTest} for the arithmetic. */
+  private static final int REGISTERED_TYPES = 8;
 
   @Inject GcPlanner planner;
   @Inject GcSweepExecutor executor;

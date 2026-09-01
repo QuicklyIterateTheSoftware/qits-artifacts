@@ -14,6 +14,7 @@ import eu.wohlben.qits.blobstore.control.RepositoryTypeProfiles;
 import eu.wohlben.qits.artifacts.control.MavenPackagesProfile;
 import eu.wohlben.qits.artifacts.control.NpmPackagesProfile;
 import eu.wohlben.qits.artifacts.control.OciImagesProfile;
+import eu.wohlben.qits.artifacts.control.SbomProfile;
 import eu.wohlben.qits.blobstore.entity.RepositoryTypeProfile;
 import eu.wohlben.qits.artifacts.gc.dto.GcPlanReport;
 import eu.wohlben.qits.artifacts.gc.dto.GcTypeConfiguration;
@@ -43,7 +44,8 @@ import org.junit.jupiter.api.Test;
  * <p>Every type here is on the OWN engine or excluded. The three cache types went to
  * qits-platform-mirror with the eviction engine that collected them, so what is left is the
  * pin-based half of the settlement: {@code oci-images}, {@code npm-packages}, {@code
- * maven-packages}, {@code daemon-binaries} and {@code docs} collected, the two CI types excluded.
+ * maven-packages}, {@code daemon-binaries}, {@code docs} and {@code sboms} collected, the two CI
+ * types excluded.
  */
 @QuarkusTest
 class GcTypeConfigTest extends GcFixture {
@@ -55,7 +57,7 @@ class GcTypeConfigTest extends GcFixture {
   @Test
   void everyRepositoryTypeIsConfiguredAndTheShippedValuesAreTheSettlements() {
     // The settlement's own numbers: P30D for oci-images and npm-packages, P90D for maven-packages,
-    // daemon-binaries and docs; the two CI types excluded and honest about it. Looping over the
+    // daemon-binaries, docs and sboms; the two CI types excluded and honest about it. Looping over the
     // REGISTERED types rather than listing cases is what makes a newly contributed profile fail here
     // — a type with no policy is a decision nobody took, not a default.
     Map<String, GcPolicy> strategies = new TreeMap<>();
@@ -70,10 +72,11 @@ class GcTypeConfigTest extends GcFixture {
     assertEquals(GcPolicy.OWN, strategies.get(MavenPackagesProfile.KEY));
     assertEquals(GcPolicy.OWN, strategies.get(DaemonBinariesProfile.KEY));
     assertEquals(GcPolicy.OWN, strategies.get(DocsProfile.KEY));
+    assertEquals(GcPolicy.OWN, strategies.get(SbomProfile.KEY));
     assertEquals(GcPolicy.EXCLUDED, strategies.get(CiScreenshotsProfile.KEY));
     assertEquals(GcPolicy.EXCLUDED, strategies.get(CiVideosProfile.KEY));
     assertEquals(
-        7,
+        8,
         strategies.size(),
         "the cache types are not merely unconfigured here — they are unregistered");
 
@@ -82,6 +85,7 @@ class GcTypeConfigTest extends GcFixture {
     assertEquals(Duration.ofDays(90), config.requireWindow(MavenPackagesProfile.KEY));
     assertEquals(Duration.ofDays(90), config.requireWindow(DaemonBinariesProfile.KEY));
     assertEquals(Duration.ofDays(90), config.requireWindow(DocsProfile.KEY));
+    assertEquals(Duration.ofDays(90), config.requireWindow(SbomProfile.KEY));
     assertEquals(Optional.empty(), windows.get(CiScreenshotsProfile.KEY));
     assertEquals(Optional.empty(), windows.get(CiVideosProfile.KEY));
   }
@@ -101,7 +105,8 @@ class GcTypeConfigTest extends GcFixture {
             "docs",
             "maven-packages",
             "npm-packages",
-            "oci-images"),
+            "oci-images",
+            "sboms"),
         report.configuration().stream().map(GcTypeConfiguration::type).toList(),
         "one line per registered type, in the registry's own order, so the echo and the per-type"
             + " plans read down the page together");
@@ -217,6 +222,15 @@ class GcTypeConfigTest extends GcFixture {
       assertEquals(List.of(), kept.get(wire));
     }
 
+    // The two collected types this fixture seeds nothing under: planned by the own engine, and
+    // condemning nothing because there is nothing there. That is the shape a newly registered type
+    // has to have on its first landing — an empty plan, not a missing line.
+    for (String type : List.of(DocsProfile.KEY, SbomProfile.KEY)) {
+      String wire = RepositoryTypeProfile.wireNameOf(type);
+      assertEquals(List.of(), dead.get(wire), wire + " has no rows in this fixture");
+      assertEquals(List.of(), kept.get(wire), wire);
+    }
+
     // The blob half of the same comparison: the cold daemon binary, the cold published tarball and
     // the cold jar. The cold image tag frees nothing on its own — its manifest is still named by the
     // tags beside it, which is the reconciliation doing its job.
@@ -243,7 +257,8 @@ class GcTypeConfigTest extends GcFixture {
             NpmPackagesProfile.KEY,
             MavenPackagesProfile.KEY,
             DaemonBinariesProfile.KEY,
-            DocsProfile.KEY)) {
+            DocsProfile.KEY,
+            SbomProfile.KEY)) {
       assertTrue(
           typePlan(report, type).error().contains("live pins unavailable"),
           RepositoryTypeProfile.wireNameOf(type) + ": " + typePlan(report, type).error());

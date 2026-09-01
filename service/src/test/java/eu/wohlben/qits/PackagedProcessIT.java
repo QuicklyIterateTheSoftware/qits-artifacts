@@ -683,7 +683,7 @@ public class PackagedProcessIT {
     // nothing references. The store here holds blobs pushed by the cases above, so the row-less
     // figures are a real reading rather than a zero that would pass either way.
     //
-    // Every one of the seven REGISTERED types is claimed. Seven, not ten: the three cache profiles
+    // Every one of the eight REGISTERED types is claimed. Eight, not ten: the three cache profiles
     // are vetoed out of bean discovery here, so a plan that reported on them would be reporting on
     // qits-platform-mirror's types. oci-images and daemon-binaries must name their
     // strategy — and, with no qits-platform-deployments and no qits-ci to answer, must report the refusal rather than
@@ -698,7 +698,7 @@ public class PackagedProcessIT {
         .statusCode(200)
         .body("dryRun", equalTo(true))
         .body("graceWindow", equalTo("P7D"))
-        .body("types", hasSize(7))
+        .body("types", hasSize(8))
         .body("types.find { it.type == 'oci-images' }.strategy", equalTo("OciImageGcStrategy"))
         .body("types.find { it.type == 'oci-images' }.error", containsString("qits-platform-deployments"))
         .body("types.find { it.type == 'oci-images' }.dead", hasSize(0))
@@ -760,7 +760,7 @@ public class PackagedProcessIT {
         .statusCode(200)
         .body("dryRun", equalTo(false))
         .body("graceWindow", equalTo("P7D"))
-        .body("types", hasSize(7))
+        .body("types", hasSize(8))
         .body("aborted", containsString("qits-platform-deployments"))
         .body("types.find { it.type == 'oci-images' }.error", containsString("qits-platform-deployments"))
         .body("types.find { it.type == 'npm-packages' }.deleted", hasSize(0))

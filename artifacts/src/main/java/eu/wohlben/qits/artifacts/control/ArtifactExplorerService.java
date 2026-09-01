@@ -452,6 +452,8 @@ public class ArtifactExplorerService {
         taken.liveBytes(MavenPackagesProfile.KEY),
         0L,
         taken.liveBytes(DaemonBinariesProfile.KEY),
+        taken.liveBytes(DocsProfile.KEY),
+        taken.liveBytes(SbomProfile.KEY),
         taken.diskTotalBytes());
   }
 

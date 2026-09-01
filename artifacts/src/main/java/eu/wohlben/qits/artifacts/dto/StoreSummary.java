@@ -4,7 +4,7 @@ package eu.wohlben.qits.artifacts.dto;
  * The honesty panel: every way of saying how big this store is, named rather than reconciled.
  *
  * <p>They do not add up, and the gaps are large enough to look like a bug — which is the reason all
- * eleven are reported together instead of one being picked. An unlabelled byte count over a
+ * thirteen are reported together instead of one being picked. An unlabelled byte count over a
  * content-addressed, globally deduped store is a lie with a number in it.
  *
  * @param ociPerImageSumBytes the per-image unions, added. What the image list's column sums to, and
@@ -43,8 +43,14 @@ package eu.wohlben.qits.artifacts.dto;
  *     {@code daemon_binary} is the second protocol table that carries its size. Reported as its own
  *     figure rather than folded into any other because it is the one class whose bytes a running
  *     service downloads and executes: it has to be legible on the kept side of every report.
+ * @param docsBytes published documentation bundles' files, deduped and sized from the rows. This
+ *     figure was missing — every published bundle counted inside {@link #orphanBytes} — which was
+ *     the daemon story replayed: a type whose blobs the census cannot see reports dishonestly
+ *     <em>and</em> can never free a byte, because the sweep skips row-less blobs.
+ * @param sbomBytes the stored CycloneDX documents, deduped and sized from the rows.
  * @param diskTotalBytes every blob file under the blob root, which is the number the filesystem
- *     agrees with. It exceeds the two OCI unions plus the npm, maven and daemon figures by exactly {@link
+ *     agrees with. It exceeds the two OCI unions plus the npm, maven, daemon, docs and sbom figures
+ *     by exactly {@link
  *     #orphanBytes} — provided no blob is reached by two types at once, which content addressing
  *     permits and nothing forbids. That is the one way these figures can over-count, and it is the
  *     reason the census, not this record, is what a sweep reconciles over.
@@ -60,4 +66,6 @@ public record StoreSummary(
     long mavenPublishedBytes,
     long mavenProxyBytes,
     long daemonBinaryBytes,
+    long docsBytes,
+    long sbomBytes,
     long diskTotalBytes) {}
