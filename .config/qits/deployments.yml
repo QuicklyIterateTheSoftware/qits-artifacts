@@ -38,10 +38,18 @@ host: registry
 
 # Where this application hangs in the sidebar: under the four kinds of repository that publish
 # bytes here. A frontend or a CLI publishes documentation and runs CI, but nothing of its own lands
-# in this store, so those two slots are deliberately empty. The position is per slot: 5 is
+# in this store, so those two slots are deliberately empty. The position is per slot: 6 is
 # Artifacts' place in the platform's fixed order of the per-repository applications
-# (Api Docs 1, Docs 2, Code 3, CI 4, Artifacts 5, Configuration 6, Workspaces 7).
-navigation-entries: services.details.Artifacts:5, daemons.details.Artifacts:5, libs.details.Artifacts:5, images.details.Artifacts:5
+# (Api Docs 1, Docs 2, Release Requests 3, Code 4, CI 5, Artifacts 6, Configuration 7, Workspaces 8).
+#
+# ARTIFACTS MOVED 5 -> 6 ON 2026-09-01, and nothing about this application changed. qits-projects put
+# a Release Requests row at position 3, above Code, and every entry from Code down moved up one in
+# the same change — this file, qits-githost, qits-ci, qits-configuration and qits-workspaces, one
+# line each. Only the four slots this file declares are renumbered: the two it leaves empty stay
+# empty, because a position is per slot and an absent entry has none. The order is stated in
+# integers rather than left to the edge's position-then-label tie-break so that renaming a row
+# cannot silently reorder the group.
+navigation-entries: services.details.Artifacts:6, daemons.details.Artifacts:6, libs.details.Artifacts:6, images.details.Artifacts:6
 
 # A postgres role and database of this application's own (qits_artifacts by derivation), created
 # on the tier's postgres BEFORE the successor starts and injected as QITS_RESOURCE_DB_URL /
