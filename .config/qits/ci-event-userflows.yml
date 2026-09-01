@@ -118,6 +118,10 @@ steps:
       # outranks the submodule's committed .npmrc, and Quinoa's child processes inherit it.
       export npm_config_registry="$QITS_NPM_PROXY_URL"
       export QITS_MAVEN_REPOSITORY_URL="$QITS_MAVEN_REGISTRY_URL"
+      # Maven Central through the platform mirror's in-network alias — empty (an older qits-ci that
+      # injects nothing, or a deployment that turned the mirror plane off) deactivates the settings
+      # profile and Central is resolved directly.
+      export QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_PROXY_URL:-}"
 
       # The platform maven registry exactly as qits-eventstream's step derives it, plus Quinoa's
       # MANAGED node: this image carries none, so the extension downloads its pinned 22.22.0 and
