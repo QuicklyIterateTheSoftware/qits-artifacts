@@ -38,10 +38,12 @@
 # actually types — and those forks resolve maven-deploy-plugin:3.1.4 and maven-dependency-plugin
 # :3.8.1 (~2 MB with their transitive plugin dependencies) into the surrounding build's local
 # repository. In this container ~/.m2 is cold on every run, so both are fetched every time. The
-# outer build's .qits-maven-settings.xml mirrors only the `qits-maven` repository id, so central is
-# already dialled directly rather than through the platform mirror, and the forks inherit those
-# settings without an -s of their own. A container with no route to repo.maven.apache.org fails the
-# maven category outright — this is not a skip, because mvn itself is present.
+# outer build's .qits-maven-settings.xml routes `central` through the platform mirror whenever
+# QITS_MAVEN_CENTRAL_URL is non-empty — this step exports it from the injected
+# QITS_MAVEN_PROXY_URL, and the forks inherit the environment and those settings without an -s of
+# their own — and dials repo1.maven.org directly otherwise. A container with no route to whichever
+# central source is active fails the maven category outright — this is not a skip, because mvn
+# itself is present.
 #
 # THE STORIES' OWN TOOLS ARE NOT THE STEP'S. eu.wohlben.qits.stories.support.Cli resolves each
 # program once per JVM — the -D override the pom fills (${maven.home}/bin/mvn, the .quinoa/node
@@ -118,6 +120,10 @@ steps:
       # outranks the submodule's committed .npmrc, and Quinoa's child processes inherit it.
       export npm_config_registry="$QITS_NPM_PROXY_URL"
       export QITS_MAVEN_REPOSITORY_URL="$QITS_MAVEN_REGISTRY_URL"
+      # Maven Central through the platform mirror's in-network alias — empty (an older qits-ci that
+      # injects nothing, or a deployment that turned the mirror plane off) deactivates the settings
+      # profile and Central is resolved directly.
+      export QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_PROXY_URL:-}"
 
       # The platform maven registry exactly as qits-eventstream's step derives it, plus Quinoa's
       # MANAGED node: this image carries none, so the extension downloads its pinned 22.22.0 and
