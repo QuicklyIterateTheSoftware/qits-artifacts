@@ -842,6 +842,19 @@ where its traffic actually is:
   the environment would publish to the *platform's* registry. npm ranks the command line above the
   environment, so every npm story passes both `--registry=` and `--@qits:registry=` explicitly.
 
+## The store's own first release — what actually went red, observed
+
+The release that BRINGS `/artifacts/sboms` was expected to fail once on the PUT (the step runs
+against the store as DEPLOYED, which for exactly one release is the store without the route). On
+2026.902.45658 it failed EARLIER and better: the sbom export stage's COPY found no
+`service/target/sbom.json`, because cyclonedx-maven-plugin silently skips a module that skips
+maven-deploy — and the service module does, it ships as an image. The fix is
+`-Dcyclonedx.skipNotDeployed=false` on the builder's mvnw line (the `cyclonedx.`-prefixed
+spelling; the bare property is ignored). The bootstrap-ordering quirk remains true for a fresh
+platform — one red release run, once, ever — and cannot be inverted without weakening the
+fail-the-build rule for every ordinary release. The env/dev sha deploy behind the red run brings
+the new store up either way, and the next release publishes clean.
+
 ## What not to "fix"
 
 - `AdminWriteGuard` matches on `getUriInfo().getPath()` against a **set** of prefixes —
