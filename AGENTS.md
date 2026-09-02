@@ -842,6 +842,16 @@ where its traffic actually is:
   the environment would publish to the *platform's* registry. npm ranks the command line above the
   environment, so every npm story passes both `--registry=` and `--@qits:registry=` explicitly.
 
+## The store's own first release — the bootstrap quirk, observed
+
+The release that BRINGS `/artifacts/sboms` also carries the pipeline step that PUTs this image's
+own SBOM there — and that step runs against the store as DEPLOYED, which for exactly one release
+is the store without the route. Observed on 2026.902.45658: the release run goes red on the PUT
+after the image push succeeded, the env/dev sha deploy behind it brings the new store up, and the
+next release (this note's own) publishes clean. Nothing to fix: the ordering cannot be inverted
+without weakening the fail-the-build rule for every ordinary release, and the cost is one red run
+once, ever, per fresh platform.
+
 ## What not to "fix"
 
 - `AdminWriteGuard` matches on `getUriInfo().getPath()` against a **set** of prefixes —
