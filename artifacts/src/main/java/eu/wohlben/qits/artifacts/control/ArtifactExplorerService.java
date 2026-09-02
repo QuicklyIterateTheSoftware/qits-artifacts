@@ -38,6 +38,7 @@ import eu.wohlben.qits.artifacts.persistence.NpmDistTagRepository;
 import eu.wohlben.qits.artifacts.persistence.NpmVersionRepository;
 import eu.wohlben.qits.artifacts.persistence.OciManifestRepository;
 import eu.wohlben.qits.artifacts.persistence.OciTagRepository;
+import eu.wohlben.qits.artifacts.persistence.SbomDocumentRepository;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.time.Instant;
@@ -91,6 +92,7 @@ public class ArtifactExplorerService {
   @Inject DaemonBinaryRepository daemonBinaries;
   @Inject DocsSiteRepository docsSites;
   @Inject DocsFileRepository docsFiles;
+  @Inject SbomDocumentRepository sbomDocuments;
   @Inject OciManifestFootprints footprints;
   @Inject BlobDiskIndex diskIndex;
   @Inject LiveBlobCensus census;
@@ -567,6 +569,11 @@ public class ArtifactExplorerService {
       case DocsProfile.KEY -> docsSites.countByRepository(repository.name);
       case CiScreenshotsProfile.KEY, CiVideosProfile.KEY ->
           records.countByRepository(repository.name);
+      // Stored documents — one number, the same type-dependent meaning as the lines above. This
+      // arm is the one every @QuarkusTest here would miss: the suites wipe rows and seed their
+      // own, so a seeded repository of a type these switches did not serve 400'd the whole
+      // listing only in the PACKAGED process — every browser story timed out on an empty table.
+      case SbomProfile.KEY -> sbomDocuments.countByRepository(repository.name);
       default -> throw unservable(repository);
     };
   }
@@ -582,8 +589,18 @@ public class ArtifactExplorerService {
       case DaemonBinariesProfile.KEY -> daemonBytes(repository.name);
       case DocsProfile.KEY -> docsBytes(repository.name);
       case CiScreenshotsProfile.KEY, CiVideosProfile.KEY -> recordBytes(repository.name);
+      case SbomProfile.KEY -> sbomBytes(repository.name);
       default -> throw unservable(repository);
     };
+  }
+
+  /** Distinct content of the SBOM store — the daemon half verbatim, sized from the rows. */
+  private long sbomBytes(String repository) {
+    Map<String, Long> distinct = new TreeMap<>();
+    for (Object[] blob : sbomDocuments.listDistinctBlobs(repository)) {
+      distinct.putIfAbsent((String) blob[0], (Long) blob[1]);
+    }
+    return OciManifestFootprints.sum(distinct);
   }
 
   /** A row whose type this deployment serves no view of — named, never silently counted as empty. */
