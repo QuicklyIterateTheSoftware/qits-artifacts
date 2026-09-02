@@ -368,6 +368,43 @@ class ArtifactExplorerServiceTest extends ArtifactsTestSupport {
   }
 
   @Test
+  void theListingServesEverySeededTypeIncludingSboms() {
+    // The regression this pins is the invisible kind: every suite here wipes the tables and seeds
+    // its own rows, so a seeded repository of a type the itemCount/sizeOf switches did not serve
+    // 400'd the WHOLE listing only in the packaged process — where the startup seeder had written
+    // the sboms row — and every browser story timed out on a table that never rendered.
+    seedSbomStore();
+
+    Map<String, RepositorySummary> byName = byName(explorer.listRepositories());
+    assertEquals("sboms", byName.get("sboms").type());
+    assertEquals(1, byName.get("sboms").itemCount(), "stored documents");
+    assertEquals(
+        90L,
+        byName.get("sboms").sizeBytes(),
+        "the union over distinct document blobs, sized from the rows");
+  }
+
+  private void seedSbomStore() {
+    repositoryService.ensure("sboms", SbomProfile.KEY);
+    String document = store(filled(90, (byte) 27));
+    QuarkusTransaction.requiringNew()
+        .run(
+            () -> {
+              eu.wohlben.qits.artifacts.entity.SbomDocument row =
+                  new eu.wohlben.qits.artifacts.entity.SbomDocument();
+              row.repository = "sboms";
+              row.packageType = "maven";
+              row.packageName = "eu.wohlben.qits:qits-eventstream";
+              row.version = "2026.901.10";
+              row.blobId = document;
+              row.sizeBytes = 90;
+              row.specVersion = "1.6";
+              row.createdAt = Instant.now();
+              row.persist();
+            });
+  }
+
+  @Test
   void anUnknownRepositoryIsNotFoundAndAWrongTypedOneIsABadRequest() {
     seedNpm();
 

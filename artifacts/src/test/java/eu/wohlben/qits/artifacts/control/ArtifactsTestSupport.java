@@ -14,6 +14,7 @@ import eu.wohlben.qits.artifacts.persistence.NpmVersionTombstoneRepository;
 import eu.wohlben.qits.artifacts.persistence.OciManifestRepository;
 import eu.wohlben.qits.artifacts.persistence.OciMirrorUpstreamRepository;
 import eu.wohlben.qits.artifacts.persistence.OciTagRepository;
+import eu.wohlben.qits.artifacts.persistence.SbomDocumentRepository;
 import io.agroal.api.AgroalDataSource;
 import io.quarkus.agroal.DataSource;
 import io.quarkus.narayana.jta.QuarkusTransaction;
@@ -56,6 +57,8 @@ abstract class ArtifactsTestSupport {
 
   @Inject DocsFileRepository docsFiles;
 
+  @Inject SbomDocumentRepository sbomDocuments;
+
   @Inject OciMirrorUpstreamRepository mirrorUpstreams;
 
   @Inject BlobDiskIndex diskIndex;
@@ -89,6 +92,9 @@ abstract class ArtifactsTestSupport {
               // is enforced — deleting the files here would be a second way to unmake a site, and
               // the schema exists so there is only one.
               docsSites.deleteAll();
+              // The SBOM rows have no cascade to ride, unlike docs': fk_sbom_document_repository
+              // points straight at artifact_repository, so they go before the repositories do.
+              sbomDocuments.deleteAll();
               records.deleteAll();
               // The mirror upstreams too: their slug is a foreign key into artifact_repository, so
               // the pairing that makes a namespace resolvable is also what makes the wipe ordered.

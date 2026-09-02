@@ -2,7 +2,8 @@
 
 qits' **hosted byte plane**, env-scoped: the hosted OCI registry the platform pushes its images to,
 the hosted npm registry and maven repository its own libraries publish to, the daemon binaries every
-CI step downloads and executes, the documentation bundles qits-docs serves back, the CI media the
+CI step downloads and executes, the documentation bundles qits-docs serves back, the CycloneDX
+bill of materials of every release, the CI media the
 golden-diff loop produces — and the pin-based garbage collection over all of them.
 
     mvn verify        # a clone of this repo alone builds and tests green — no monorepo, no docker
@@ -44,9 +45,9 @@ the mirror's DAOs are live beans here. See "The pull-through mirror".
 
 | Module | What |
 |---|---|
-| `artifacts/` | What did not move out: the docs and daemon registries (entities, persistence, services), the store explorer, the live blob census, the repository seeder, the two repository-type **profile beans** this service contributes (`DAEMON_BINARIES`, `DOCS`) — and the Flyway lineage. A library jar: no web, no JAX-RS. |
+| `artifacts/` | What did not move out: the docs, daemon and SBOM registries (entities, persistence, services), the store explorer, the live blob census, the repository seeder, the three repository-type **profile beans** this service contributes (`DAEMON_BINARIES`, `DOCS`, `SBOMS`) — and the Flyway lineage. A library jar: no web, no JAX-RS. |
 | `gc/` | `eu.wohlben.qits.artifacts.gc` (+ `.dto`) — garbage collection: the pin-based own-artifacts engine, the per-type adapters, the planner, the reconciliation and the sweep, plus the two pin ports (`CdDeploymentPins`, `CiDaemonPins`) and their HTTP adapters. A *process* modelled from within this service, not artifacts domain. Depends on `artifacts` and, one way, never back. |
-| `service/` | `eu.wohlben.qits.artifacts.api` (the JAX-RS boundary), `eu.wohlben.qits.docs` and `eu.wohlben.qits.daemon` (two raw Vert.x wires), and the SPA. The npm, maven and OCI wires are **not** written here any more — they arrive as beans on the qits-registries jars and register their own routes. |
+| `service/` | `eu.wohlben.qits.artifacts.api` (the JAX-RS boundary), `eu.wohlben.qits.docs`, `eu.wohlben.qits.daemon` and `eu.wohlben.qits.sbom` (three raw Vert.x wires), and the SPA. The npm, maven and OCI wires are **not** written here any more — they arrive as beans on the qits-registries jars and register their own routes. |
 | `service/src/main/webui/` | The SPA submodule — an Angular app, built into the app by Quinoa and served at the **root** of this service's own host. Not Java, and not a Maven module. |
 
 `artifacts/` and `gc/` are library jars; **`service/` is the application** — it carries
@@ -56,7 +57,7 @@ the mirror's DAOs are live beans here. See "The pull-through mirror".
     java -jar service/target/quarkus-app/quarkus-run.jar   # :8080 — SPA /, blobs /artifacts/api/**,
                                                            #         npm /artifacts/npm/**, maven /artifacts/maven/**,
                                                            #         docs /artifacts/docs/**, daemons /artifacts/daemons/**,
-                                                           #         images /v2/**
+                                                           #         sboms /artifacts/sboms/**, images /v2/**
 
     ./mvnw verify -Dnative
     ./service/target/qits-artifacts                        # same routes, ~35ms to listening
@@ -91,16 +92,16 @@ and rewrites nothing, so there is no unprefixed form, on `qits-net` either.
 
 Note the route stacks resolve differently: `/artifacts/api/**` is JAX-RS and moves with
 `quarkus.rest.path`; `/artifacts/npm/**`, `/artifacts/maven/**`, `/artifacts/docs/**`,
-`/artifacts/daemons/**` and `/v2/**` are registered straight onto the Vert.x router with the segment
-as a literal, and do not.
+`/artifacts/daemons/**`, `/artifacts/sboms/**` and `/v2/**` are registered straight onto the Vert.x
+router with the segment as a literal, and do not.
 
 **Which types this deployment registers is one line of configuration.** Repository types are
 contributed as `RepositoryTypeProfile` beans, and each qits-registries module ships *both* halves of
 its format — hosted and cache — so the cache profiles arrive on the classpath whether this service
 wants them or not. `quarkus.arc.exclude-types` in `service/src/main/resources/application.properties`
 vetoes the three, which is what makes "the caches are the mirror's" true rather than merely
-intended: `RepositoryTypeProfiles` then indexes exactly seven keys, `ensure` answers a request for
-any other with a 400 naming what IS registered, and the GC plan reports those same seven.
+intended: `RepositoryTypeProfiles` then indexes exactly eight keys, `ensure` answers a request for
+any other with a 400 naming what IS registered, and the GC plan reports those same eight.
 
 `artifacts/` owns its **own datasource, persistence unit and Flyway lineage**
 (`db/artifacts/migration`, a separate H2 under `~/.qits/data/artifacts`). It always did — that
@@ -398,7 +399,7 @@ registry=http://qits-platform-mirror:8080/artifacts/npm/npmjs/         # everyth
 @qits:registry=http://qits-platform-artifacts:8080/artifacts/npm/npm/  # ours, from the hosted repo
 ```
 
-The `npm` row is seeded at startup alongside `qits`, `maven`, `daemons` and `docs`, so a fresh
+The `npm` row is seeded at startup alongside `qits`, `maven`, `daemons`, `docs` and `sboms`, so a fresh
 deployment needs no manual step. Additional repositories are created with the ordinary ensure
 endpoint, `{"type":"npm-packages"}`.
 
@@ -498,8 +499,8 @@ publish-if-absent is the versioning convention, so a tag only ever moves as part
 verbatim: npm lives at `/artifacts/npm/npm/<pkg>`, so the platform's own library deploys to
 `/artifacts/maven/maven/eu/wohlben/qits/qits-eventstream/1.0.0/qits-eventstream-1.0.0.jar`. The
 first segment is the `artifact_repository` row; `maven` (type `maven-packages`, hosted) is seeded at
-startup alongside `qits`, `npm`, `daemons` and `docs`. Maven accepts a repository URL of any depth,
-so — like npm and unlike
+startup alongside `qits`, `npm`, `daemons`, `docs` and `sboms`. Maven accepts a repository URL of
+any depth, so — like npm and unlike
 `/v2` — there is no root-level segment, no gateway change, and no client-side routing story beyond
 declaring the repository.
 
@@ -618,7 +619,7 @@ while passing every test small enough to be quick.
 ## The documentation bundles
 
 `DocsRoutes` serves published documentation sites at `/artifacts/docs/<repository>/<site>/-/<version>`.
-`docs` (type `docs`) is seeded at startup alongside `qits`, `npm`, `maven` and `daemons`.
+`docs` (type `docs`) is seeded at startup alongside `qits`, `npm`, `maven`, `daemons` and `sboms`.
 
 ```
 PUT  /artifacts/docs/<repo>/<site>/-/<version>          publish one bundle — a streamed .tar.gz
@@ -669,6 +670,42 @@ can add one and can never change one.
 
 `media_type` is resolved from the file **extension** at publish and stored, never sniffed —
 `MediaTypeSniffer` has no `woff2` entry and would reject exactly the files a static site is made of.
+
+## The SBOM store
+
+`SbomRoutes` serves one CycloneDX document per released artifact at
+`/artifacts/sboms/<packageType>/<packageName>/-/<version>`. `sboms` (type `sboms`) is seeded at
+startup alongside the other hosted roots.
+
+```
+PUT  /artifacts/sboms/<type>/<name>/-/<version>   publish one document — a streamed JSON body
+GET  /artifacts/sboms/<type>/<name>/-/<version>   the document, byte for byte, with its specVersion
+GET  /artifacts/sboms/<type>/<name>               its stored versions, newest first
+DELETE anywhere under the base                    405 — no delete; the append-only stance
+anything else under the base                      404 with a short text body, never HTML
+```
+
+**The path IS the `SoftwareRelease` identity** — `(packageType, packageName, version)` spelled
+exactly as qits-ci announces it, so a consumer of that event fetches the document with no
+translation step. `packageType` is one of `npm`, `maven`, `docker`, `daemon`; the name is variable
+depth (`eu.wohlben.qits:qits-eventstream`, `@qits/ui-components`, `qits/qits-artifacts`), which is
+why `/-/` separates it from the version, npm's separator reused as `DocsPaths` reuses it. There is
+**no repository segment**: there is exactly one `sboms` row, so a segment naming it would be a
+constant every publisher has to get right.
+
+**A re-PUT is `200 alreadyPublished`, not the daemon's `409`.** This publish sits *inside* a release
+run, one step after the artifact publish, and release steps are retried and replayed — a 409 would
+turn every replay of a green release into a red one over a document already exactly where it
+belongs. The property that matters is immutability, which holds either way: the stored bytes never
+change, and the route echoes their digest.
+
+**Nothing here is authenticated**, the posture every other wire under `/artifacts` holds, and the
+publish streams rather than buffers — no `BodyHandler`, capped by `qits.artifacts.sbom.max-size`
+(default 16M).
+
+GC keeps the last 2 **released** documents of every package plus anything read inside `P90D`, and
+the read that matters is qits-platform-maintenance's: it re-reads a live artifact's document on its
+scan cadence, which is why nothing pins one by coordinate. See "Garbage collection".
 
 ## The explorer API
 
@@ -1057,13 +1094,13 @@ one.
 | type | strategy | window |
 |---|---|---|
 | `oci-images`, `npm-packages` | `own` | `P30D` |
-| `maven-packages`, `daemon-binaries`, `docs` | `own` | `P90D` |
+| `maven-packages`, `daemon-binaries`, `docs`, `sboms` | `own` | `P90D` |
 | `ci-screenshots`, `ci-videos` | `excluded` | — (a window beside a type nobody collects reads as a running rule) |
 
-`maven-packages`, `daemon-binaries` and `docs` get the longer window for one reason in three
+`maven-packages`, `daemon-binaries`, `docs` and `sboms` get the longer window for one reason in four
 spellings: a library is resolved when something builds against it, a daemon binary when a runner
-starts, and a version's documentation while somebody is on that version — and none of those
-cadences is a month.
+starts, a version's documentation while somebody is on that version, and an SBOM on
+qits-platform-maintenance's scan cadence — and none of those cadences is a month.
 
 **The own engine is live over every configured type**, which is the first change to what dies on
 this platform. What each one condemns, in one line each — the sections below carry the reasoning:
@@ -1075,6 +1112,7 @@ this platform. What each one condemns, in one line each — the sections below c
 | `maven-packages` | `own`, `P90D` | a **coordinate** — one version's whole file set | the last 2 release versions; the newest deployable set of every snapshot line; anything resolved inside the window | `maven_artifact.blob_id`, sized from the row |
 | `daemon-binaries` | `own`, `P90D` | a `daemon_binary` row | the last 2 versions; both rungs qits-ci names; a pinned digest's bytes; anything downloaded inside the window | `daemon_binary.blob_id`, sized from the row |
 | `docs` | `own`, `P90D` | a published **version** of a site — never a file, because `docs_file` cascades | the last 2 versions of every site; anything read inside the window | `docs_file.blob_id` of surviving versions |
+| `sboms` | `own`, `P90D` | one stored document, `packageType/packageName@version` | the last 2 released documents of every package; anything read inside the window — a maintenance scan's read is what keeps a live artifact's document | `sbom_document.blob_id`, sized from the row |
 | `ci-screenshots`, `ci-videos` | `excluded` | **nothing** — no engine is configured, so nothing of them is ever deleted | everything | `artifact_record.blob_id`, reported live |
 | `oci-mirror`, `npm-proxy`, `maven-proxy` | none here | **nothing** — no profile claims them, so `GcPlanner` omits them rather than reporting zeros | everything | qits-platform-mirror's, with the cache engine |
 
@@ -1563,7 +1601,7 @@ app's `application.properties` overrides them.
 | `qits.artifacts.gc.type.<wire-name>.window` | `P30D` / `P90D` per type | how long an identity may sit unaccessed before it is eligible, ISO-8601. Absent for an `excluded` type |
 | `qits.auth.machine.required` | `false` | the machine-token rollout gate. Off, the JSON admin write surface is open — network trust. On, its writes need a bearer with `aud=qits-platform-artifacts` |
 | `qits.auth.machine.audience` | `qits-platform-artifacts` | this service's own id, and the `aud` its tokens must carry |
-| `qits.artifacts.startup-seed.enabled` | `true` | self-seed the hosted roots: `ci-screenshots`, `ci-videos`, `qits`, `npm`, `maven`, `daemons`, `docs`. No cache root — those are qits-platform-mirror's |
+| `qits.artifacts.startup-seed.enabled` | `true` | self-seed the hosted roots: `ci-screenshots`, `ci-videos`, `qits`, `npm`, `maven`, `daemons`, `docs`, `sboms`. No cache root — those are qits-platform-mirror's |
 | `quarkus.oidc.auth-server-url` | `http://qits-platform-idp:8080/idp` | the idp, reached direct on qits-net, for validating an inbound machine token |
 | `qits.artifacts.oci.max-layer-size` | `1G` | the registry's per-layer cap, enforced while streaming |
 | `qits.artifacts.oci.max-manifest-size` | `4M` | manifests are buffered whole to be digested and parsed |

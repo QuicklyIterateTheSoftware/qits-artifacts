@@ -88,6 +88,7 @@ edge. The **client** is the exception: this service has a host of its own,
 | `/artifacts/maven/**` | raw Vert.x routes in `MavenRoutes` (the maven repository; only the hosted type is registered here) | **nothing** — a literal, and `MavenPaths.BASE` is the only place it is spelled |
 | `/artifacts/daemons/**` | raw Vert.x routes in `DaemonRoutes` (the platform's own daemon binaries) | **nothing** — a literal, and `DaemonPaths.BASE` is the only place it is spelled |
 | `/artifacts/docs/**` | raw Vert.x routes in `DocsRoutes` (published documentation bundles) | **nothing** — a literal, and `DocsPaths.BASE` is the only place it is spelled |
+| `/artifacts/sboms/**` | raw Vert.x routes in `SbomRoutes` (the published SBOM store) | **nothing** — a literal, and `SbomPaths.BASE` is the only place it is spelled |
 | `/v2/**` | raw Vert.x routes in `RegistryRoutes` (the OCI Distribution API) | **nothing** — a literal, and not under `/artifacts` at all |
 
 `/artifacts/npm` is *not* forced on us the way `/v2` is: npm accepts a registry URL of any depth, so
@@ -103,8 +104,8 @@ of it still wins — but a request matching **no** route is rerouted to `index.h
 moved to `/` its values are **absolute**: `/artifacts,/v2`.
 
 Two entries cover everything, because the match is by prefix. `/artifacts` claims the JAX-RS base,
-the framework root and all four wire stacks under the segment; `/daemons` is the least forgiving of
-those four — a bootstrap script `curl`s a daemon binary and execs it, so `index.html` at 200 becomes
+the framework root and all five wire stacks under the segment; `/daemons` is the least forgiving of
+those five — a bootstrap script `curl`s a daemon binary and execs it, so `index.html` at 200 becomes
 an executable that is a web page. Setting the key REPLACES Quinoa's derivation
 (`/artifacts/api`, `/artifacts/q`) rather than extending it, which is why the first entry is spelled
 by hand.
@@ -130,10 +131,10 @@ reference against `<host>/v2/` and accept no path prefix. `.config/qits/deployme
 a second `routes:` prefix rather than a service of its own, and `host: registry` gives the plane the
 public name docker already uses — one deployment, one host, both surfaces.
 
-The last four lines are the ones that bite: no config key moves those routes, and no JAX-RS test
-covers them. `RegistryTest`, `NpmRegistryTest`, `MavenRegistryTest`, `DaemonRegistryTest` and
-`DocsRegistryTest` are the only things that would catch them drifting, which is why they all spell
-their paths out absolutely.
+The last five lines are the ones that bite: no config key moves those routes, and no JAX-RS test
+covers them. `RegistryTest`, `NpmRegistryTest`, `MavenRegistryTest`, `DaemonRegistryTest`,
+`DocsRegistryTest` and `SbomRegistryTest` are the only things that would catch them drifting, which
+is why they all spell their paths out absolutely.
 
 **The post-receive fan-out is not an address this service holds any more.** `qits.ci.intake-url`,
 `qits.projects.intake-url` and `qits.post-receive.retry-delays` went to qits-githost-service with the hook
@@ -165,20 +166,20 @@ One top-level package with a subpackage kept deliberately apart from it, plus th
   - Where a strategy needs one of the store's package-private funnels, `artifacts` opens a **narrow
     public door** — `BlobReclaim` (over `BlobStore.delete`/`lastWrittenAt`/`blobGracePeriod`),
     `OciRegistryCollection` (`collectTag`/`collectManifest`), `NpmRegistryCollection` (`collect`) —
-    each javadoc'd as the gc module's alone, plus `DaemonRegistryCollection` and
-    `MavenRegistryCollection` (`collect`). The funnels
+    each javadoc'd as the gc module's alone, plus `DaemonRegistryCollection`,
+    `MavenRegistryCollection`, `DocsRegistryCollection` and `SbomRegistryCollection` (`collect`). The funnels
     stay package-private: widening them to public would hand their constraints to every package on
     the classpath to serve one module. `MavenRegistryCollection` opens **three** methods rather than
     one — `collect` for the hosted type, `evictProxiedArtifact`/`evictProxiedMetadata` for the
     cache — and the split is the point: one table holds both maven types' rows, so the doors differ
     by which repository type they refuse.
 - `eu.wohlben.qits.registry`, `eu.wohlben.qits.npm`, `eu.wohlben.qits.maven`,
-  `eu.wohlben.qits.daemon` and `eu.wohlben.qits.docs` — the protocol
-  wire stacks. Only the last two are written here; the first three arrive as beans on the
+  `eu.wohlben.qits.daemon`, `eu.wohlben.qits.docs` and `eu.wohlben.qits.sbom` — the protocol
+  wire stacks. Only the last three are written here; the first three arrive as beans on the
   qits-registries jars and register their own routes. They all *share* the blob store, so the split
   is by layer rather than by context: every byte and every row goes through a control-layer service
   (`OciRegistryService`, `NpmRegistryService`, `MavenRegistryService`, `DaemonRegistryService`,
-  `DocsRegistryService`, `BlobStore`), and the
+  `DocsRegistryService`, `SbomRegistryService`, `BlobStore`), and the
   wire package holds routes, error envelopes and — for npm and maven — the outbound upstream
   client. A wire package that touched a Panache repository directly would be the drift to watch for.
 
@@ -244,9 +245,10 @@ argument for each:
    took them out again, because a standing row is what kept the mirror path reachable after the code
    left. Every repository row this service needs comes from `ArtifactsRepositorySeeder` at startup,
    and no migration may embed a live-platform digest.
-4. **`ck_artifact_repository_type` lists the SEVEN types this service registers**, not the ten the
-   carried chain accepted. This is where the set the code enforces and the set the database accepts
-   became one set: `RepositoryTypeProfiles` indexes exactly these seven, `ArtifactRepositoryService
+4. **`ck_artifact_repository_type` lists the EIGHT types this service registers**, not the ten the
+   carried chain accepted — seven as V1 wrote it, eight since V3 re-enumerated it for `SBOMS`. This
+   is where the set the code enforces and the set the database accepts
+   became one set: `RepositoryTypeProfiles` indexes exactly these eight, `ArtifactRepositoryService
    .ensure` refuses anything else with a 400, and the constraint says the same thing one layer down.
    A migration copying rows in from a pre-split H2 store must **skip cache-type repositories**.
 
@@ -385,8 +387,8 @@ collection" section is the contract; these are the rules that get "helpfully" re
 - **The own engine is live over every configured type.** The settlement of 2026-08-05 replaced the
   bespoke strategies with `CacheEvictionStrategy` + `OwnArtifactsStrategy`,
   mapped onto types by `qits.artifacts.gc.type.<wire-name>.strategy|window` (`GcTypeConfig`).
-  Here: `oci-images`, `daemon-binaries`, `npm-packages`, `maven-packages` and `docs` run the own
-  engine, and only the two CI types are `excluded` — a decision rather than a gap. **The three cache
+  Here: `oci-images`, `daemon-binaries`, `npm-packages`, `maven-packages`, `docs` and `sboms` run
+  the own engine, and only the two CI types are `excluded` — a decision rather than a gap. **The three cache
   types have no entry at all**, because their profiles are not registered in this service; a
   `RepositoryType` constant is not enough to need a line, a registered profile is.
   `GcTypeConfigTest` is the guard, and it is edited
@@ -429,6 +431,17 @@ collection" section is the contract; these are the rules that get "helpfully" re
   door. Adopted rows carry the **digest hex** as their version, so the adapter's version order ranks
   those below every calver one — comparing 64 hex characters as a number ranks the oldest thing
   there as the newest.
+- **`sboms`' identity is `packageType/packageName@version` and nothing pins one.** The coordinate is
+  the `SoftwareRelease` identity verbatim, so a report line needs no translation; the version comes
+  last and is parsed with `lastIndexOf('@')`, because a package name carries `@`, `/` and `:` of its
+  own while `SbomPaths`' `VERSION` charset admits no `@`. The belt counts per **package**, not per
+  repository — every artifact on the platform publishes into the one `sboms` root. `pinnedBy` is
+  deliberately not overridden: qits-platform-maintenance re-reads a live artifact's document and
+  that read moves `accessed_at`, so "what maintenance tracks" already reaches the engine as access,
+  and a pin source restating it would be the same keep-set decided twice. Its funnel is
+  `SbomRegistryCollection` → package-private `SbomRegistryService.collect`, the sixth narrow door,
+  and it writes **no** tombstone: a collected identity re-opens for a republish, as the daemon's
+  does.
 - **The hosted adapters still filter by the repository row's type, and that line stays.** `npm_version`
   and `maven_artifact` are shared with the cache half in the `qits-registries-*` jars. No cache row
   can exist in this database any more, but a leftover one would otherwise be collected under the
@@ -452,10 +465,10 @@ collection" section is the contract; these are the rules that get "helpfully" re
   `qits.artifacts.gc`: a mapping rooted at the wider prefix would claim `blob-grace-period` and the
   pin urls, which other classes read.
 
-Seven strategy classes exist, one per registered type, and **five of them are thin binders rather
+Eight strategy classes exist, one per registered type, and **six of them are thin binders rather
 than rules** — `OciImageGcStrategy`, `DaemonBinariesGcStrategy`, `NpmPackagesGcStrategy`,
-`MavenPackagesGcStrategy` and `DocsGcStrategy` on the own engine, each naming its `*GcAdapter` and
-nothing else. The three cache binders left with their engine. A class that is four lines long is doing its
+`MavenPackagesGcStrategy`, `DocsGcStrategy` and `SbomGcStrategy` on the own engine, each naming its
+`*GcAdapter` and nothing else. The three cache binders left with their engine. A class that is four lines long is doing its
 job; a rule appearing in one is the settlement being unpicked one type at a time. The two CI stubs
 (`CiScreenshotsGcStrategy`, `CiVideosGcStrategy`) are the exception and are deliberately two
 classes, because their intended rules diverge in kind (branch-scoped against byte-budgeted) and one
@@ -550,7 +563,7 @@ purpose, because tokenless-on-qits-net is their contract. `StoryBrowser` is the 
 `stories/support/` that touches auth, and it uses `Flow.page()` rather than a recorded step
 precisely because it is harness plumbing and not a step in anybody's story.
 
-- `mvn verify` runs 255 tests (38 in `artifacts/`, 98 in `gc/`, 100 in `service/`) in about a
+- `mvn verify` runs 290 tests (49 in `artifacts/`, 115 in `gc/`, 126 in `service/`) in about a
   minute — counted from the surefire reports — and then the failsafe ITs against the packaged
   fast-jar: **39 tests across 24 IT classes**, of which the three `qits`-category stories and
   `OciConformanceIT` skip without their gates. The `service` module opts back into ITs
@@ -925,7 +938,8 @@ where its traffic actually is:
   (V3 is that one-liner, twice over) — re-enumerate the whole list from the registered profiles,
   never append.
 - **The protocol types' profiles are empty and their `maxBytes()` is `0`, and that is not an
-  oversight.** `OCI_IMAGES`, `NPM_PACKAGES`, `MAVEN_PACKAGES`, `DAEMON_BINARIES` and `DOCS` —
+  oversight.** `OCI_IMAGES`, `NPM_PACKAGES`, `MAVEN_PACKAGES`, `DAEMON_BINARIES`, `DOCS` and
+  `SBOMS` —
   and the three cache profiles the shared jars carry, which `quarkus.arc.exclude-types` keeps out of
   bean discovery here — never
   flow through
@@ -934,8 +948,8 @@ where its traffic actually is:
   sniff (a gzipped tar sniffs to nothing and would 400) and no metadata to require. The empty
   media-type set is what makes the zero cap safe: `accepts()` rejects a stray JSON-API upload before
   anything reads the cap. The real caps are `qits.artifacts.oci.max-layer-size`,
-  `qits.artifacts.npm.max-publish-size`, `qits.artifacts.maven.max-artifact-size` and
-  `qits.artifacts.daemon.max-binary-size`, config knobs
+  `qits.artifacts.npm.max-publish-size`, `qits.artifacts.maven.max-artifact-size`,
+  `qits.artifacts.daemon.max-binary-size` and `qits.artifacts.sbom.max-size`, config knobs
   because they have to move with the wire ceiling.
 The five bullets that follow are about the OCI **mirror** path. It is not this service's feature any
 more — the type, the upstream admin API and the eviction went to qits-mirror-platform-service — but the code

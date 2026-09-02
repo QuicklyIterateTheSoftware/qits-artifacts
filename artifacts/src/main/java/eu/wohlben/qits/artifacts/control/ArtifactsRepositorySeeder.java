@@ -71,6 +71,14 @@ public class ArtifactsRepositorySeeder {
    */
   public static final String DOCS = "docs";
 
+  /**
+   * The published SBOMs, at {@code /artifacts/sboms/}. Same argument as {@link #NPM} with the
+   * daemon root's edge sharpened: every release pipeline's last step PUTs here and <b>fails the
+   * release when it cannot</b>, so a missing row would not merely 404 a read — it would turn every
+   * green build on a fresh platform red.
+   */
+  public static final String SBOMS = "sboms";
+
   @Inject ArtifactRepositoryService repositoryService;
 
   @ActivateRequestContext
@@ -82,5 +90,6 @@ public class ArtifactsRepositorySeeder {
     repositoryService.ensure(MAVEN, MavenPackagesProfile.KEY);
     repositoryService.ensure(DAEMONS, DaemonBinariesProfile.KEY);
     repositoryService.ensure(DOCS, DocsProfile.KEY);
+    repositoryService.ensure(SBOMS, SbomProfile.KEY);
   }
 }

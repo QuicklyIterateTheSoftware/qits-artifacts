@@ -142,6 +142,77 @@ abstract class SeededStoreFixture extends ArtifactsTestSupport {
     return new MavenStore(jar, pom);
   }
 
+  static final String DOCS_REPO = "docs";
+  static final String DOCS_SITE = "@userflows/qits-artifacts";
+  static final int DOCS_FILE = 70;
+
+  /**
+   * One published documentation version with one file, which is the smallest thing that can show
+   * the docs slice of the census at all: before that slice existed every one of these blobs was
+   * counted as a row-less orphan.
+   *
+   * @return the blob the version's one file names
+   */
+  String seedDocs() throws IOException {
+    repositoryService.ensure(DOCS_REPO, DocsProfile.KEY);
+    String file = store(filled(DOCS_FILE, (byte) 11));
+    QuarkusTransaction.requiringNew()
+        .run(
+            () -> {
+              eu.wohlben.qits.artifacts.entity.DocsSite site =
+                  new eu.wohlben.qits.artifacts.entity.DocsSite();
+              site.repository = DOCS_REPO;
+              site.name = DOCS_SITE;
+              site.version = "2026.801.30";
+              site.fileCount = 1;
+              site.totalBytes = DOCS_FILE;
+              site.publishedAt = Instant.now();
+              docsSites.persist(site);
+              eu.wohlben.qits.artifacts.entity.DocsFile row =
+                  new eu.wohlben.qits.artifacts.entity.DocsFile();
+              row.repository = DOCS_REPO;
+              row.name = DOCS_SITE;
+              row.version = "2026.801.30";
+              row.path = "index.html";
+              row.blobId = file;
+              row.sizeBytes = DOCS_FILE;
+              row.mediaType = "text/html";
+              docsFiles.persist(row);
+            });
+    backdate(file, Duration.ofDays(30));
+    return file;
+  }
+
+  static final String SBOM_REPO = "sboms";
+  static final int SBOM_DOCUMENT = 90;
+
+  /**
+   * One stored CycloneDX document, sized from its row the way the daemon's and maven's are.
+   *
+   * @return the blob the document's bytes live in
+   */
+  String seedSbom() throws IOException {
+    repositoryService.ensure(SBOM_REPO, SbomProfile.KEY);
+    String document = store(filled(SBOM_DOCUMENT, (byte) 12));
+    QuarkusTransaction.requiringNew()
+        .run(
+            () -> {
+              eu.wohlben.qits.artifacts.entity.SbomDocument row =
+                  new eu.wohlben.qits.artifacts.entity.SbomDocument();
+              row.repository = SBOM_REPO;
+              row.packageType = "maven";
+              row.packageName = "eu.wohlben.qits:qits-eventstream";
+              row.version = "2026.801.30";
+              row.blobId = document;
+              row.sizeBytes = SBOM_DOCUMENT;
+              row.specVersion = "1.5";
+              row.createdAt = Instant.now();
+              sbomDocuments.persist(row);
+            });
+    backdate(document, Duration.ofDays(30));
+    return document;
+  }
+
   private static MavenArtifact mavenArtifact(String path, String blobId, long size) {
     MavenArtifact row = new MavenArtifact();
     row.repository = MAVEN_REPO;

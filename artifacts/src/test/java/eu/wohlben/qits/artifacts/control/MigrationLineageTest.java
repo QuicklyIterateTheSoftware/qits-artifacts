@@ -29,9 +29,9 @@ import org.postgresql.ds.PGSimpleDataSource;
  *
  * <p>It is also where V1's four shape decisions are pinned, because a fresh baseline is the one
  * place they could quietly be undone: no git-host tables, the four cache tables present and empty,
- * no mirror prefill, and a type check listing the seven types this service registers rather than the
- * ten the retired H2 chain accepted. See the header of {@code db/artifacts/postgresql/V1__init.sql}
- * for the argument behind each.
+ * no mirror prefill, and a type check listing the types this service registers — eight since V3
+ * added {@code SBOMS} — rather than the ten the retired H2 chain accepted. See the header of {@code
+ * db/artifacts/postgresql/V1__init.sql} for the argument behind each.
  *
  * <p><b>Real postgres, not H2.</b> The lineage is a PostgreSQL lineage now — {@code timestamptz},
  * {@code bytea}, a partial index and a regex check — so running it anywhere else would prove
@@ -70,17 +70,19 @@ class MigrationLineageTest {
   }
 
   /**
-   * The seven keys V1 declares, spelled out.
+   * The eight keys the lineage declares, spelled out.
    *
    * <p>It used to be {@code RepositoryType.values()}, which made "the constraint lists every type" a
    * property rather than a list. There is no enum any more — types are registered as profile beans —
    * and a list read from the CLASSPATH would prove the wrong thing: the constraint is a fact about
    * the DATABASE.
    *
-   * <p><b>Seven, not the H2 chain's ten.</b> That chain was carried through the byte-plane split
+   * <p><b>Eight, not the H2 chain's ten.</b> That chain was carried through the byte-plane split
    * byte for byte and so kept accepting {@code NPM_PROXY}, {@code MAVEN_PROXY} and {@code
    * OCI_MIRROR} long after nothing here could serve one. A fresh baseline is where the set the code
-   * enforces and the set the database accepts become one set.
+   * enforces and the set the database accepts become one set. V1 listed seven; V3 re-enumerated the
+   * whole check — dropped by name, re-added naming every key — to add {@code SBOMS}, which is the
+   * widening rule this list exists to keep honest.
    */
   private static final List<String> DECLARED_TYPES =
       List.of(
@@ -90,7 +92,8 @@ class MigrationLineageTest {
           "NPM_PACKAGES",
           "MAVEN_PACKAGES",
           "DAEMON_BINARIES",
-          "DOCS");
+          "DOCS",
+          "SBOMS");
 
   /** The three cache keys V1 deliberately stopped accepting. */
   private static final List<String> RETIRED_CACHE_TYPES =
@@ -275,6 +278,61 @@ class MigrationLineageTest {
   }
 
   @Test
+  void theSbomTableIsThereKeyedByTheReleaseIdentity() throws SQLException {
+    // V3's table, exercised the way the daemon's is: the primary key IS the SoftwareRelease
+    // identity, so a second document for the same (packageType, packageName, version) is refused
+    // rather than shadowing the first — which is what makes "first write wins" answerable at all.
+    insertRepository("sboms", "SBOMS");
+    execute(
+        "insert into sbom_document (repository, package_type, package_name, version, blob_id,"
+            + " size_bytes, spec_version, created_at) values ('sboms', 'maven',"
+            + " 'eu.wohlben.qits:qits-eventstream', '2026.801.30', '" + "a".repeat(64)
+            + "', 4096, '1.5', current_timestamp)");
+    assertEquals(1, count("select count(*) from sbom_document where repository = 'sboms'"));
+
+    SQLException duplicate =
+        assertThrows(
+            SQLException.class,
+            () ->
+                execute(
+                    "insert into sbom_document (repository, package_type, package_name, version,"
+                        + " blob_id, size_bytes, spec_version, created_at) values ('sboms', 'maven',"
+                        + " 'eu.wohlben.qits:qits-eventstream', '2026.801.30', '" + "b".repeat(64)
+                        + "', 1, '1.5', current_timestamp)"));
+    assertTrue(
+        duplicate.getMessage().toUpperCase(Locale.ROOT).contains("SBOM_DOCUMENT_PKEY"),
+        duplicate.getMessage());
+
+    SQLException refused =
+        assertThrows(
+            SQLException.class,
+            () ->
+                execute(
+                    "insert into sbom_document (repository, package_type, package_name, version,"
+                        + " blob_id, size_bytes, spec_version, created_at) values ('no-such-repo',"
+                        + " 'npm', 'x', '1', '" + "c".repeat(64)
+                        + "', 1, '1.5', current_timestamp)"));
+    assertTrue(
+        refused.getMessage().toUpperCase(Locale.ROOT).contains("FK_SBOM_DOCUMENT_REPOSITORY"),
+        refused.getMessage());
+
+    // The four declared package types, enforced one layer under the route's own 400: a document
+    // filed under a type no consumer of SoftwareRelease can ask for is unreachable data.
+    SQLException wrongType =
+        assertThrows(
+            SQLException.class,
+            () ->
+                execute(
+                    "insert into sbom_document (repository, package_type, package_name, version,"
+                        + " blob_id, size_bytes, spec_version, created_at) values ('sboms', 'gem',"
+                        + " 'rails', '7.0.0', '" + "d".repeat(64)
+                        + "', 1, '1.5', current_timestamp)"));
+    assertTrue(
+        wrongType.getMessage().toUpperCase(Locale.ROOT).contains("CK_SBOM_DOCUMENT_PACKAGE_TYPE"),
+        wrongType.getMessage());
+  }
+
+  @Test
   void aDocsVersionIsTheUnitOfEvictionBecauseItsFilesCascade() throws SQLException {
     // The one foreign key in this schema that is load-bearing rather than hygienic: deleting a
     // docs_site row must take its files with it, or a sweep could leave a version that lists itself
@@ -328,6 +386,7 @@ class MigrationLineageTest {
     insertRepository("npm", "NPM_PACKAGES");
     insertRepository("maven", "MAVEN_PACKAGES");
     insertRepository("daemons", "DAEMON_BINARIES");
+    insertRepository("sboms", "SBOMS");
     execute(
         "insert into npm_version (repository, package_name, version, tarball_blob_id,"
             + " manifest_json, created_at) values ('npm', '@qits/ui', '1.0.0', '"
@@ -340,9 +399,14 @@ class MigrationLineageTest {
         "insert into daemon_binary (repository, name, version, blob_id, size_bytes, published_at)"
             + " values ('daemons', 'qits-ci-daemon', '2026.801.120000', '" + "c".repeat(64)
             + "', 1, current_timestamp)");
+    execute(
+        "insert into sbom_document (repository, package_type, package_name, version, blob_id,"
+            + " size_bytes, spec_version, created_at) values ('sboms', 'npm', '@qits/ui',"
+            + " '2026.801.30', '" + "d".repeat(64) + "', 1, '1.5', current_timestamp)");
     assertEquals(1, count("select count(*) from npm_version where accessed_at is null"));
     assertEquals(1, count("select count(*) from maven_artifact where accessed_at is null"));
     assertEquals(1, count("select count(*) from daemon_binary where accessed_at is null"));
+    assertEquals(1, count("select count(*) from sbom_document where accessed_at is null"));
   }
 
   @Test

@@ -18,7 +18,7 @@ import org.junit.jupiter.api.Test;
  * The type is the load-bearing half for {@code qits}: only an {@code OCI_IMAGES} row satisfies the
  * registry's first-segment check, and a row of the wrong type would still list under that name.
  *
- * <p>Seven rows, all hosted. The cache roots ({@code npmjs}, {@code central}, and the three mirror
+ * <p>Eight rows, all hosted. The cache roots ({@code npmjs}, {@code central}, and the three mirror
  * namespaces with their upstream rows) went to qits-platform-mirror's own seeder with the code that
  * serves them, so their absence here is the assertion that matters most.
  */
@@ -30,7 +30,7 @@ class ArtifactsRepositorySeederTest extends ArtifactsTestSupport {
   @Inject ArtifactRepositoryService service;
 
   @Test
-  void seedsTheTwoCiTypesThePlatformImageRepositoryTheHostedNpmAndMavenRootsAndTheDaemonAndDocsRoots() {
+  void seedsTheTwoCiTypesThePlatformImageRepositoryTheHostedNpmAndMavenRootsAndTheDaemonDocsAndSbomRoots() {
     seeder.ensureDefaults();
     assertEquals(
         Map.ofEntries(
@@ -40,7 +40,8 @@ class ArtifactsRepositorySeederTest extends ArtifactsTestSupport {
             Map.entry(ArtifactsRepositorySeeder.NPM, NpmPackagesProfile.KEY),
             Map.entry(ArtifactsRepositorySeeder.MAVEN, MavenPackagesProfile.KEY),
             Map.entry(ArtifactsRepositorySeeder.DAEMONS, DaemonBinariesProfile.KEY),
-            Map.entry(ArtifactsRepositorySeeder.DOCS, DocsProfile.KEY)),
+            Map.entry(ArtifactsRepositorySeeder.DOCS, DocsProfile.KEY),
+            Map.entry(ArtifactsRepositorySeeder.SBOMS, SbomProfile.KEY)),
         seededTypesByName());
   }
 
@@ -50,7 +51,7 @@ class ArtifactsRepositorySeederTest extends ArtifactsTestSupport {
     // the seed must never be what keeps a restarted instance from coming up.
     seeder.ensureDefaults();
     seeder.ensureDefaults();
-    assertEquals(7, service.list().size());
+    assertEquals(8, service.list().size());
   }
 
   private Map<String, String> seededTypesByName() {

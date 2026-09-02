@@ -45,20 +45,22 @@ class GcPlanTest extends GcFixture {
 
   /**
    * How many repository types this deployment registers: the two CI profiles from qits-blobstore,
-   * the three hosted format profiles from qits-registries, and the two this service contributes.
-   * The cache profiles are excluded from discovery, so a report has seven lines, not ten.
+   * the three hosted format profiles from qits-registries, and the three this service contributes
+   * — daemon-binaries, docs and now sboms. The cache profiles are excluded from discovery, so a
+   * report has eight lines, not ten.
    */
-  private static final int REGISTERED_TYPES = 7;
+  private static final int REGISTERED_TYPES = 8;
 
   @Inject GcPlanner planner;
 
   @Test
   void everyTypeIsClaimedAndEachLineSaysWhichOfThreeAnswersItIs() throws Exception {
     // The report a reviewer sees first. "Nothing to collect", "refused to plan" and a real plan are
-    // three different facts, so every type is listed with its own reason rather than omitted. Six
-    // types demonstrate the refusal here: every type on an engine reads live pins, this suite has no
-    // (seven with docs, which reads no pin source of its own but still takes the digest floor)
-    // qits-platform-deployments and no qits-ci, and a keep-set that cannot be established reclaims nothing. The two CI
+    // three different facts, so every type is listed with its own reason rather than omitted. The
+    // six types on an engine demonstrate the refusal here — docs and sboms among them, neither of
+    // which reads a pin source of its own but both of which still take the digest floor: this suite
+    // has no qits-platform-deployments and no qits-ci, and a keep-set that cannot be established
+    // reclaims nothing. The two CI
     // stubs are the second — zero rows, a named intended rule, and a note saying the loop has never
     // produced content.
     Store store = seed();
@@ -71,7 +73,8 @@ class GcPlanTest extends GcFixture {
             "DocsGcStrategy",
             "MavenPackagesGcStrategy",
             "NpmPackagesGcStrategy",
-            "OciImageGcStrategy"),
+            "OciImageGcStrategy",
+            "SbomGcStrategy"),
         planner.registered().stream().map(GcPlanner::nameOf).sorted().toList());
     GcPlanReport report = planner.plan();
 
@@ -123,6 +126,13 @@ class GcPlanTest extends GcFixture {
         }
         case "docs" -> {
           assertEquals("DocsGcStrategy", type.strategy());
+          assertNotNull(type.error(), "the own engine reads pins, and there are none here");
+          assertEquals(0, type.dead().size(), "a refused type plans nothing");
+        }
+        case "sboms" -> {
+          assertEquals("SbomGcStrategy", type.strategy());
+          // Nothing pins an SBOM by coordinate, and the type is refused here all the same: every
+          // own type takes the digest floor, and a pinned blob may be the bytes of a document.
           assertNotNull(type.error(), "the own engine reads pins, and there are none here");
           assertEquals(0, type.dead().size(), "a refused type plans nothing");
         }

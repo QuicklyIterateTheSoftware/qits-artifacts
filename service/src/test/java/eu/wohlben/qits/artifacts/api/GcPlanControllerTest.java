@@ -62,7 +62,7 @@ class GcPlanControllerTest {
         .body("dryRun", is(true))
         .body("generatedAt", notNullValue())
         .body("graceWindow", is("P7D"))
-        .body("types", hasSize(7))
+        .body("types", hasSize(8))
         .body(
             "types.type",
             org.hamcrest.Matchers.containsInAnyOrder(
@@ -72,13 +72,15 @@ class GcPlanControllerTest {
                 "npm-packages",
                 "maven-packages",
                 "daemon-binaries",
-                "docs"))
+                "docs",
+                "sboms"))
         .body("types.find { it.type == 'oci-images' }.strategy", is("OciImageGcStrategy"))
         .body("types.find { it.type == 'npm-packages' }.strategy", is("NpmPackagesGcStrategy"))
         .body(
             "types.find { it.type == 'ci-screenshots' }.strategy", is("CiScreenshotsGcStrategy"))
         .body("types.find { it.type == 'ci-videos' }.strategy", is("CiVideosGcStrategy"))
         .body("types.find { it.type == 'docs' }.strategy", is("DocsGcStrategy"))
+        .body("types.find { it.type == 'sboms' }.strategy", is("SbomGcStrategy"))
         .body(
             "types.find { it.type == 'maven-packages' }.strategy", is("MavenPackagesGcStrategy"))
         .body("types.find { it.type == 'maven-packages' }.dead", hasSize(0))
@@ -112,7 +114,7 @@ class GcPlanControllerTest {
         .get("/artifacts/api/gc/plan")
         .then()
         .statusCode(200)
-        .body("configuration", hasSize(7))
+        .body("configuration", hasSize(8))
         .body("configuration.find { it.type == 'oci-images' }.strategy", is("own"))
         .body("configuration.find { it.type == 'oci-images' }.window", is("P30D"))
         .body("configuration.find { it.type == 'maven-packages' }.strategy", is("own"))
@@ -120,6 +122,8 @@ class GcPlanControllerTest {
         .body(
             "configuration.find { it.type == 'maven-packages' }.rule",
             org.hamcrest.Matchers.containsString("last 2 released versions"))
+        .body("configuration.find { it.type == 'sboms' }.strategy", is("own"))
+        .body("configuration.find { it.type == 'sboms' }.window", is("P90D"))
         .body("configuration.find { it.type == 'ci-videos' }.strategy", is("excluded"))
         .body("configuration.find { it.type == 'ci-videos' }.window", nullValue())
         .body("executable", is(false))
@@ -183,7 +187,7 @@ class GcPlanControllerTest {
         .body("summary.reclaimableBytes", is(0))
         .body("summary.reclaimable", is("0 B"))
         .body("summary.identitiesCondemned", is(0))
-        .body("summary.types", hasSize(7))
+        .body("summary.types", hasSize(8))
         .body(
             "summary.types.find { it.startsWith('ci-videos') }",
             org.hamcrest.Matchers.containsString("excluded by configuration"))
@@ -240,7 +244,7 @@ class GcPlanControllerTest {
         .body("executedAt", notNullValue())
         .body("aborted", org.hamcrest.Matchers.containsString("qits-platform-deployments"))
         .body("aborted", org.hamcrest.Matchers.containsString("qits-ci"))
-        .body("types", hasSize(7))
+        .body("types", hasSize(8))
         .body("types.deleted.flatten()", hasSize(0))
         .body("sweep.blobsUnlinked", is(0))
         .body("sweep.bytesReclaimed", is(0))
@@ -458,7 +462,7 @@ class GcPlanControllerTest {
         .then()
         .statusCode(200)
         .body("aborted", nullValue())
-        .body("types", hasSize(7))
+        .body("types", hasSize(8))
         .body("types.deleted.flatten()", hasSize(0))
         .body("sweep.blobsUnlinked", is(0))
         .body("sweep.bytesReclaimed", is(0))

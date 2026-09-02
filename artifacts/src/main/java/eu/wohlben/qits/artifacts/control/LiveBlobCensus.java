@@ -5,9 +5,11 @@ import eu.wohlben.qits.blobstore.entity.ArtifactRepository;
 import eu.wohlben.qits.blobstore.persistence.ArtifactRecordRepository;
 import eu.wohlben.qits.blobstore.persistence.ArtifactRepositoryRepository;
 import eu.wohlben.qits.artifacts.persistence.DaemonBinaryRepository;
+import eu.wohlben.qits.artifacts.persistence.DocsFileRepository;
 import eu.wohlben.qits.artifacts.persistence.MavenArtifactRepository;
 import eu.wohlben.qits.artifacts.persistence.NpmVersionRepository;
 import eu.wohlben.qits.artifacts.persistence.OciManifestRepository;
+import eu.wohlben.qits.artifacts.persistence.SbomDocumentRepository;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.time.Instant;
@@ -52,6 +54,10 @@ import java.util.Set;
  *       reason maven's is. This is the set that made {@code orphanBytes} honest: every row-less
  *       blob the store held was a ci-daemon build pushed through the blob-upload session, which
  *       writes no row, so the census reported a live executable as an orphan.
+ *   <li>{@code docs} — {@code docs_file.blob_id}, sized from the row. Absent until the SBOM slice
+ *       landed beside it — the daemon lesson replayed: published bundles read as orphans, and a
+ *       docs GC release could never reach the unlink because the sweep skips row-less blobs.
+ *   <li>{@code sboms} — {@code sbom_document.blob_id}, sized from the row.
  *   <li>{@code ci-screenshots} / {@code ci-videos} — {@code artifact_record.blob_id}, sized from the
  *       row, the one place a size sits beside an id.
  * </ul>
@@ -82,6 +88,8 @@ public class LiveBlobCensus {
   @Inject NpmVersionRepository versions;
   @Inject MavenArtifactRepository mavenArtifacts;
   @Inject DaemonBinaryRepository daemonBinaries;
+  @Inject DocsFileRepository docsFiles;
+  @Inject SbomDocumentRepository sbomDocuments;
   @Inject OciManifestFootprints footprints;
   @Inject BlobDiskIndex diskIndex;
 
@@ -196,6 +204,18 @@ public class LiveBlobCensus {
       // through the OCI blob-upload session, which writes no row — so orphanBytes reported a live,
       // downloaded-every-build executable as garbage-shaped. With rows the census sees it natively.
       for (Object[] blob : daemonBinaries.listDistinctBlobs(repository.name)) {
+        blobs.putIfAbsent((String) blob[0], (Long) blob[1]);
+      }
+      // The docs half, sized from the row. This read was MISSING until the SBOM type landed beside
+      // it, and the miss was daemon's lesson replayed: every published bundle's file counted as a
+      // row-less orphan, and — worse than dishonest reporting — a docs blob released by the docs
+      // GC plan sat in rowless(), which BlobSweep skips, so a collected docs version could never
+      // free a byte.
+      for (Object[] blob : docsFiles.listDistinctBlobs(repository.name)) {
+        blobs.putIfAbsent((String) blob[0], (Long) blob[1]);
+      }
+      // The SBOM half, sized from the row for the same reason maven's and daemon's are.
+      for (Object[] blob : sbomDocuments.listDistinctBlobs(repository.name)) {
         blobs.putIfAbsent((String) blob[0], (Long) blob[1]);
       }
       // The npm half: distinct tarballs, sized from disk because npm_version has no size column.
