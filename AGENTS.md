@@ -580,9 +580,9 @@ precisely because it is harness plumbing and not a step in anybody's story.
   docs site, version = the commit sha; non-gating for the image by design. This repository carries
   **no `ci-post-receive.yml`** any more: every pipeline is a domain-event trigger, the push build in
   `ci-event-build.yml` (the old file's step, byte-identical, under `SCMPublishCommit` + `checkout:`)
-  and the maintenance bump train's release call in `ci-event-maintenance-release.yml` — its own
-  file because an event pipeline's steps may not carry `branches:`; the branch condition is a
-  `when:` prefix matcher there.
+  and the userflows run beside it. The maintenance bump train's release call used to be a third
+  trigger here; it is gone — qits-maintenance asks the release door itself, with its own credential,
+  on the push that creates the bump.
 - **Every module's suite runs on a REAL PostgreSQL**, spawned as a child process from zonky binaries
   that resolve as ordinary Maven artifacts. Not a container: the clone-alone rule forbids one, and
   the store's only engine is postgres now — `bytea`, an advisory lock, a partial index and an
