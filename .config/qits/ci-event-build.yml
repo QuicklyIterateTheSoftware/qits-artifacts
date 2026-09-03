@@ -6,17 +6,17 @@
 # semantic the push path had that when: has to restate is suppressCi — the listener honoured
 # `-o qits.no-ci` before any pipeline was read; here it is a selection like any other.
 #
-# NOT QUITE THE ONE-FILE MOVE qits-githost made: the old file's second step — the maintenance bump
-# train's release call — could not come along, because an event pipeline's steps may not carry
-# `branches:` (the run's branch is the trigger's single decision, resolved from the payload before
-# any step exists, so qits-ci rejects the key). It is ci-event-maintenance-release.yml now,
-# selected by the same branch prefix in `when:`.
+# IT IS THE ONE-FILE MOVE AGAIN, AND THAT TOOK A SECOND STEP. The old ci-post-receive.yml had a
+# release call on `maintenance/*` beside the build, which could not ride along here (an event
+# pipeline's steps may not carry `branches:` — the run's branch is the trigger's single decision,
+# resolved from the payload before any step exists, so qits-ci rejects the key). It became its own
+# trigger for a while; it is nobody's trigger now. qits-maintenance asks the release door itself,
+# with its own credential, the moment it pushes the bump.
 #
 # DELIBERATELY A SEPARATE FILE from ci-event-userflows.yml: that run is the per-commit verify +
 # docs publish and is non-gating by design — a red verify must not cost a branch its image, until
-# the quality gate becomes a decision someone takes. A push fires at most three runs (build +
-# userflows always, the release call on maintenance/* only), collapsed to the newest tip per
-# branch under burst.
+# the quality gate becomes a decision someone takes. A push fires two runs (build + userflows),
+# collapsed to the newest tip per branch under burst.
 #
 # Loop review (qits-githost's checkout box): this pipeline pushes an image and never a commit, and
 # selects no event its own green run publishes — no cycle.
