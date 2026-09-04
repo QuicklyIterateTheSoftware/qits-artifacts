@@ -28,9 +28,9 @@ import org.junit.jupiter.api.Test;
 /**
  * What a run does when a pin source cannot answer: the sweep refuses whole, the dry-run degrades.
  *
- * <p>This suite runs under the shipped test configuration, which points both pin urls at a closed
- * port — so every case here is the deployed failure rather than a simulated one. Neither qits-platform-deployments nor
- * qits-ci exists in this repository, and that is what makes the refusal path the easy one to
+ * <p>This suite runs under the shipped test configuration, which points all four pin urls at a
+ * closed port — so every case here is the deployed failure rather than a simulated one. None of the
+ * four peers exists in this repository, and that is what makes the refusal path the easy one to
  * exercise honestly.
  *
  * <p><b>The settlement's rule is all-or-nothing, and the second case is why.</b> It would be
@@ -57,17 +57,19 @@ class GcPinsTest extends GcFixture {
   private static final String NEWEST = RELEASE + "-main.g2222222";
 
   @Test
-  void bothPinSourcesFailingIsReportedRatherThanThrown() {
+  void everyPinSourceFailingIsReportedRatherThanThrown() {
     GcPins pins = pinSources.fetch();
 
     assertFalse(pins.complete());
-    assertEquals(2, pins.failures().size(), "both sources are asked, so both outages are named");
+    assertEquals(4, pins.failures().size(), "every source is asked, so every outage is named");
     assertTrue(pins.whyIncomplete().contains("qits-platform-deployments"));
     assertTrue(pins.whyIncomplete().contains("qits-ci"));
+    assertTrue(pins.whyIncomplete().contains("qits-platform-maintenance"));
+    assertTrue(pins.whyIncomplete().contains("qits-configuration"));
 
     // And the provenance says which url produced which outage, so a fix starts from the report
     // rather than from a grep for the config key.
-    assertEquals(2, pins.sources().size());
+    assertEquals(4, pins.sources().size());
     GcPinSource cd = source(pins, "qits-platform-deployments");
     assertFalse(cd.answered());
     assertTrue(cd.url().endsWith("/platform-deployments/api/pins"), cd.url());
@@ -75,6 +77,15 @@ class GcPinsTest extends GcFixture {
     assertEquals(0, cd.pinCount());
     assertEquals(List.of(), cd.keeps());
     assertTrue(source(pins, "qits-ci").url().endsWith("/ci/api/daemon"));
+    assertTrue(source(pins, "qits-platform-maintenance").url().endsWith("/maintenance/api/pins"));
+    assertTrue(source(pins, "qits-configuration").url().endsWith("/configuration/api/pins"));
+
+    // And a failed source leaves NO half-folded keep-set behind: a report claiming coordinates a
+    // source did not finish stating would be the one thing worse than zeros.
+    assertEquals(java.util.Set.of(), pins.mavenDependencies());
+    assertEquals(java.util.Set.of(), pins.npmDependencies());
+    assertEquals(java.util.Set.of(), pins.manifestImages());
+    assertEquals(java.util.Set.of(), pins.configuredImages());
   }
 
   @Test
@@ -83,7 +94,7 @@ class GcPinsTest extends GcFixture {
     // against their own deployments: not "3 pins" but which image at which sha, and — for the
     // daemon — the blob a digest rung protects beside the row it names. Built by hand because
     // neither qits-platform-deployments nor qits-ci exists in this repository.
-    GcPinSources sources = new GcPinSources();
+    GcPinSources sources = answering();
     sources.cd =
         () ->
             List.of(
@@ -116,8 +127,7 @@ class GcPinsTest extends GcFixture {
     // The shipped default on a platform that has published no daemon. It must read as a source that
     // answered with nothing pinned, because a reviewer who reads it as an outage goes looking for a
     // broken qits-ci that is working perfectly.
-    GcPinSources sources = new GcPinSources();
-    sources.cd = List::of;
+    GcPinSources sources = answering();
     sources.ci = () -> new CiDaemonPins.DaemonPin("", "", "", "none");
 
     GcPins pins = sources.fetch();
@@ -128,6 +138,122 @@ class GcPinsTest extends GcFixture {
     assertEquals(0, ci.pinCount());
     assertEquals(List.of(), ci.keeps());
     assertTrue(ci.outcome().contains("an answer, not an absence"), ci.outcome());
+  }
+
+  @Test
+  void theTwoConsumptionSourcesFoldIntoTheirEcosystemsOwnCoordinateSpelling() {
+    // The fold that makes the P3D windows defensible: what repositories still build against, and
+    // what the platform is configured to launch, in the exact string each adapter's identities are
+    // spelled with — so the lookup on the other side is an equality test and never a translation.
+    // A maven pin joins on "g:a:v", an npm pin on "name@version", a docker pin and a configured
+    // image on "full/image:tag".
+    GcPinSources sources = answering();
+    sources.maintenance =
+        () ->
+            List.of(
+                new MaintenanceDependencyPins.DependencyPin(
+                    "maven",
+                    "eu.wohlben.qits:qits-blobstore",
+                    "2026.903.85122",
+                    "qits-githost-service",
+                    "pom.xml"),
+                new MaintenanceDependencyPins.DependencyPin(
+                    "npm",
+                    "@qits/ui-components",
+                    "2026.902.204627",
+                    "qits-spa-home",
+                    "package.json"),
+                new MaintenanceDependencyPins.DependencyPin(
+                    "docker",
+                    "qits/workspace-base",
+                    "2026.902.143920",
+                    "qits-workspace-daemon",
+                    "docker/Dockerfile"),
+                // The same version referenced twice: the keep-set is a set, and the pin COUNT is
+                // still the number of references, which is what the receipt reports.
+                new MaintenanceDependencyPins.DependencyPin(
+                    "maven",
+                    "eu.wohlben.qits:qits-blobstore",
+                    "2026.903.85122",
+                    "qits-ci-service",
+                    "pom.xml"));
+    sources.configuration =
+        () ->
+            List.of(
+                new ConfigurationImagePins.ImagePin(
+                    "qits/workspace",
+                    "2026.904.160522",
+                    "qits-workspaces",
+                    "env.QITS_WORKSPACE_IMAGE_VERSION"),
+                // Two applications, one image version — one keep, two rows.
+                new ConfigurationImagePins.ImagePin(
+                    "qits/workspace",
+                    "2026.904.160522",
+                    "qits-projects",
+                    "env.QITS_PROJECTS_REFINEMENT_IMAGE_VERSION"));
+
+    GcPins pins = sources.fetch();
+
+    assertTrue(pins.complete());
+    assertEquals(
+        java.util.Set.of("eu.wohlben.qits:qits-blobstore:2026.903.85122"),
+        pins.mavenDependencies());
+    assertEquals(java.util.Set.of("@qits/ui-components@2026.902.204627"), pins.npmDependencies());
+    assertEquals(java.util.Set.of("qits/workspace-base:2026.902.143920"), pins.manifestImages());
+    assertEquals(java.util.Set.of("qits/workspace:2026.904.160522"), pins.configuredImages());
+
+    assertEquals(GcPins.BY_MANIFEST, pins.pinsMavenCoordinate("eu.wohlben.qits:qits-blobstore:2026.903.85122"));
+    assertEquals(GcPins.BY_MANIFEST, pins.pinsNpmCoordinate("@qits/ui-components@2026.902.204627"));
+    assertEquals(GcPins.BY_MANIFEST, pins.pinsManifestImage("qits/workspace-base", "2026.902.143920"));
+    assertEquals(GcPins.BY_CONFIGURATION, pins.pinsConfiguredImage("qits/workspace", "2026.904.160522"));
+    assertNull(pins.pinsConfiguredImage("qits/workspace-base", "2026.902.143920"));
+
+    GcPinSource maintenance = source(pins, "qits-platform-maintenance");
+    assertEquals(4, maintenance.pinCount(), "references, which is what maintenance answers with");
+    assertEquals(
+        List.of(
+            "@qits/ui-components@2026.902.204627",
+            "eu.wohlben.qits:qits-blobstore:2026.903.85122",
+            "qits/workspace-base:2026.902.143920"),
+        maintenance.keeps(),
+        "the three coordinates the four references resolve to, in name order");
+    assertTrue(maintenance.outcome().contains("1 maven, 1 npm, 1 docker"), maintenance.outcome());
+
+    GcPinSource configuration = source(pins, "qits-configuration");
+    assertEquals(2, configuration.pinCount(), "entries, which is what configuration answers with");
+    assertEquals(List.of("qits/workspace:2026.904.160522"), configuration.keeps());
+  }
+
+  @Test
+  void anEmptyConfiguredImageAnswerIsAnAnswerRatherThanAnOutage() {
+    // A platform that has released none of the on-demand images yet. It must read as a source that
+    // answered with nothing pinned — the opposite of an outage, and the state a fresh install is in.
+    GcPinSources sources = answering();
+
+    GcPins pins = sources.fetch();
+
+    assertTrue(pins.complete());
+    GcPinSource configuration = source(pins, "qits-configuration");
+    assertTrue(configuration.answered());
+    assertEquals(0, configuration.pinCount());
+    assertEquals(List.of(), configuration.keeps());
+  }
+
+  /**
+   * A collector whose four ports all answer with nothing, for a case to override the one it is
+   * about.
+   *
+   * <p>The fields are the CDI injection points, and a hand-built collector leaves them null — so a
+   * case that set only the two it cared about would meet an NPE rather than the fold it meant to
+   * exercise.
+   */
+  private static GcPinSources answering() {
+    GcPinSources sources = new GcPinSources();
+    sources.cd = List::of;
+    sources.ci = () -> new CiDaemonPins.DaemonPin("", "", "", "none");
+    sources.maintenance = List::of;
+    sources.configuration = List::of;
+    return sources;
   }
 
   private static GcPinSource source(GcPins pins, String name) {
@@ -153,6 +279,8 @@ class GcPinsTest extends GcFixture {
     assertNotNull(report.aborted(), "a receipt of a run that never started still says why");
     assertTrue(report.aborted().contains("qits-platform-deployments"));
     assertTrue(report.aborted().contains("qits-ci"));
+    assertTrue(report.aborted().contains("qits-platform-maintenance"));
+    assertTrue(report.aborted().contains("qits-configuration"));
     assertFalse(report.dryRun(), "it is still the execute surface's receipt");
     assertEquals(REGISTERED_TYPES, report.types().size());
     for (GcTypeSweepResult type : report.types()) {
@@ -165,7 +293,7 @@ class GcPinsTest extends GcFixture {
         report.untouchable().reason().contains("not computed"),
         "no census was taken, so claiming an empty row-less pool would be claiming something");
     assertEquals(
-        2,
+        4,
         report.pins().size(),
         "a receipt of a run that never started still shows what it tried to read");
     assertFalse(report.pins().get(0).answered());
@@ -188,8 +316,8 @@ class GcPinsTest extends GcFixture {
     GcPlanReport report = planner.plan();
 
     assertFalse(report.executable());
-    assertEquals(2, report.pinFailures().size());
-    assertEquals(2, report.pins().size(), "and the same two sources are named in the pins section");
+    assertEquals(4, report.pinFailures().size());
+    assertEquals(4, report.pins().size(), "and the same four sources are named in the pins section");
     GcTypePlan oci = typePlan(report, OciImagesProfile.KEY);
     assertNotNull(oci.error());
     assertTrue(oci.error().contains("live pins unavailable"));

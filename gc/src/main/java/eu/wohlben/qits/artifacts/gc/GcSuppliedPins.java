@@ -15,20 +15,32 @@ import java.util.Optional;
  *
  * <p>Each member is the peer's response body <b>verbatim</b>: {@code deployments} is what {@code
  * GET /platform-deployments/api/pins} answered, {@code ciDaemon} is what {@code GET /ci/api/daemon}
- * answered. Verbatim rather than a re-shaped keep-set, because they are then read by the very same
- * parsers the HTTP readers use ({@link CdHttpDeploymentPins#parse}, {@link
- * CiHttpDaemonPins#parse}); a caller-shaped keep-set would be a second definition of the same
- * document waiting to disagree with the first.
+ * answered, {@code dependencies} is what {@code GET /maintenance/api/pins} answered, and {@code
+ * configuredImages} is what {@code GET /configuration/api/pins} answered. Verbatim rather than a
+ * re-shaped keep-set, because they are then read by the very same parsers the HTTP readers use
+ * ({@link CdHttpDeploymentPins#parse}, {@link CiHttpDaemonPins#parse}, {@link
+ * MaintenanceHttpDependencyPins#parse}, {@link ConfigurationHttpImagePins#parse}); a caller-shaped
+ * keep-set would be a second definition of the same document waiting to disagree with the first.
  *
  * <p><b>A missing member is not "nothing is pinned".</b> It is that source unanswered, and it fails
  * the run closed exactly as an unreachable service does: the plan reports itself non-executable and
  * a sweep aborts with nothing deleted. An empty {@code {"pins":[]}} is the opposite — a real answer
  * from a platform with nothing deployed — and it pins nothing, which is what it says.
  *
+ * <p><b>The two members added on 2026-09-04 make an old orchestrator's body a refusal</b>, which is
+ * why this half ships last: a caller sending only the first two supplies half a keep-set, and half a
+ * keep-set condemns whatever the missing half protected. The rollout order is maintenance and
+ * configuration, then the orchestrator, then this.
+ *
  * @param deployments the deployer's pins document, or null when the caller sent none
  * @param ciDaemon qits-ci's daemon document, or null when the caller sent none
+ * @param dependencies qits-platform-maintenance's dependency pins document, or null when the caller
+ *     sent none
+ * @param configuredImages qits-configuration's configured image document, or null when the caller
+ *     sent none
  */
-public record GcSuppliedPins(JsonNode deployments, JsonNode ciDaemon) {
+public record GcSuppliedPins(
+    JsonNode deployments, JsonNode ciDaemon, JsonNode dependencies, JsonNode configuredImages) {
 
   /** How the deployments source is named on a report when it was supplied rather than fetched. */
   public static final String CD_SOURCE = "supplied: qits-platform-deployments";
@@ -36,15 +48,23 @@ public record GcSuppliedPins(JsonNode deployments, JsonNode ciDaemon) {
   /** How the qits-ci source is named on a report when it was supplied rather than fetched. */
   public static final String CI_SOURCE = "supplied: qits-ci";
 
+  /** How the dependency source is named on a report when it was supplied rather than fetched. */
+  public static final String MAINTENANCE_SOURCE = "supplied: qits-platform-maintenance";
+
+  /** How the configured-image source is named on a report when it was supplied. */
+  public static final String CONFIGURATION_SOURCE = "supplied: qits-configuration";
+
   /**
    * The optional request body of {@code POST /gc/plan} and the two sweeps, read into this.
    *
    * <pre>
-   * {"pins": {"deployments": &lt;verbatim body of GET /platform-deployments/api/pins&gt;,
-   *           "ciDaemon":    &lt;verbatim body of GET /ci/api/daemon&gt;}}
+   * {"pins": {"deployments":      &lt;verbatim body of GET /platform-deployments/api/pins&gt;,
+   *           "ciDaemon":         &lt;verbatim body of GET /ci/api/daemon&gt;,
+   *           "dependencies":     &lt;verbatim body of GET /maintenance/api/pins&gt;,
+   *           "configuredImages": &lt;verbatim body of GET /configuration/api/pins&gt;}}
    * </pre>
    *
-   * <p>An envelope with one member rather than the two documents at the top level, so a later run
+   * <p>An envelope with one member rather than the four documents at the top level, so a later run
    * option can be added beside {@code pins} without moving anything a caller already sends.
    *
    * <p>Read off the tree rather than bound to a class, which is why this repository still adds no
@@ -69,9 +89,15 @@ public record GcSuppliedPins(JsonNode deployments, JsonNode ciDaemon) {
     }
     if (!pins.isObject()) {
       throw new IllegalArgumentException(
-          "'pins' must be an object holding 'deployments' and 'ciDaemon'");
+          "'pins' must be an object holding 'deployments', 'ciDaemon', 'dependencies' and"
+              + " 'configuredImages'");
     }
-    return Optional.of(new GcSuppliedPins(pins.get("deployments"), pins.get("ciDaemon")));
+    return Optional.of(
+        new GcSuppliedPins(
+            pins.get("deployments"),
+            pins.get("ciDaemon"),
+            pins.get("dependencies"),
+            pins.get("configuredImages")));
   }
 
   /**
@@ -90,6 +116,26 @@ public record GcSuppliedPins(JsonNode deployments, JsonNode ciDaemon) {
    */
   public CiDaemonPins.DaemonPin daemonPin() {
     return CiHttpDaemonPins.parse(require(ciDaemon, "ciDaemon"), "the supplied document");
+  }
+
+  /**
+   * The manifest dependency pins, read from the supplied document.
+   *
+   * @throws IllegalStateException no document was supplied, or its shape cannot be read
+   */
+  public List<MaintenanceDependencyPins.DependencyPin> dependencyPins() {
+    return MaintenanceHttpDependencyPins.parse(
+        require(dependencies, "dependencies"), "the supplied document");
+  }
+
+  /**
+   * The configured container images, read from the supplied document.
+   *
+   * @throws IllegalStateException no document was supplied, or its shape cannot be read
+   */
+  public List<ConfigurationImagePins.ImagePin> configuredImagePins() {
+    return ConfigurationHttpImagePins.parse(
+        require(configuredImages, "configuredImages"), "the supplied document");
   }
 
   private static JsonNode require(JsonNode document, String member) {

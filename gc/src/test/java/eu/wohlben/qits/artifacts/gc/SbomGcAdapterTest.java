@@ -80,7 +80,7 @@ class SbomGcAdapterTest extends GcFixture {
 
   @Test
   void theBeltKeepsTheLastTwoReleasedDocumentsOfEveryPackage() throws Exception {
-    // Three calver documents of one package, all cold past P90D: the newest two hold their belt
+    // Three calver documents of one package, all cold past P3D: the newest two hold their belt
     // slots whatever their age, the third goes. A second package with one old document keeps it —
     // groups do not spend each other's slots — and a sha document holds no slot at all.
     repository();

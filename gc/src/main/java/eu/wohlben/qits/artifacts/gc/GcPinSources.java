@@ -15,14 +15,14 @@ import java.util.TreeSet;
 import java.util.function.Supplier;
 
 /**
- * Reads both pin sources once and folds them into one {@link GcPins}.
+ * Reads all four pin sources once and folds them into one {@link GcPins}.
  *
  * <p>Called at the start of a plan and at the start of a sweep, and nowhere else — one aggregate per
  * run is what keeps two halves of a run from planning against two different truths.
  *
- * <p><b>Both sources are asked even when the first one fails.</b> A run that stopped at the first
- * failure would report one broken service and hide the second, and whoever fixed it would find the
- * next run just as dead with no warning it was coming. Every failure lands in {@link
+ * <p><b>Every source is asked even when an earlier one fails.</b> A run that stopped at the first
+ * failure would report one broken service and hide the other three, and whoever fixed it would find
+ * the next run just as dead with no warning it was coming. Every failure lands in {@link
  * GcPins#failures()}, and the run's refusal is what the executor and the planner do with it.
  *
  * <p><b>Each read also records how it went</b> ({@link GcPinSource}): the url, the outcome, the time
@@ -40,10 +40,22 @@ public class GcPinSources {
 
   @Inject CdDeploymentPins cd;
   @Inject CiDaemonPins ci;
+  @Inject MaintenanceDependencyPins maintenance;
+  @Inject ConfigurationImagePins configuration;
+
+  /**
+   * One source as the fold sees it: how it is named on the report, where it was read from (empty
+   * when the document was supplied), and how to produce its answer or throw.
+   */
+  private record Source<T>(String name, String url, Supplier<T> read) {}
 
   /** One reading of every pin the platform holds, over the wire. Never cached. */
   public GcPins fetch() {
-    return fold("qits-platform-deployments", cd.url(), cd::pins, "qits-ci", ci.url(), ci::daemonPin);
+    return fold(
+        new Source<>("qits-platform-deployments", cd.url(), cd::pins),
+        new Source<>("qits-ci", ci.url(), ci::daemonPin),
+        new Source<>("qits-platform-maintenance", maintenance.url(), maintenance::pins),
+        new Source<>("qits-configuration", configuration.url(), configuration::pins));
   }
 
   /**
@@ -59,41 +71,31 @@ public class GcPinSources {
       return fetch();
     }
     return fold(
-        GcSuppliedPins.CD_SOURCE,
-        "",
-        supplied::deploymentPins,
-        GcSuppliedPins.CI_SOURCE,
-        "",
-        supplied::daemonPin);
+        new Source<>(GcSuppliedPins.CD_SOURCE, "", supplied::deploymentPins),
+        new Source<>(GcSuppliedPins.CI_SOURCE, "", supplied::daemonPin),
+        new Source<>(GcSuppliedPins.MAINTENANCE_SOURCE, "", supplied::dependencyPins),
+        new Source<>(GcSuppliedPins.CONFIGURATION_SOURCE, "", supplied::configuredImagePins));
   }
 
-  /**
-   * Both answers folded into one aggregate, whoever produced them.
-   *
-   * @param cdSource how the deployments source is named on the report
-   * @param cdUrl the url it was read from — empty when the document was supplied
-   * @param cdRead produces the deployer's pins, or throws
-   * @param ciSource how the qits-ci source is named on the report
-   * @param ciUrl the url it was read from — empty when the document was supplied
-   * @param ciRead produces qits-ci's ladder, or throws
-   */
+  /** All four answers folded into one aggregate, whoever produced them. */
   private GcPins fold(
-      String cdSource,
-      String cdUrl,
-      Supplier<List<CdDeploymentPins.ApplicationPin>> cdRead,
-      String ciSource,
-      String ciUrl,
-      Supplier<CiDaemonPins.DaemonPin> ciRead) {
+      Source<List<CdDeploymentPins.ApplicationPin>> cdSource,
+      Source<CiDaemonPins.DaemonPin> ciSource,
+      Source<List<MaintenanceDependencyPins.DependencyPin>> maintenanceSource,
+      Source<List<ConfigurationImagePins.ImagePin>> configurationSource) {
     Map<String, Set<String>> deployments = new HashMap<>();
-    String daemonName = "";
     Set<String> daemonVersions = new HashSet<>();
     Set<String> blobs = new HashSet<>();
+    Set<String> mavenDependencies = new TreeSet<>();
+    Set<String> npmDependencies = new TreeSet<>();
+    Set<String> manifestImages = new TreeSet<>();
+    Set<String> configuredImages = new TreeSet<>();
     List<String> failures = new ArrayList<>();
     List<GcPinSource> sources = new ArrayList<>();
 
     Instant startedCd = Instant.now();
     try {
-      List<CdDeploymentPins.ApplicationPin> pins = cdRead.get();
+      List<CdDeploymentPins.ApplicationPin> pins = cdSource.read().get();
       Set<String> keeps = new TreeSet<>();
       for (CdDeploymentPins.ApplicationPin pin : pins) {
         deployments
@@ -106,7 +108,6 @@ public class GcPinSources {
       sources.add(
           answered(
               cdSource,
-              cdUrl,
               startedCd,
               pins.size()
                   + " application pins over "
@@ -115,14 +116,15 @@ public class GcPinSources {
               pins.size(),
               keeps));
     } catch (RuntimeException unreachable) {
-      String why = cdSource + " deployment pins: " + message(unreachable);
+      String why = cdSource.name() + " deployment pins: " + message(unreachable);
       failures.add(why);
-      sources.add(failed(cdSource, cdUrl, startedCd, why));
+      sources.add(failed(cdSource, startedCd, why));
     }
 
+    String daemonName = "";
     Instant startedCi = Instant.now();
     try {
-      CiDaemonPins.DaemonPin pin = ciRead.get();
+      CiDaemonPins.DaemonPin pin = ciSource.read().get();
       daemonName = blank(pin.daemonName());
       // Blank is an ANSWER: qits-ci saying this deployment has pinned no daemon. Dropped from the
       // set rather than treated as a version, and never a failure.
@@ -140,7 +142,6 @@ public class GcPinSources {
       sources.add(
           answered(
               ciSource,
-              ciUrl,
               startedCi,
               daemonVersions.isEmpty()
                   ? "no daemon is pinned (source: "
@@ -156,27 +157,111 @@ public class GcPinSources {
               daemonVersions.size(),
               keeps));
     } catch (RuntimeException unreachable) {
-      String why = ciSource + " daemon pin: " + message(unreachable);
+      String why = ciSource.name() + " daemon pin: " + message(unreachable);
       failures.add(why);
-      sources.add(failed(ciSource, ciUrl, startedCi, why));
+      sources.add(failed(ciSource, startedCi, why));
     }
 
-    return new GcPins(deployments, daemonName, daemonVersions, blobs, failures, sources);
+    Instant startedMaintenance = Instant.now();
+    try {
+      List<MaintenanceDependencyPins.DependencyPin> pins = maintenanceSource.read().get();
+      for (MaintenanceDependencyPins.DependencyPin pin : pins) {
+        // The coordinate each ecosystem's adapter already spells its identities with, so the
+        // lookup on the other side is an equality test and never a translation.
+        switch (pin.ecosystem()) {
+          case "maven" -> mavenDependencies.add(pin.name() + ":" + pin.version());
+          case "npm" -> npmDependencies.add(pin.name() + "@" + pin.version());
+          case "docker" -> manifestImages.add(pin.name() + ":" + pin.version());
+          default ->
+              // Unreachable through the parser, which refuses an ecosystem it cannot file. Kept as
+              // a refusal rather than a silent drop, because a pin filed nowhere is a keep lost.
+              throw new IllegalStateException(
+                  "cannot file a dependency pin for ecosystem " + pin.ecosystem());
+        }
+      }
+      Set<String> keeps = new TreeSet<>();
+      keeps.addAll(mavenDependencies);
+      keeps.addAll(npmDependencies);
+      keeps.addAll(manifestImages);
+      sources.add(
+          answered(
+              maintenanceSource,
+              startedMaintenance,
+              pins.size()
+                  + " manifest references over "
+                  + keeps.size()
+                  + " coordinates ("
+                  + mavenDependencies.size()
+                  + " maven, "
+                  + npmDependencies.size()
+                  + " npm, "
+                  + manifestImages.size()
+                  + " docker) — what repositories on main still build against",
+              pins.size(),
+              keeps));
+    } catch (RuntimeException unreachable) {
+      String why = maintenanceSource.name() + " dependency pins: " + message(unreachable);
+      failures.add(why);
+      sources.add(failed(maintenanceSource, startedMaintenance, why));
+      // A half-folded keep-set is worse than none: the run refuses anyway, and leaving partial
+      // coordinates behind would make a report claim keeps this source did not finish stating.
+      mavenDependencies.clear();
+      npmDependencies.clear();
+      manifestImages.clear();
+    }
+
+    Instant startedConfiguration = Instant.now();
+    try {
+      List<ConfigurationImagePins.ImagePin> pins = configurationSource.read().get();
+      for (ConfigurationImagePins.ImagePin pin : pins) {
+        configuredImages.add(pin.image() + ":" + pin.version());
+      }
+      sources.add(
+          answered(
+              configurationSource,
+              startedConfiguration,
+              pins.size()
+                  + " configured entries over "
+                  + configuredImages.size()
+                  + " image coordinates — what a launch would pull, which no deployment row names",
+              pins.size(),
+              configuredImages));
+    } catch (RuntimeException unreachable) {
+      String why = configurationSource.name() + " configured images: " + message(unreachable);
+      failures.add(why);
+      sources.add(failed(configurationSource, startedConfiguration, why));
+      configuredImages.clear();
+    }
+
+    return new GcPins(
+        deployments,
+        daemonName,
+        daemonVersions,
+        blobs,
+        mavenDependencies,
+        npmDependencies,
+        manifestImages,
+        configuredImages,
+        failures,
+        sources);
   }
 
   private static GcPinSource answered(
-      String source,
-      String url,
-      Instant startedAt,
-      String outcome,
-      int pinCount,
-      Set<String> keeps) {
+      Source<?> source, Instant startedAt, String outcome, int pinCount, Set<String> keeps) {
     return new GcPinSource(
-        source, url, true, outcome, startedAt, took(startedAt), pinCount, List.copyOf(keeps));
+        source.name(),
+        source.url(),
+        true,
+        outcome,
+        startedAt,
+        took(startedAt),
+        pinCount,
+        List.copyOf(keeps));
   }
 
-  private static GcPinSource failed(String source, String url, Instant startedAt, String why) {
-    return new GcPinSource(source, url, false, why, startedAt, took(startedAt), 0, List.of());
+  private static GcPinSource failed(Source<?> source, Instant startedAt, String why) {
+    return new GcPinSource(
+        source.name(), source.url(), false, why, startedAt, took(startedAt), 0, List.of());
   }
 
   private static long took(Instant startedAt) {

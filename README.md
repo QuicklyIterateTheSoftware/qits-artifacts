@@ -703,7 +703,7 @@ change, and the route echoes their digest.
 publish streams rather than buffers — no `BodyHandler`, capped by `qits.artifacts.sbom.max-size`
 (default 16M).
 
-GC keeps the last 2 **released** documents of every package plus anything read inside `P90D`, and
+GC keeps the last 2 **released** documents of every package plus anything read inside `P3D`, and
 the read that matters is qits-platform-maintenance's: it re-reads a live artifact's document on its
 scan cadence, which is why nothing pins one by coordinate. See "Garbage collection".
 
@@ -1093,26 +1093,32 @@ one.
 
 | type | strategy | window |
 |---|---|---|
-| `oci-images`, `npm-packages` | `own` | `P30D` |
-| `maven-packages`, `daemon-binaries`, `docs`, `sboms` | `own` | `P90D` |
+| `oci-images`, `npm-packages`, `maven-packages`, `daemon-binaries`, `docs`, `sboms` | `own` | `P3D` |
 | `ci-screenshots`, `ci-videos` | `excluded` | — (a window beside a type nobody collects reads as a running rule) |
 
-`maven-packages`, `daemon-binaries`, `docs` and `sboms` get the longer window for one reason in four
-spellings: a library is resolved when something builds against it, a daemon binary when a runner
-starts, a version's documentation while somebody is on that version, and an SBOM on
-qits-platform-maintenance's scan cadence — and none of those cadences is a month.
+**All six windows came down to `P3D` on 2026-09-04**, from `P30D`/`P90D`, and the argument is that
+the access window was never carrying the safety it appeared to. The platform releases on the order of
+90 images a day, so an access window sizes the store rather than the risk. What made a long window
+feel safe was that consumption was *inferred* from a pull that might not have happened lately —
+which is why the four types with the slowest cadences (a library resolved when something builds
+against it, a daemon binary when a runner starts, documentation while somebody is on that version,
+an SBOM on the scan cadence) had been given a quarter. Consumption is **named** now: four pin sources
+say what is deployed, what the ci ladder launches, what repositories' manifests reference and what
+the platform is configured to launch, and the structural belts say the rest. The keep-classes carry
+the safety; three days is what bounds the store. Raising one of these is a decision about disk, not
+about correctness — narrowing the pin coverage is what would make it one about correctness again.
 
 **The own engine is live over every configured type**, which is the first change to what dies on
 this platform. What each one condemns, in one line each — the sections below carry the reasoning:
 
 | type | engine, window | identity that dies | what keeps it | liveness expression |
 |---|---|---|---|---|
-| `oci-images` | `own`, `P30D` | a sha tag, or a manifest no tag and no tagged manifest reaches | the last 2 calver releases; a sha qits-cd pins; the newest sha per image; anything pulled inside the window | manifest closure over surviving tags and manifests |
-| `npm-packages` | `own`, `P30D` | a published version | the last 2 releases by semver; anything a dist-tag names; anything installed inside the window | `npm_version.tarball_blob_id` of survivors |
-| `maven-packages` | `own`, `P90D` | a **coordinate** — one version's whole file set | the last 2 release versions; the newest deployable set of every snapshot line; anything resolved inside the window | `maven_artifact.blob_id`, sized from the row |
-| `daemon-binaries` | `own`, `P90D` | a `daemon_binary` row | the last 2 versions; both rungs qits-ci names; a pinned digest's bytes; anything downloaded inside the window | `daemon_binary.blob_id`, sized from the row |
-| `docs` | `own`, `P90D` | a published **version** of a site — never a file, because `docs_file` cascades | the last 2 versions of every site; anything read inside the window | `docs_file.blob_id` of surviving versions |
-| `sboms` | `own`, `P90D` | one stored document, `packageType/packageName@version` | the last 2 released documents of every package; anything read inside the window — a maintenance scan's read is what keeps a live artifact's document | `sbom_document.blob_id`, sized from the row |
+| `oci-images` | `own`, `P3D` | a sha tag, or a manifest no tag and no tagged manifest reaches | the last 2 calver releases; a coordinate qits-platform-deployments pins; an image a repository's Dockerfile references; an image qits-configuration would launch; the tag literally named `latest`; the newest release per image; anything pulled inside the window | manifest closure over surviving tags and manifests |
+| `npm-packages` | `own`, `P3D` | a published version | the last 2 releases by semver; anything a dist-tag names; anything a repository's package.json still resolves to; anything installed inside the window | `npm_version.tarball_blob_id` of survivors |
+| `maven-packages` | `own`, `P3D` | a **coordinate** — one version's whole file set | the last 2 release versions; anything a repository's pom still references; the newest deployable set of every snapshot line; anything resolved inside the window | `maven_artifact.blob_id`, sized from the row |
+| `daemon-binaries` | `own`, `P3D` | a `daemon_binary` row | the last 2 versions; both rungs qits-ci names; a pinned digest's bytes; anything downloaded inside the window | `daemon_binary.blob_id`, sized from the row |
+| `docs` | `own`, `P3D` | a published **version** of a site — never a file, because `docs_file` cascades | the last 2 versions of every site; anything read inside the window | `docs_file.blob_id` of surviving versions |
+| `sboms` | `own`, `P3D` | one stored document, `packageType/packageName@version` | the last 2 released documents of every package; anything read inside the window — a maintenance scan's read is what keeps a live artifact's document | `sbom_document.blob_id`, sized from the row |
 | `ci-screenshots`, `ci-videos` | `excluded` | **nothing** — no engine is configured, so nothing of them is ever deleted | everything | `artifact_record.blob_id`, reported live |
 | `oci-mirror`, `npm-proxy`, `maven-proxy` | none here | **nothing** — no profile claims them, so `GcPlanner` omits them rather than reporting zeros | everything | qits-platform-mirror's, with the cache engine |
 
@@ -1129,15 +1135,28 @@ otherwise read as a rule that ran and found nothing.
 
 ### Live pins, and the whole-run abort
 
-Two services hold references into this store that nothing here can derive, and both are read
+Four services hold references into this store that nothing here can derive, and all four are read
 **once at the start of every plan and every sweep**, never cached:
 
 | source | what it pins | shape |
 |---|---|---|
-| `GET /cd/api/pins` (qits-cd) | image shas: what is serving, and what a rollback would restore, unioned over every environment | `{"pins":[{"applicationName":…,"shas":[…]}]}` |
+| `GET /platform-deployments/api/pins` (qits-platform-deployments) | image coordinates: what is serving, and what a rollback would restore, unioned over every environment | `{"pins":[{"applicationName":…,"shas":[…]}]}` |
 | `GET /ci/api/daemon` (qits-ci) | the daemon ladder's top two rungs, which protect `daemon_binary` rows keyed `(name, version)` | `{daemonName, daemonVersion, previousDaemonVersion, source}` |
+| `GET /maintenance/api/pins` (qits-platform-maintenance) | the internal maven, npm and docker versions repositories' manifests still **reference** on `main` — what source still builds against, which no pull implies | `{"generatedAt":…,"repositories":[…],"pins":[{"ecosystem","name","version","repository","manifestPath"}]}` |
+| `GET /configuration/api/pins` (qits-configuration) | the container images the platform is **configured** to launch — a workspace, an editor, a project agent, started on demand from a configuration entry that no deployment row names | `{"generatedAt":…,"pins":[{"image","version","application","key"}]}` |
 
-Both are folded into one `GcPins` for the run. Two details are load-bearing and neither is visible
+**The last two answer for consumption, and they are what a `P3D` window rests on.** The first two say
+what is running; these two say what is referenced and what would be started. Both join on a
+coordinate spelled exactly as the adapter spells its identities — `groupId:artifactId:version`,
+`name@version`, and for images the **full** name (`qits/workspace-base:2026.902.143920`, repository
+row plus image, which is what a Dockerfile and a configuration entry both write and what cd's
+`applicationName` does not carry). The maintenance answer's `repositories` array is the scan's
+freshness provenance: it is shape-checked and dropped, because deciding when an inventory is fresh
+enough to act on is maintenance's call, made as a `503` that arrives here as a failure like any
+other. An ecosystem this store cannot file is **refused**, not skipped — a pin filed nowhere is a
+keep dropped in silence.
+
+All four are folded into one `GcPins` for the run. Two details are load-bearing and neither is visible
 on the wire:
 
 - **A blank `daemonVersion` is an answer**, not an absence: it means this deployment has adopted or
@@ -1157,19 +1176,22 @@ the pins missing nothing can tell.
 are fine. It answers with `executable: false`, the failures in `pinFailures`, and every pin-dependent
 type carrying a refusal instead of zeros nobody can interpret.
 
-The keep is reported under the pin's own name — `pinned by qits-cd deployment`, `pinned by qits-ci
-daemon ladder` — and both engines check it **before** the access rule, because a pin is the one fact
-no timestamp implies.
+The keep is reported under the pin's own name — `pinned by a qits-platform-deployments deployment`,
+`pinned by qits-ci daemon ladder`, `referenced by a repository manifest on main
+(qits-platform-maintenance dependency pins)`, `a configured container image (qits-configuration)` —
+and both engines check it **before** the access rule, because a pin is the one fact no timestamp
+implies.
 
 #### Pins may arrive in the request
 
 `POST /artifacts/api/gc/plan` and both sweeps take an optional body — `{"pins": {"deployments": <the
 verbatim body of GET /platform-deployments/api/pins>, "ciDaemon": <the verbatim body of GET
-/ci/api/daemon>}}` — and use those documents instead of the readers above. They are parsed by the
+/ci/api/daemon>, "dependencies": <GET /maintenance/api/pins>, "configuredImages": <GET
+/configuration/api/pins>}}` — and use those documents instead of the readers above. They are parsed by the
 **same** code the readers use, so a keep-set does not change with the way the document travelled;
-only the provenance does, and the report says so: the source reads `supplied:
-qits-platform-deployments` / `supplied: qits-ci` and carries no url, because this service made no
-call. It is how qits-platform-orchestrator gives one platform-wide pin set — read once, at the start
+only the provenance does, and the report says so: the sources read `supplied:
+qits-platform-deployments`, `supplied: qits-ci`, `supplied: qits-platform-maintenance`, `supplied:
+qits-configuration`, and carry no url, because this service made no call. It is how qits-platform-orchestrator gives one platform-wide pin set — read once, at the start
 of a run — to every deleter that run touches, so two deleters can never work off two different
 truths. Nothing about the fail-closed rule softens: a member the caller left out is that source
 **unanswered**, the plan reports itself non-executable and the sweep aborts with nothing deleted,
@@ -1182,6 +1204,10 @@ holds `qits:admin`, and it is the same machine already allowed to run the sweep.
 puts it inside `AdminWriteGuard`, so once `qits.auth.machine.required` is on it needs the machine
 audience the sweep needs. Sending no body at all is unchanged in every respect, which
 is what the SPA and every operator recipe do, and the HTTP readers stay the fallback for them.
+**The envelope grew from two members to four on 2026-09-04, and that is why this service ships last
+in its rollout**: an orchestrator still sending the old two supplies half a keep-set, which is a
+source unanswered and a run that refuses. Bring qits-platform-maintenance and qits-configuration up,
+then the orchestrator, then this.
 **Those readers send no credential**, so on an authenticated platform they get a `401` and every
 no-body run aborts; supplying pins is the way around that today, and fixing the readers is a
 separate piece of work that is deliberately not done here.
@@ -1219,11 +1245,15 @@ narrow public door, javadoc'd as gc's alone. That unlink loop runs only when `Gc
 drives it behind the `POST`, after the strategies' identity deletions, against a census taken fresh
 after them. Three constraints are enforced in the method rather than trusted to its caller:
 
-- **A grace window** — `qits.artifacts.gc.blob-grace-period`, default **7 days**, measured from the
+- **A grace window** — `qits.artifacts.gc.blob-grace-period`, default **2 days**, measured from the
   file's mtime, which is when `promote` moved it into place. It closes the upload race: a client's
   blob-exists probe (or npm's dedupe) answers "have it" for a blob about to be unlinked, and the
-  manifest referencing it lands after. Seven days covers any in-flight session by orders of
+  manifest referencing it lands after. Two days covers any in-flight session by orders of
   magnitude. A withheld blob is not lost — it is reported as withheld, and the next run takes it.
+  **It came down from `P7D` with the access windows and had to**: this window gates identity **rows**
+  as well as blob unlinks, so a `P7D` grace under a `P3D` window would withhold every condemned
+  identity for four days past the moment the rule condemned it — the access window would be a
+  fiction and the store would collect on a rhythm nobody configured.
 - **A pre-unlink re-census** — a plan is a photograph; the store moves. The caller passes a guard
   that is asked again inside the store's write lock, the same lock `promote` takes, so the check and
   the unlink cannot be separated by a write. Both writers live in one JVM, which is what makes an
@@ -1280,15 +1310,18 @@ loud for anything else.
 
 `OciImageGcStrategy` is a four-line bean now: the rule is `OwnArtifactsStrategy`'s, the wiring is
 `OwnGcStrategy`'s, and docker's facts are `OciImagesGcAdapter`'s. The settled rule, in one sentence:
-**the last two calver releases of every image stay, everything a live pin names stays, and the rest
-dies once nothing has pulled it for P30D.**
+**the last two calver releases of every image stay, everything a live pin names stays, `latest`
+always stays, and the rest dies once nothing has pulled it for P3D.**
 
 | Kept because | Spelled |
 |---|---|
 | it is one of the last two releases | a tag shaped like a calver version (`2026.801.85448`), ranked by the version's own order — not by a row timestamp, so a release pulled last week is not thereby the newer release. There is no `-main.g<sha>` suffix in docker: the sha tag *is* the prerelease coordinate and a release adds a version tag beside it |
-| qits-cd pins it | any sha `GET /cd/api/pins` names for that image — what is serving, and what a rollback would restore. **One rule, cd's**: this used to be two rules derived here from raw deployment rows, and the derivation was wrong (it read a `FAILED` attempt as the rollback target and dropped the sha that actually served) |
+| qits-platform-deployments pins it | any coordinate `GET /platform-deployments/api/pins` names for that image — what is serving, and what a rollback would restore. **One rule, the deployer's**: this used to be two rules derived here from raw deployment rows, and the derivation was wrong (it read a `FAILED` attempt as the rollback target and dropped the sha that actually served) |
+| a repository's Dockerfile references it | any `image:tag` `GET /maintenance/api/pins` names in the `docker` ecosystem, joined on the **full** image name. A base image is pulled by the *builder*, so nothing here has an access row to show for it and no deployment names it |
+| the platform is configured to launch it | any `image:version` `GET /configuration/api/pins` names, joined the same way. A workspace or agent image is started on demand from a configuration entry, so the image a user's next click pulls can easily be one nobody has started for a week |
+| it is the moving pointer | a tag literally named `latest`. CI step recipes pull `qits/build-images/*:latest` by name; `latest` is not a calver, so no release rule covers it, and the host-side keep-prefix suppresses exactly the pulls that would keep it access-warm. Deleting it `404`s a fresh host's first pull of a step image, and it costs nothing — `latest` shares the newest push's blobs |
 | the next deploy will pull it | the newest sha tag per image, by `oci_tag.updated_at`. This is the whole safety net for an image cd has never deployed, and it reads `updated_at` rather than the access time the window judges on — a cold, never-deployed image is exactly the case it exists for |
-| something still pulls it | anything else accessed inside P30D. This is where the old *unclassified-means-keep* backstop went: a coordinate nobody modelled is kept for as long as it is used, which is a better answer than "forever" and a safer one than the structural rule it replaces |
+| something still pulls it | anything else accessed inside P3D. This is where the old *unclassified-means-keep* backstop went: a coordinate nobody modelled is kept for as long as it is used, which is a better answer than "forever" and a safer one than the structural rule it replaces |
 
 **Two rules changed direction, and both changes are the settlement's.** Calver releases used to be
 kept forever and are now kept as the last two per image; an older one survives on *use*. Build-sha
@@ -1311,14 +1344,15 @@ derived here — see "Live pins, and the whole-run abort" above.
 
 `NpmPackagesGcStrategy` is a four-line bean now: the rule is `OwnArtifactsStrategy`'s, the wiring is
 `OwnGcStrategy`'s, and npm's facts are `NpmPackagesGcAdapter`'s. The settled rule: **the last two
-releases of every package stay, anything a dist-tag names stays, and the rest dies once nothing has
-installed it for P30D.**
+releases of every package stay, anything a dist-tag names stays, anything a repository's
+package.json still resolves to stays, and the rest dies once nothing has installed it for P3D.**
 
 | Kept because | Spelled |
 |---|---|
 | it is one of the last two releases | the version has **no prerelease part** — `0.0.1` through `2026.801.85149` — ranked by **semver precedence** (`NpmSemver`), not by publish order. Consumers pin ranges, and `^2026.801.85149` has to keep resolving |
 | a pointer names it | any version a dist-tag currently names. A packument whose `dist-tags` names a version its `versions` does not list is a broken package to every npm client, so this is checked before the window rather than left to it |
-| something still installs it | accessed inside P30D. This is where both of the old structural rules went: what `@main` resolves to was published minutes ago and is young by construction, and an `-rc.1` somebody made by hand is kept for as long as anything installs it |
+| a repository still resolves it | any `name@version` `GET /maintenance/api/pins` names in the `npm` ecosystem — the identity spelling verbatim, so the lookup is an equality test. It is what a lockfile on `main` will install the next time that consumer builds, which may be well outside the window |
+| something still installs it | accessed inside P3D. This is where both of the old structural rules went: what `@main` resolves to was published minutes ago and is young by construction, and an `-rc.1` somebody made by hand is kept for as long as anything installs it |
 
 **Two rules changed direction, and both changes are the settlement's.** Releases used to be kept
 forever and are now kept as the last two per package; an older one survives on *use*, which is what a
@@ -1429,14 +1463,14 @@ qits-ci's answer and the blob class is the one a running service runs.
 the same transaction as a publish, publishes come from the release pipeline, and versions are
 immutable (`409` on republish). So the belt is the settlement's sentence with nothing to qualify —
 the last two versions of every daemon live whatever their age, both rungs of qits-ci's ladder live
-under qits-ci's own rule, and the rest dies once nothing has downloaded it for P90D.
+under qits-ci's own rule, and the rest dies once nothing has downloaded it for P3D.
 
 | Kept because | Spelled |
 |---|---|
 | it is one of the last two versions | per `(repository, name)`, ranked by version: an **adopted digest-hex version ranks below every calver one**, because the ops adoption carries the blob's own digest as the version and comparing 64 hex characters as a number would rank the oldest thing here as the newest |
 | qits-ci's ladder names it | `GET /ci/api/daemon`, both rungs — the version a run would launch and the fallback beneath it. A runner that has not started in months still fetches its rung the moment one does |
 | a pin names its bytes | the digest half of the same aggregate: `QITS_CI_DAEMON_VERSION` has been a sha256 since the daemon shipped, so a pinned digest keeps whichever row names those bytes |
-| something still downloads it | accessed inside P90D, by the **version-addressed** GET. The digest-addressed `/v2` blob route moves nothing and must not grow a twin — it carries no daemon identity, and the pin is what keeps a digest-fetched daemon alive |
+| something still downloads it | accessed inside P3D, by the **version-addressed** GET. The digest-addressed `/v2` blob route moves nothing and must not grow a twin — it carries no daemon identity, and the pin is what keeps a digest-fetched daemon alive |
 
 Deletion goes through `DaemonRegistryCollection` → `DaemonRegistryService.collect`, the fourth narrow
 door beside `BlobReclaim`, `OciRegistryCollection` and `NpmRegistryCollection`. **There is no
@@ -1455,7 +1489,7 @@ answer to them is an ops action, once, by hand.
 {
   "summary": {                          // first, because it is what a human reads first
     "executable": true,
-    "headline": "a sweep run now would execute this plan: 37 identities would be deleted and 21 blob files unlinked, reclaiming 402.7 MiB, with 3 blobs (12.0 KiB) withheld by the P7D grace window.",
+    "headline": "a sweep run now would execute this plan: 37 identities would be deleted and 21 blob files unlinked, reclaiming 402.7 MiB, with 3 blobs (12.0 KiB) withheld by the P2D grace window.",
     "identitiesCondemned": 37,
     "blobsSweepable": 21,
     "reclaimableBytes": 422313984,
@@ -1464,20 +1498,20 @@ answer to them is an ops action, once, by hand.
     "types": [                          // one line per type: configured engine, window, outcome, note
       "ci-screenshots (excluded): excluded by configuration, so nothing of it is ever deleted — a decision, not a gap — stub: the golden-diff loop has never produced a screenshot.",
       "ci-videos (excluded): excluded by configuration, so nothing of it is ever deleted — a decision, not a gap — stub: the golden-diff loop has never produced a video.",
-      "oci-images (own, P30D): 12 identities condemned, 28 kept, 9 blobs freed, 384.0 MiB reclaimable",
-      "npm-packages (own, P30D): 1 identities condemned, 4 kept, 1 blobs freed, 17.5 KiB reclaimable",
-      "maven-packages (own, P90D): 1 identities condemned, 6 kept, 2 blobs freed, 40.3 KiB reclaimable",
-      "daemon-binaries (own, P90D): 1 identities condemned, 2 kept, 1 blobs freed, 41.1 MiB reclaimable",
-      "docs (own, P90D): 1 identities condemned, 4 kept, 6 blobs freed, 1.2 MiB reclaimable"
+      "oci-images (own, P3D): 12 identities condemned, 28 kept, 9 blobs freed, 384.0 MiB reclaimable",
+      "npm-packages (own, P3D): 1 identities condemned, 4 kept, 1 blobs freed, 17.5 KiB reclaimable",
+      "maven-packages (own, P3D): 1 identities condemned, 6 kept, 2 blobs freed, 40.3 KiB reclaimable",
+      "daemon-binaries (own, P3D): 1 identities condemned, 2 kept, 1 blobs freed, 41.1 MiB reclaimable",
+      "docs (own, P3D): 1 identities condemned, 4 kept, 6 blobs freed, 1.2 MiB reclaimable"
     ]
   },
   "generatedAt": "2026-08-01T12:00:00Z",
   "dryRun": true,                       // always, on this route; the sweep's receipt is the twin with false
-  "graceWindow": "P7D",
+  "graceWindow": "P2D",
   "executable": true,
   "pinFailures": [],
   "pins": [                             // how this run read its pins; the sweep receipt carries the same
-    { "source": "qits-cd", "url": "http://qits-cd:8080/cd/api/pins",
+    { "source": "qits-platform-deployments", "url": "http://qits-platform-deployments:8080/platform-deployments/api/pins",
       "answered": true, "readAt": "2026-08-01T12:00:00Z", "tookMillis": 34,
       "outcome": "9 application pins over 14 image shas — what is serving, and what a rollback would restore",
       "pinCount": 9,
@@ -1486,41 +1520,51 @@ answer to them is an ops action, once, by hand.
       "answered": true, "readAt": "2026-08-01T12:00:00Z", "tookMillis": 11,
       "outcome": "daemon qits-ci-daemon, 2 ladder rungs pinned (source: adopted)",
       "pinCount": 2,
-      "keeps": ["blob 9f2c…", "qits-ci-daemon@2026.802.40", "qits-ci-daemon@9f2c…"] }
+      "keeps": ["blob 9f2c…", "qits-ci-daemon@2026.802.40", "qits-ci-daemon@9f2c…"] },
+    { "source": "qits-platform-maintenance", "url": "http://qits-platform-maintenance:8080/maintenance/api/pins",
+      "answered": true, "readAt": "2026-08-01T12:00:00Z", "tookMillis": 62,
+      "outcome": "184 manifest references over 41 coordinates (23 maven, 12 npm, 6 docker) — what repositories on main still build against",
+      "pinCount": 184,
+      "keeps": ["@qits/ui-components@2026.902.204627", "eu.wohlben.qits:qits-blobstore:2026.903.85122", "qits/workspace-base:2026.902.143920"] },
+    { "source": "qits-configuration", "url": "http://qits-configuration:8080/configuration/api/pins",
+      "answered": true, "readAt": "2026-08-01T12:00:00Z", "tookMillis": 8,
+      "outcome": "4 configured entries over 3 image coordinates — what a launch would pull, which no deployment row names",
+      "pinCount": 4,
+      "keeps": ["qits/project-agent:2026.904.160152", "qits/workspace-editor:2026.904.100239", "qits/workspace:2026.904.160522"] }
   ],
   "types": [                            // every REGISTERED type, always — including the ones nobody collects
     { "type": "oci-images", "strategy": "OciImageGcStrategy",
       "note": null, "error": null,
       "dead": [{ "repository": "qits", "identity": "qits-ci:3ff84c05…",
-                 "rule": "superseded and unaccessed for longer than P30D" }],
+                 "rule": "superseded and unaccessed for longer than P3D" }],
       "kept": [{ "repository": "qits", "identity": "qits-stt:2026.801.85448",
                  "rule": "among the last 2 released versions of this identity group — releases are kept by policy, not by access" }],
       "blobsReleased": 0, "blobsSweepable": 0, "reclaimableBytes": 0 },
     { "type": "daemon-binaries", "strategy": "DaemonBinariesGcStrategy",
       "note": null, "error": null,
       "dead": [{ "repository": "daemons", "identity": "qits-ci-daemon@2026.601.10",
-                 "rule": "superseded and unaccessed for longer than P90D" }],
+                 "rule": "superseded and unaccessed for longer than P3D" }],
       "kept": [{ "repository": "daemons", "identity": "qits-ci-daemon@2026.802.40",
                  "rule": "pinned by qits-ci daemon ladder" }],
       "blobsReleased": 1, "blobsSweepable": 1, "reclaimableBytes": 43123792 },
     { "type": "npm-packages", "strategy": "NpmPackagesGcStrategy",
       "note": null, "error": null,
       "dead": [{ "repository": "npm", "identity": "@qits/ui-components@2026.801.63140-main.gab854a1",
-                 "rule": "superseded and unaccessed for longer than P30D" }],
+                 "rule": "superseded and unaccessed for longer than P3D" }],
       "kept": [{ "repository": "npm", "identity": "@qits/ui-components@2026.801.85149",
                  "rule": "among the last 2 released versions of this identity group — releases are kept by policy, not by access" }],
       "blobsReleased": 1, "blobsSweepable": 1, "reclaimableBytes": 17904 },
     { "type": "maven-packages", "strategy": "MavenPackagesGcStrategy",
       "note": null, "error": null,
       "dead": [{ "repository": "maven", "identity": "eu.wohlben.qits:qits-eventstream:1.0.1-20260601.101010-1",
-                 "rule": "superseded and unaccessed for longer than P90D" }],
+                 "rule": "superseded and unaccessed for longer than P3D" }],
       "kept": [{ "repository": "maven", "identity": "eu.wohlben.qits:qits-eventstream:1.0.1-20260802.123456-3",
                  "rule": "the newest deployable set of this snapshot version — what the derived maven-metadata.xml resolves to, so a resolver would 404 without it" }],
       "blobsReleased": 2, "blobsSweepable": 2, "reclaimableBytes": 41216 },
     { "type": "docs", "strategy": "DocsGcStrategy",
       "note": null, "error": null,
       "dead": [{ "repository": "docs", "identity": "qits-eventstream@2026.601.10",
-                 "rule": "superseded and unaccessed for longer than P90D" }],
+                 "rule": "superseded and unaccessed for longer than P3D" }],
       "kept": [{ "repository": "docs", "identity": "qits-eventstream@2026.802.40",
                  "rule": "among the last 2 released versions of this identity group — releases are kept by policy, not by access" }],
       "blobsReleased": 6, "blobsSweepable": 6, "reclaimableBytes": 1258291 },
@@ -1592,13 +1636,17 @@ app's `application.properties` overrides them.
 | Key | Default | What |
 |---|---|---|
 | `qits.artifacts.blobs-dir` | `~/.qits/data/artifacts/blobs` | content-addressed blob bytes |
-| `qits.artifacts.gc.blob-grace-period` | `P7D` | how long a blob file must sit untouched before the sweep may unlink it — see "Garbage collection" |
+| `qits.artifacts.gc.blob-grace-period` | `P2D` | how long a blob file must sit untouched before the sweep may unlink it — see "Garbage collection". Moves with the access windows: it gates identity rows too |
 | `qits.artifacts.gc.pins.cd-base-url` | `http://qits-cd:8080/cd/api` | where a run reads the image shas deployments pin (`GET /cd/api/pins`). **Renamed** from `qits.artifacts.gc.oci.cd-base-url` |
 | `qits.artifacts.gc.pins.cd-timeout` | `PT10S` | per-request timeout on that fetch. **Renamed** from `qits.artifacts.gc.oci.cd-timeout` |
 | `qits.artifacts.gc.pins.ci-base-url` | `http://qits-ci:8080/ci/api` | where a run reads the daemon pin ladder (`GET /ci/api/daemon`) |
 | `qits.artifacts.gc.pins.ci-timeout` | `PT10S` | per-request timeout on that fetch |
+| `qits.artifacts.gc.pins.maintenance-base-url` | `http://qits-platform-maintenance:8080/maintenance/api` | where a run reads the manifest dependency pins (`GET /maintenance/api/pins`) |
+| `qits.artifacts.gc.pins.maintenance-timeout` | `PT10S` | per-request timeout on that fetch |
+| `qits.artifacts.gc.pins.configuration-base-url` | `http://qits-configuration:8080/configuration/api` | where a run reads the configured container images (`GET /configuration/api/pins`) |
+| `qits.artifacts.gc.pins.configuration-timeout` | `PT10S` | per-request timeout on that fetch |
 | `qits.artifacts.gc.type.<wire-name>.strategy` | per type, see "The settlement" | which engine collects a repository type: `own` or `excluded` here — the `cache` engine is qits-platform-mirror's. Every registered type must have one, and a missing entry is refused, not defaulted |
-| `qits.artifacts.gc.type.<wire-name>.window` | `P30D` / `P90D` per type | how long an identity may sit unaccessed before it is eligible, ISO-8601. Absent for an `excluded` type |
+| `qits.artifacts.gc.type.<wire-name>.window` | `P3D` for all six own types | how long an identity may sit unaccessed before it is eligible, ISO-8601. Absent for an `excluded` type |
 | `qits.auth.machine.required` | `false` | the machine-token rollout gate. Off, the JSON admin write surface is open — network trust. On, its writes need a bearer with `aud=qits-platform-artifacts` |
 | `qits.auth.machine.audience` | `qits-platform-artifacts` | this service's own id, and the `aud` its tokens must carry |
 | `qits.artifacts.startup-seed.enabled` | `true` | self-seed the hosted roots: `ci-screenshots`, `ci-videos`, `qits`, `npm`, `maven`, `daemons`, `docs`, `sboms`. No cache root — those are qits-platform-mirror's |

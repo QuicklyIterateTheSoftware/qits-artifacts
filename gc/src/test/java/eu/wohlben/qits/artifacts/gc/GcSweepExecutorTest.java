@@ -81,7 +81,7 @@ class GcSweepExecutorTest extends GcFixture {
 
     assertFalse(report.dryRun());
     assertNotNull(report.executedAt());
-    assertEquals("P7D", report.graceWindow());
+    assertEquals("P2D", report.graceWindow());
     GcTypeSweepResult npm = typeResult(report, NpmPackagesProfile.KEY);
     assertNull(npm.error());
     assertEquals(List.of(PKG + "@" + SUPERSEDED), identities(npm.deleted()));
@@ -350,9 +350,11 @@ class GcSweepExecutorTest extends GcFixture {
     assertNotNull(report.aborted());
     assertTrue(report.aborted().contains("qits-platform-deployments"), report.aborted());
     assertTrue(report.aborted().contains("qits-ci"), report.aborted());
+    assertTrue(report.aborted().contains("qits-platform-maintenance"), report.aborted());
+    assertTrue(report.aborted().contains("qits-configuration"), report.aborted());
     assertEquals(List.of(), report.deleted());
     assertEquals(0, report.sweep().blobsUnlinked());
-    assertEquals(2, report.pins().size(), "an aborted receipt still says how it read its pins");
+    assertEquals(4, report.pins().size(), "an aborted receipt still says how it read its pins");
     assertTrue(
         report.untouchable().reason().contains("not computed"),
         "no census was taken, so the pool is uncomputed rather than empty");

@@ -145,7 +145,7 @@ class GcPlanTest extends GcFixture {
     assertEquals(0L, report.sweep().reclaimableBytes());
     assertEquals(List.of(store.rowless()), report.untouchable().blobIds());
     assertEquals(ROWLESS, report.untouchable().bytes());
-    assertEquals("P7D", report.graceWindow());
+    assertEquals("P2D", report.graceWindow());
   }
 
   @Test
@@ -176,7 +176,7 @@ class GcPlanTest extends GcFixture {
     assertEquals(REGISTERED_TYPES, executable.types().size());
     assertTrue(
         executable.types().stream()
-            .anyMatch(line -> line.startsWith("oci-images (own, P30D): 1 identities condemned")),
+            .anyMatch(line -> line.startsWith("oci-images (own, P3D): 1 identities condemned")),
         "a per-type line carries the configured engine and window beside the outcome: " + executable
             .types());
     assertTrue(
@@ -514,8 +514,8 @@ class GcPlanTest extends GcFixture {
     assertEquals("oci-images", report.type());
     assertTrue(report.dryRun());
     assertFalse(report.executable(), "no qits-platform-deployments and no qits-ci here");
-    assertEquals(2, report.pinFailures().size());
-    assertEquals(2, report.pins().size(), "the provenance of a keep-set is half of what is reviewed");
+    assertEquals(4, report.pinFailures().size());
+    assertEquals(4, report.pins().size(), "the provenance of a keep-set is half of what is reviewed");
     assertEquals("oci-images", report.configuration().type());
     assertEquals("own", report.configuration().strategy());
     assertEquals("OciImageGcStrategy", report.strategy());
@@ -523,7 +523,7 @@ class GcPlanTest extends GcFixture {
     assertEquals(List.of(), report.dead());
     assertEquals(0, report.sweep().blobCount());
     assertEquals(0, report.structural().blobCount());
-    assertEquals("P7D", report.graceWindow());
+    assertEquals("P2D", report.graceWindow());
     assertNotNull(report.untouchable().reason());
 
     assertThrows(

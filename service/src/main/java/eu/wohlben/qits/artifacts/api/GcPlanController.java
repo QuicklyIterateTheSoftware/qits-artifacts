@@ -50,7 +50,8 @@ import org.eclipse.microprofile.openapi.annotations.Operation;
  *
  * <p><b>Pins may arrive in the request.</b> {@code POST /gc/plan} is the {@code GET}'s twin for
  * that and nothing else, and both sweeps take the same optional body: {@code {"pins":
- * {"deployments": …, "ciDaemon": …}}}, each member the peer's response verbatim. It is how
+ * {"deployments": …, "ciDaemon": …, "dependencies": …, "configuredImages": …}}}, each member the
+ * peer's response verbatim. It is how
  * qits-platform-orchestrator gives one platform-wide pin set — read once, by the one component
  * holding an idp client for every peer — to every deleter in a run. A request without a body is
  * unchanged in every respect, and a supplied set never widens what a run may delete: a member left
@@ -212,7 +213,8 @@ public class GcPlanController {
       return GcSuppliedPins.inRequestBody(objectMapper.readTree(body)).orElse(null);
     } catch (com.fasterxml.jackson.core.JsonProcessingException | IllegalArgumentException wrong) {
       throw new BadRequestException(
-          "the gc request body must be {\"pins\":{\"deployments\":…,\"ciDaemon\":…}} or absent: "
+          "the gc request body must be {\"pins\":{\"deployments\":…,\"ciDaemon\":…,"
+              + "\"dependencies\":…,\"configuredImages\":…}} or absent: "
               + wrong.getMessage());
     }
   }

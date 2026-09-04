@@ -102,7 +102,17 @@ public class MavenPackagesGcAdapter implements GcTypeAdapter {
     return List.copyOf(candidates);
   }
 
-  /** The newest deployable set of every snapshot version line — see the class javadoc. */
+  /**
+   * The coordinates a repository's pom still names, and the newest deployable set of every snapshot
+   * version line — see the class javadoc for the second.
+   *
+   * <p><b>The dependency pin needs no translation at all</b>, which is the property that makes it
+   * safe: {@code groupId:artifactId:version} is what a pom writes and it is this adapter's identity
+   * verbatim, so the lookup is an equality test on the string the enumeration already built. It is
+   * asked first because it is a fact about somebody else's source — a reader who sees it wants to
+   * know which repository still builds against this version, not that the snapshot metadata happens
+   * to point here too.
+   */
   @Override
   public GcPinned pinnedBy(List<GcCandidate> candidates, GcPins pins) {
     Map<String, String> newestPerLine = new HashMap<>();
@@ -118,10 +128,15 @@ public class MavenPackagesGcAdapter implements GcTypeAdapter {
           candidate.identity(),
           (held, other) -> BY_SNAPSHOT_RECENCY.compare(held, other) >= 0 ? held : other);
     }
-    return candidate ->
-        candidate.identity().equals(newestPerLine.get(candidate.group()))
-            ? KEPT_RESOLVABLE_SNAPSHOT
-            : null;
+    return candidate -> {
+      String byManifest = pins.pinsMavenCoordinate(candidate.identity());
+      if (byManifest != null) {
+        return byManifest;
+      }
+      return candidate.identity().equals(newestPerLine.get(candidate.group()))
+          ? KEPT_RESOLVABLE_SNAPSHOT
+          : null;
+    };
   }
 
   /**

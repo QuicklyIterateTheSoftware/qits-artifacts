@@ -44,8 +44,15 @@ import org.junit.jupiter.api.Test;
  * it: a released-but-undeployed version is covered by the access rule's fold of {@code updated_at},
  * not by the pin and not by retention.
  *
+ * <p><b>Three pin sources reach this type since 2026-09-04</b>, and they differ by tense: cd names
+ * the images of containers that exist, qits-platform-maintenance names the images a repository's
+ * Dockerfile still builds {@code FROM}, and qits-configuration names the images a service would
+ * launch the next time somebody asks it to. The last two join on the FULL image name, cd on the
+ * image half alone, and each has a case of its own below. The fourth belt, {@link
+ * OciImagesGcAdapter#KEPT_LATEST}, is structural and reads no pin at all.
+ *
  * <p>The pins are handed in as a value rather than fetched: what is under test is the keep-set, and
- * its whole input is "which coordinates does cd pin for this image". Which rows those came from is
+ * its whole input is "which coordinates does a source pin for this image". Which rows those came from is
  * cd's rule and is tested in cd's own repository. The port's field is still called {@code shas} and
  * its strings are opaque, so cases pin whichever shape they are about.
  *
@@ -62,7 +69,7 @@ class OciImagesGcAdapterTest extends GcFixture {
   private static final String SHA_D = "d".repeat(40);
 
   /** The configured window for this type, and the number every case below is aged against. */
-  private static final Duration WINDOW = Duration.ofDays(30);
+  private static final Duration WINDOW = Duration.ofDays(3);
 
   @Inject OciImageGcStrategy strategy;
   @Inject GcPlanner planner;
@@ -276,6 +283,90 @@ class OciImagesGcAdapterTest extends GcFixture {
   }
 
   @Test
+  void anImageADockerfileOnMainStillReferencesIsKeptUnderTheManifestRule() throws Exception {
+    // qits-platform-maintenance's half, and the hazard it closes: a base image is pulled by the
+    // BUILDER rather than by a deploy, so nothing here has an access row to show for it and no
+    // deployment names it. Every tag is cold and the belt is spent on the newest release, so the
+    // manifest pin is the only rule that can be answering.
+    //
+    // The join is on the FULL image name — repository row plus image, exactly as a Dockerfile
+    // spells it — which is what the two new sources have in common and what cd's applicationName
+    // does not carry.
+    repository();
+    String config = config();
+    tag("workspace-base", "2026.902.143920", image("workspace-base", config, 901), daysAgo(120));
+    tag("workspace-base", "2026.903.113443", image("workspace-base", config, 902), daysAgo(100));
+    tag("workspace-base", "2026.904.94820", image("workspace-base", config, 903), daysAgo(80));
+
+    GcStrategy.Plan plan =
+        strategy.plan(census.take(), referencingImage("qits/workspace-base:2026.902.143920"));
+
+    assertEquals(
+        GcPins.BY_MANIFEST, ruleFor(plan.kept(), "workspace-base:2026.902.143920"));
+    assertEquals(
+        OciImagesGcAdapter.KEPT_NEWEST, ruleFor(plan.kept(), "workspace-base:2026.904.94820"));
+    assertEquals(List.of(), plan.dead());
+
+    // The same store with nothing referencing it: the older base image is an ordinary cold release
+    // the belt of two no longer covers, and it goes.
+    assertEquals(
+        List.of("workspace-base:2026.902.143920"),
+        identities(strategy.plan(census.take(), GcPins.none()).dead()),
+        "so the keep above is the pin and not the fixture");
+  }
+
+  @Test
+  void aConfiguredImageIsKeptAlthoughNoDeploymentAndNoManifestNamesIt() throws Exception {
+    // qits-configuration's half. The workspace image is launched on demand from a configuration
+    // entry, so there is no deployment row to pin it and no Dockerfile that references it — and the
+    // image a user's next click pulls can easily be one nobody has started for a week. It is kept
+    // under its own sentence, so a reviewer reading the report knows which service saved it.
+    repository();
+    String config = config();
+    tag("workspace", "2026.904.160522", image("workspace", config, 911), daysAgo(60));
+    tag("workspace", "2026.904.170000", image("workspace", config, 912), daysAgo(50));
+    tag("workspace", "2026.905.100000", image("workspace", config, 913), daysAgo(40));
+
+    GcStrategy.Plan plan =
+        strategy.plan(census.take(), configuring("qits/workspace:2026.904.160522"));
+
+    assertEquals(
+        GcPins.BY_CONFIGURATION, ruleFor(plan.kept(), "workspace:2026.904.160522"));
+    assertEquals(List.of(), plan.dead());
+    assertEquals(
+        List.of("workspace:2026.904.160522"),
+        identities(strategy.plan(census.take(), GcPins.none()).dead()),
+        "the third-newest release of a cold image, with nothing configured to launch it");
+  }
+
+  @Test
+  void aTagNamedLatestIsAlwaysKeptHoweverColdAndHoweverManyReleasesSitAboveIt() throws Exception {
+    // The structural belt of 2026-09-04. A step image is named `qits/build-images/*:latest` in every
+    // CI recipe, so it is pulled constantly — and the host-side keep-prefix suppresses exactly those
+    // pulls, so accessed_at under-reports it precisely where it is most used. It is not a calver, so
+    // neither retention nor the newest-release belt covers it. Deleting it 404s a fresh host's first
+    // pull of a step image, which takes out every pipeline on that machine.
+    //
+    // Written with a year-cold row and two newer releases beside it, because those are the two rules
+    // that would otherwise have to be the ones answering.
+    repository();
+    String config = config();
+    String moving = image("build-images/maven-base", config, 921);
+    tag("build-images/maven-base", "latest", moving, daysAgo(400));
+    tag("build-images/maven-base", "2026.903.113443", image("build-images/maven-base", config, 922), daysAgo(300));
+    tag("build-images/maven-base", "2026.904.94820", image("build-images/maven-base", config, 923), daysAgo(200));
+
+    GcStrategy.Plan plan = strategy.plan(census.take(), GcPins.none());
+
+    assertEquals(
+        OciImagesGcAdapter.KEPT_LATEST,
+        ruleFor(plan.kept(), "build-images/maven-base:latest"),
+        "and under its OWN sentence, so a reviewer is not told a pointer is a release");
+    assertEquals(List.of(), plan.dead());
+    assertTrue(plan.blobsRetained().contains(moving));
+  }
+
+  @Test
   void anImageNoDeploymentEverNamedKeepsItsNewestReleaseAndDropsTheColdOnes() throws Exception {
     // qits-spa-home's shape, measured: an image with tags and not a single deployment row, every tag
     // older than the window. Without the belt the whole image would be eligible and the next deploy
@@ -334,7 +425,7 @@ class OciImagesGcAdapterTest extends GcFixture {
   @Test
   void aShaTagSomethingStillPullsSurvivesTheWindowThatCondemnedItsNeighbour() throws Exception {
     // The loosening the settlement bought, and the case the structural rule could not have had: two
-    // superseded build tags, one of them pulled last week. The old rule condemned both the moment a
+    // superseded build tags, one of them pulled yesterday. The old rule condemned both the moment a
     // newer build existed; this one keeps whatever is in use and names the rule that saved it.
     //
     // Since the belt reads the release rather than the newest build, ACCESS is now the only thing
@@ -344,7 +435,7 @@ class OciImagesGcAdapterTest extends GcFixture {
     repository();
     String config = config();
     String pulled = image("qits-events", config, 411);
-    tag("qits-events", SHA_A, pulled, daysAgo(300), daysAgo(7));
+    tag("qits-events", SHA_A, pulled, daysAgo(300), daysAgo(1));
     tag("qits-events", SHA_B, image("qits-events", config, 412), daysAgo(300));
     tag("qits-events", SHA_C, image("qits-events", config, 413), daysAgo(100));
 
@@ -493,6 +584,23 @@ class OciImagesGcAdapterTest extends GcFixture {
   /** The aggregate a run would have read, with one image's shas pinned. */
   private static GcPins pinning(String image, String... shas) {
     return new GcPins(Map.of(image, Set.of(shas)), "", Set.of(), Set.of(), List.of());
+  }
+
+  /**
+   * The aggregate a run would have read, with these FULL image coordinates named by a Dockerfile on
+   * some repository's main.
+   */
+  private static GcPins referencingImage(String... coordinates) {
+    return new GcPins(
+        Map.of(), "", Set.of(), Set.of(), Set.of(), Set.of(), Set.of(coordinates), Set.of(),
+        List.of());
+  }
+
+  /** The same, for coordinates qits-configuration is configured to launch. */
+  private static GcPins configuring(String... coordinates) {
+    return new GcPins(
+        Map.of(), "", Set.of(), Set.of(), Set.of(), Set.of(), Set.of(), Set.of(coordinates),
+        List.of());
   }
 
   private void repository() {

@@ -30,7 +30,7 @@ import org.junit.jupiter.api.Test;
 class DocsGcAdapterTest extends GcFixture {
 
   /** The configured window for this type, and the number every case below is aged against. */
-  private static final Duration WINDOW = Duration.ofDays(90);
+  private static final Duration WINDOW = Duration.ofDays(3);
 
   private static final String DOCS_REPO = "docs";
   private static final String SITE = "@userflows/qits-githost";
@@ -63,7 +63,7 @@ class DocsGcAdapterTest extends GcFixture {
     docsSite(DOCS_REPO, SITE, "2026.701.20", daysAgo(300), null, Map.of(), blob(23));
     docsSite(DOCS_REPO, SITE, "2026.801.30", daysAgo(200), null, Map.of(), blob(24));
     docsSite(DOCS_REPO, SITE, "a".repeat(40), daysAgo(100), null, Map.of(), doomedSha);
-    docsSite(DOCS_REPO, SITE, "b".repeat(40), daysAgo(10), null, Map.of(), blob(25));
+    docsSite(DOCS_REPO, SITE, "b".repeat(40), daysAgo(1), null, Map.of(), blob(25));
 
     GcStrategy.Plan plan = strategy.plan(census.take(), GcPins.none());
 

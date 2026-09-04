@@ -56,10 +56,12 @@ class GcTypeConfigTest extends GcFixture {
 
   @Test
   void everyRepositoryTypeIsConfiguredAndTheShippedValuesAreTheSettlements() {
-    // The settlement's own numbers: P30D for oci-images and npm-packages, P90D for maven-packages,
-    // daemon-binaries, docs and sboms; the two CI types excluded and honest about it. Looping over the
-    // REGISTERED types rather than listing cases is what makes a newly contributed profile fail here
-    // — a type with no policy is a decision nobody took, not a default.
+    // The settlement's own numbers, as revised on 2026-09-04: P3D for all six own types, and the two
+    // CI types excluded and honest about it. The old P30D/P90D split priced two different guesses at
+    // how long consumption takes; consumption is named outright now — four pin sources and the
+    // structural belts — so the window is what bounds the store rather than what carries the safety.
+    // Looping over the REGISTERED types rather than listing cases is what makes a newly contributed
+    // profile fail here — a type with no policy is a decision nobody took, not a default.
     Map<String, GcPolicy> strategies = new TreeMap<>();
     Map<String, Optional<Duration>> windows = new TreeMap<>();
     for (String type : repositoryTypes.keys()) {
@@ -80,12 +82,12 @@ class GcTypeConfigTest extends GcFixture {
         strategies.size(),
         "the cache types are not merely unconfigured here — they are unregistered");
 
-    assertEquals(Duration.ofDays(30), config.requireWindow(OciImagesProfile.KEY));
-    assertEquals(Duration.ofDays(30), config.requireWindow(NpmPackagesProfile.KEY));
-    assertEquals(Duration.ofDays(90), config.requireWindow(MavenPackagesProfile.KEY));
-    assertEquals(Duration.ofDays(90), config.requireWindow(DaemonBinariesProfile.KEY));
-    assertEquals(Duration.ofDays(90), config.requireWindow(DocsProfile.KEY));
-    assertEquals(Duration.ofDays(90), config.requireWindow(SbomProfile.KEY));
+    assertEquals(Duration.ofDays(3), config.requireWindow(OciImagesProfile.KEY));
+    assertEquals(Duration.ofDays(3), config.requireWindow(NpmPackagesProfile.KEY));
+    assertEquals(Duration.ofDays(3), config.requireWindow(MavenPackagesProfile.KEY));
+    assertEquals(Duration.ofDays(3), config.requireWindow(DaemonBinariesProfile.KEY));
+    assertEquals(Duration.ofDays(3), config.requireWindow(DocsProfile.KEY));
+    assertEquals(Duration.ofDays(3), config.requireWindow(SbomProfile.KEY));
     assertEquals(Optional.empty(), windows.get(CiScreenshotsProfile.KEY));
     assertEquals(Optional.empty(), windows.get(CiVideosProfile.KEY));
   }
@@ -93,8 +95,8 @@ class GcTypeConfigTest extends GcFixture {
   @Test
   void thePlanEchoesEveryTypesStrategyWindowAndEffectiveRule() {
     // The echo is what a reviewer reads the mapping off, so it carries the sentence rather than the
-    // enum: "own, P90D" is not reviewable, "keep the last 2 released versions … delete the rest once
-    // unaccessed for longer than P90D" is.
+    // enum: "own, P3D" is not reviewable, "keep the last 2 released versions … delete the rest once
+    // unaccessed for longer than P3D" is.
     GcPlanReport report = planner.plan();
 
     assertEquals(
@@ -113,9 +115,9 @@ class GcTypeConfigTest extends GcFixture {
 
     GcTypeConfiguration maven = line(report, MavenPackagesProfile.KEY);
     assertEquals("own", maven.strategy());
-    assertEquals("P90D", maven.window());
+    assertEquals("P3D", maven.window());
     assertTrue(maven.rule().contains("last 2 released versions"));
-    assertTrue(maven.rule().contains("P90D"));
+    assertTrue(maven.rule().contains("P3D"));
 
     GcTypeConfiguration videos = line(report, CiVideosProfile.KEY);
     assertEquals("excluded", videos.strategy());
@@ -183,7 +185,7 @@ class GcTypeConfigTest extends GcFixture {
     assertEquals(
         List.of("alpha:" + COLD_SHA),
         dead.get(RepositoryTypeProfile.wireNameOf(OciImagesProfile.KEY)),
-        "a build sha no pin holds and no deploy would pull, cold past P30D");
+        "a build sha no pin holds and no deploy would pull, cold past P3D");
     assertEquals(
         List.of("alpha:" + WARM_SHA, "alpha:v1", "alpha:v2"),
         kept.get(RepositoryTypeProfile.wireNameOf(OciImagesProfile.KEY)),
@@ -242,10 +244,10 @@ class GcTypeConfigTest extends GcFixture {
 
   @Test
   void everyPinReadingTypeRefusesToPlanWhileThePinSourcesCannotAnswer() throws Exception {
-    // The other side of the same wiring, on the report a deployment actually gets when qits-platform-deployments or
-    // qits-ci is down: every type on an engine reads pins, so every one of them is refused rather
-    // than planned against "nothing is pinned". This suite's pin urls are closed ports, which is
-    // that state exactly.
+    // The other side of the same wiring, on the report a deployment actually gets when one of the
+    // four pin peers is down: every type on an engine reads pins, so every one of them is refused
+    // rather than planned against "nothing is pinned". This suite's four pin urls are closed ports,
+    // which is that state exactly.
     seed();
 
     GcPlanReport report = planner.plan();

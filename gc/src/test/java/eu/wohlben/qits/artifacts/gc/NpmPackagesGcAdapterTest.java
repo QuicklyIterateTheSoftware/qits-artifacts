@@ -31,15 +31,21 @@ import org.junit.jupiter.api.Test;
  * order correctly for the wrong reason.
  *
  * <p>What changed with the settlement is what condemns a version: not "a newer main build exists"
- * but "nothing has installed it inside P30D". So every case says how old its rows are, and the
+ * but "nothing has installed it inside the window". So every case says how old its rows are, and the
  * releases that used to be kept forever are now kept as the last two — with the third surviving on
  * <em>use</em>, which is the case the structural rule could not have had.
+ *
+ * <p>The window is P3D since 2026-09-04, so the cases that mean "warm" are dated <b>yesterday</b>
+ * rather than last week. What replaced the long window is not a shorter one: it is {@code
+ * npmDependencies}, the versions repositories' package.json files still resolve to, which is a
+ * separate case below and the reason a lockfile-pinned version no longer needs an install inside the
+ * window to survive.
  */
 @QuarkusTest
 class NpmPackagesGcAdapterTest extends GcFixture {
 
   /** The configured window for this type, and the number every case below is aged against. */
-  private static final Duration WINDOW = Duration.ofDays(30);
+  private static final Duration WINDOW = Duration.ofDays(3);
 
   private static final String UI = "@qits/ui-components";
 
@@ -76,7 +82,7 @@ class NpmPackagesGcAdapterTest extends GcFixture {
     // about what policy protects. The report says "accessed", not "release", because naming the rule
     // that actually saved a version is the point of the report.
     hosted();
-    version(UI, "0.0.1", 21, daysAgo(7));
+    version(UI, "0.0.1", 21, daysAgo(1));
     version(UI, "2026.801.63140", 22, daysAgo(360));
     version(UI, "2026.801.85149", 23, daysAgo(340));
 
@@ -91,12 +97,12 @@ class NpmPackagesGcAdapterTest extends GcFixture {
     // Prereleases earn no belt — own-ness protects releases, and a main build is not one. What used
     // to condemn them structurally the moment a newer build existed now condemns only the ones
     // nothing has installed, which is a loosening: the third build here is superseded twice over and
-    // stays, because something pulled it last week.
+    // stays, because something pulled it yesterday.
     hosted();
     version(UI, "2026.801.85149", 31, daysAgo(200));
     String coldest = version(UI, "2026.801.63140-main.gab854a1", 32, daysAgo(400));
     String cold = version(UI, "2026.801.85149-main.g21655ba", 33, daysAgo(300));
-    version(UI, "2026.801.85149-main.g0fe7780", 34, daysAgo(400), daysAgo(7));
+    version(UI, "2026.801.85149-main.g0fe7780", 34, daysAgo(400), daysAgo(1));
     String newest = version(UI, "2026.801.85149-main.gd43d710", 35, Instant.now());
 
     LiveBlobCensus.Census taken = census.take();
@@ -119,6 +125,34 @@ class NpmPackagesGcAdapterTest extends GcFixture {
     assertEquals(
         Stream.of(coldest, cold).sorted().toList(),
         planner.plan(taken, List.of(strategy), GcPins.none()).sweep().blobIds());
+  }
+
+  @Test
+  void aVersionSomeRepositorysLockfileStillResolvesOutlivesTheWindow() throws Exception {
+    // The keep that makes P3D defensible for a published package. A repository's package.json on
+    // main resolves 0.0.4 and nothing has installed it in a year — no belt slot with two calver
+    // releases above it, and no access. Before the dependency pin the only thing that could save it
+    // was an install inside the window, which says more about how often that consumer builds than
+    // about whether the version is needed.
+    //
+    // The pin joins on the identity UNCHANGED: "name@version" is what a lockfile resolves to and
+    // what this adapter spells its identities with, so both sides of the case are the same string.
+    hosted();
+    version(UI, "0.0.1", 111, daysAgo(400));
+    version(UI, "0.0.4", 112, daysAgo(400));
+    version(UI, "2026.801.63140", 113, daysAgo(360));
+    version(UI, "2026.801.85149", 114, daysAgo(340));
+
+    GcStrategy.Plan referenced = strategy.plan(census.take(), referencing(UI + "@0.0.4"));
+
+    assertEquals(List.of(UI + "@0.0.1"), identities(referenced.dead()));
+    assertEquals(GcPins.BY_MANIFEST, ruleFor(referenced.kept(), UI + "@0.0.4"));
+
+    // And the other half, so the keep is a fact about the pin and not about this fixture.
+    GcStrategy.Plan unreferenced = strategy.plan(census.take(), GcPins.none());
+    assertEquals(
+        Stream.of(UI + "@0.0.1", UI + "@0.0.4").sorted().toList(),
+        identities(unreferenced.dead()).stream().sorted().toList());
   }
 
   @Test
@@ -173,7 +207,7 @@ class NpmPackagesGcAdapterTest extends GcFixture {
     hosted();
     version(UI, "1.0.0", 61, daysAgo(400));
     version(UI, "1.1.0", 62, daysAgo(390));
-    version(UI, "nightly", 63, daysAgo(7));
+    version(UI, "nightly", 63, daysAgo(1));
     String coldNightly = version(UI, "rolling", 64, daysAgo(400));
 
     GcStrategy.Plan plan = strategy.plan(census.take(), GcPins.none());
@@ -260,6 +294,20 @@ class NpmPackagesGcAdapterTest extends GcFixture {
 
   private void hosted() {
     repositoryService.ensure("npm", NpmPackagesProfile.KEY);
+  }
+
+  /** The aggregate a run would have read, with these npm coordinates named by a manifest on main. */
+  private static GcPins referencing(String... coordinates) {
+    return new GcPins(
+        java.util.Map.of(),
+        "",
+        Set.of(),
+        Set.of(),
+        Set.of(),
+        Set.of(coordinates),
+        Set.of(),
+        Set.of(),
+        List.of());
   }
 
   private String version(String packageName, String version, int size, Instant createdAt)

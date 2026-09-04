@@ -6,12 +6,17 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 
 /**
- * An in-process stand-in for qits-platform-deployments or qits-ci, one path and one canned answer.
+ * An in-process stand-in for any of the four pin peers, one path and one canned answer.
  *
- * <p>There is no network in this repository's suite and no qits-platform-deployments or qits-ci to dial, so the two
- * HTTP adapters would otherwise only ever be tested on their failure path. What they have to get
+ * <p>There is no network in this repository's suite and no qits-platform-deployments, qits-ci,
+ * qits-platform-maintenance or qits-configuration to dial, so the four HTTP adapters would otherwise
+ * only ever be tested on their failure path. What they have to get
  * right is the <b>shape</b> — which key holds the array, which field is blank, what a non-200 means
  * — and that can only be proved against something that answers.
+ *
+ * <p>Three of the four answer at {@code /pins} and the daemon at {@code /daemon}, so a case that
+ * needs two peers at once takes two instances rather than one server with two contexts: each peer
+ * gets its own base url, which is what the adapters are configured with anyway.
  *
  * <p>Driven over real HTTP rather than by calling the parser directly, for the reason the npm proxy
  * suite records: an adapter tested past its transport passes just as well when the transport is

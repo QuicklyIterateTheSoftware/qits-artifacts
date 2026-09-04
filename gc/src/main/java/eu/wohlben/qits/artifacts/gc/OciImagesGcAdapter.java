@@ -34,14 +34,18 @@ import java.util.regex.Pattern;
  * is the version's own order ({@link #BY_CALVER}) rather than a row timestamp, because a release
  * pulled last week is not thereby a newer release than one cut yesterday.
  *
- * <h2>The one belt this type derives itself: the newest RELEASE tag per image</h2>
+ * <h2>The two belts this type derives itself: the newest RELEASE tag, and {@code latest}</h2>
  *
- * <p>{@link #pinnedBy} keeps every coordinate qits-platform-deployments names <b>and</b> each
- * image's newest calver tag. The second is a pin in all but name — the pull the <em>next</em> deploy
+ * <p>{@link #pinnedBy} keeps every coordinate the three pin sources name <b>and</b> each image's
+ * newest calver tag. The second is a pin in all but name — the pull the <em>next</em> deploy
  * will make — and it is here rather than in cd because cd cannot answer for a deployment that has
  * not happened: {@code qits-spa-home} has tags and not a single deployment row, and without this
  * line the next deploy could pull a tag this run deleted. That is the measured {@code
  * IMAGE_MISSING} hazard, and it is one line.
+ *
+ * <p>The other is {@link #KEPT_LATEST}: a tag literally named {@code latest} is always kept. It is a
+ * pointer rather than a coordinate, no release rule can see it, and the pulls that would keep it warm
+ * are the ones a host's keep-prefix suppresses. Its own constant carries the argument.
  *
  * <p><b>It reads the CALVER tag and not the sha tag, and that flip is the whole of 2026-09-04.</b>
  * This belt used to name each image's most recently written <em>build sha</em>, because that is what
@@ -138,6 +142,27 @@ public class OciImagesGcAdapter implements GcTypeAdapter {
   static final String KEPT_NEWEST =
       "this image's newest release — the next deployment's pull target";
 
+  /**
+   * The second structural belt, and the one the access window cannot stand in for.
+   *
+   * <p>CI step recipes name their images by the moving pointer — {@code qits/build-images/*:latest}
+   * — so the tag is pulled constantly and is nevertheless the coordinate most likely to be condemned
+   * here. Three facts stack up against it and no existing rule catches any of them: {@code latest} is
+   * not a calver, so neither the release retention nor {@link #KEPT_NEWEST} covers it; the host-side
+   * keep-prefix suppresses exactly the pulls that would keep it access-warm, so {@code accessed_at}
+   * under-reports it precisely where it is most used; and deleting it 404s a fresh host's first pull
+   * of a step image, which fails every pipeline on that machine rather than one build.
+   *
+   * <p>It costs approximately nothing: {@code latest} points at the newest push's manifest, so its
+   * closure is blobs that push already holds.
+   */
+  static final String KEPT_LATEST =
+      "the moving 'latest' pointer — CI step recipes pull it by name, and a fresh host's pull 404s"
+          + " without it";
+
+  /** The one tag name that is a pointer rather than a coordinate. */
+  static final String LATEST = "latest";
+
   @Inject ArtifactRepositoryRepository repositories;
   @Inject OciTagRepository tags;
   @Inject OciManifestRepository manifests;
@@ -164,8 +189,21 @@ public class OciImagesGcAdapter implements GcTypeAdapter {
   }
 
   /**
-   * The two coordinate pins: every coordinate qits-platform-deployments holds, and each image's
-   * newest release tag.
+   * Three coordinate pins and two structural belts: every coordinate qits-platform-deployments
+   * holds, every image a repository's Dockerfile references, every image qits-configuration would
+   * launch, the moving {@code latest} pointer, and each image's newest release tag.
+   *
+   * <p><b>The two pin sources differ by tense and both are needed.</b> The deployer names containers
+   * that exist; qits-platform-maintenance names what source still builds {@code FROM}; and
+   * qits-configuration names what a service would launch the next time somebody asks it to — a
+   * workspace image, an editor, a project agent. None of those three can answer for the other two,
+   * and only the first is implied by anything a deployment row carries.
+   *
+   * <p><b>They join on the FULL image name and the deployer does not.</b> A Dockerfile and a
+   * configuration entry both spell {@code qits/workspace-base}, while an {@code oci_tag} row carries
+   * the repository and the image in two columns; cd's {@code applicationName} is the image half
+   * alone, because it deploys within one repository. So the two new lookups compose the name and the
+   * old one does not, and conflating them would silently pin nothing.
    *
    * <p>The newest release is read straight off the enumeration in hand — no second query and no
    * timestamp. {@link #BY_CALVER} orders releases by the version itself, so nothing a pull or a
@@ -186,6 +224,18 @@ public class OciImagesGcAdapter implements GcTypeAdapter {
       String byCd = pins.pinsImageTag(image, tag);
       if (byCd != null) {
         return byCd;
+      }
+      String fullImage = group(candidate.repository(), image);
+      String byManifest = pins.pinsManifestImage(fullImage, tag);
+      if (byManifest != null) {
+        return byManifest;
+      }
+      String byConfiguration = pins.pinsConfiguredImage(fullImage, tag);
+      if (byConfiguration != null) {
+        return byConfiguration;
+      }
+      if (LATEST.equals(tag)) {
+        return KEPT_LATEST;
       }
       return tag.equals(newestRelease.get(candidate.group())) ? KEPT_NEWEST : null;
     };

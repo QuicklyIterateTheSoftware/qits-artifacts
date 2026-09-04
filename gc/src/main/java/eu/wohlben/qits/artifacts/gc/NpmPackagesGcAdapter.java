@@ -107,11 +107,17 @@ public class NpmPackagesGcAdapter implements GcTypeAdapter {
   }
 
   /**
-   * Anything a dist-tag currently names, under the tag's own name.
+   * Anything a lockfile on main still resolves to, and anything a dist-tag currently names.
    *
-   * <p>Read once per run over the packages the enumeration touched, rather than per candidate: a
-   * plan judged against two readings of {@code npm_dist_tag} could condemn a version the second
-   * reading had just tagged.
+   * <p>The dist-tags are read once per run over the packages the enumeration touched, rather than
+   * per candidate: a plan judged against two readings of {@code npm_dist_tag} could condemn a
+   * version the second reading had just tagged.
+   *
+   * <p><b>The dependency pin needs no translation</b>, which is what makes it safe: {@code
+   * name@version} is what a package.json resolves to and it is this adapter's identity verbatim, so
+   * the lookup is an equality test on the string the enumeration already built. It is asked first
+   * because a consumer still building against a version is a stronger thing to report than the
+   * pointer that happens to name it as well.
    */
   @Override
   public GcPinned pinnedBy(List<GcCandidate> candidates, GcPins pins) {
@@ -127,6 +133,10 @@ public class NpmPackagesGcAdapter implements GcTypeAdapter {
       }
     }
     return candidate -> {
+      String byManifest = pins.pinsNpmCoordinate(candidate.identity());
+      if (byManifest != null) {
+        return byManifest;
+      }
       String tag = tagged.get(candidate.group() + "@" + versionOf(candidate.identity()));
       return tag == null ? null : keptByDistTag(tag);
     };

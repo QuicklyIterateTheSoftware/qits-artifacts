@@ -38,7 +38,7 @@ import org.junit.jupiter.api.Test;
 class MavenPackagesGcAdapterTest extends GcFixture {
 
   /** The configured window for this type, and the number every case below is aged against. */
-  private static final Duration WINDOW = Duration.ofDays(90);
+  private static final Duration WINDOW = Duration.ofDays(3);
 
   private static final String GROUP_ID = "eu.wohlben.qits";
   private static final String ARTIFACT_ID = "qits-eventstream";
@@ -93,10 +93,12 @@ class MavenPackagesGcAdapterTest extends GcFixture {
     // The settlement's other half, and for a library it is the common case: a version three deep in
     // the belt that something still builds against. One warm file keeps the coordinate — a pom read
     // is a resolve of the version, and letting a cold jar drag its own pom out would be the same
-    // half-version failure from the other direction.
+    // half-version failure from the other direction. The resolve is dated yesterday rather than last
+    // week because the window came down to P3D; a version whose consumer has simply not built inside
+    // three days is covered by the maintenance dependency pin, which has a case of its own below.
     maven();
     release("1.0.0", "jar", 31, daysAgo(400));
-    release("1.0.0", "pom", 32, daysAgo(400), daysAgo(7));
+    release("1.0.0", "pom", 32, daysAgo(400), daysAgo(1));
     release("1.1.0", "jar", 33, daysAgo(380));
     release("2.0.0", "jar", 34, daysAgo(360));
 
@@ -105,6 +107,36 @@ class MavenPackagesGcAdapterTest extends GcFixture {
     assertEquals(List.of(), plan.dead());
     assertEquals(
         OwnArtifactsStrategy.keptAccessed(WINDOW), ruleFor(plan.kept(), COORDINATE + "1.0.0"));
+  }
+
+  @Test
+  void aVersionSomeRepositorysPomStillReferencesOutlivesTheWindowThatCondemnedItsNeighbour()
+      throws Exception {
+    // The keep that makes P3D defensible for a library. A consumer's pom names 1.0.0 on main and
+    // nothing has built it for a year — no install, no resolve, and no belt slot, with two newer
+    // releases holding both of them. Before the dependency pin the only thing that could save it was a resolve inside
+    // the window, which is a fact about CI scheduling rather than about whether anything needs it.
+    //
+    // The pin joins on the identity UNCHANGED: "g:a:v" is what a pom writes and what this adapter
+    // folds its rows into, so the case is written with the same string on both sides deliberately.
+    // Three releases, so the belt of two leaves exactly one eligible and the pin is the only thing
+    // that can be answering.
+    maven();
+    release("1.0.0", "jar", 101, daysAgo(400));
+    release("1.0.0", "pom", 102, daysAgo(400));
+    release("1.1.0", "jar", 103, daysAgo(390));
+    release("2.0.0", "jar", 104, daysAgo(380));
+
+    GcStrategy.Plan referenced =
+        strategy.plan(census.take(), referencing(COORDINATE + "1.0.0"));
+
+    assertEquals(List.of(), referenced.dead(), "a referenced version is never a candidate");
+    assertEquals(GcPins.BY_MANIFEST, ruleFor(referenced.kept(), COORDINATE + "1.0.0"));
+
+    // And the other half, so the keep is a fact about the pin rather than about this fixture: with
+    // nothing referencing it, the same coordinate dies as one thing, jar and pom together.
+    GcStrategy.Plan unreferenced = strategy.plan(census.take(), GcPins.none());
+    assertEquals(List.of(COORDINATE + "1.0.0"), identities(unreferenced.dead()));
   }
 
   @Test
@@ -268,6 +300,20 @@ class MavenPackagesGcAdapterTest extends GcFixture {
 
   private void maven() {
     repositoryService.ensure(MAVEN_REPO, MavenPackagesProfile.KEY);
+  }
+
+  /** The aggregate a run would have read, with these maven coordinates named by a pom on main. */
+  private static GcPins referencing(String... coordinates) {
+    return new GcPins(
+        java.util.Map.of(),
+        "",
+        Set.of(),
+        Set.of(),
+        Set.of(coordinates),
+        Set.of(),
+        Set.of(),
+        Set.of(),
+        List.of());
   }
 
   private static String releasePath(String version, String extension) {

@@ -32,7 +32,7 @@ import org.junit.jupiter.api.Test;
 class DaemonBinariesGcAdapterTest extends GcFixture {
 
   /** The configured window for this type, and the number every case below is aged against. */
-  private static final Duration WINDOW = Duration.ofDays(90);
+  private static final Duration WINDOW = Duration.ofDays(3);
 
   private static final String CI = "qits-ci-daemon";
 
@@ -42,7 +42,7 @@ class DaemonBinariesGcAdapterTest extends GcFixture {
   void theLastTwoVersionsOfADaemonStayAndTheOlderOnesAgeOut() throws Exception {
     // Every row of this type is a release — publishes come from the release pipeline and versions
     // are immutable — so the settlement's belt is the whole structural rule here: last 2 per daemon,
-    // whatever their age, and the rest only once nothing has launched them for P90D.
+    // whatever their age, and the rest only once nothing has launched them for P3D.
     repository();
     String oldest = blob(11);
     daemonRow(CI, "2026.601.10", oldest, daysAgo(400), null);
@@ -138,10 +138,11 @@ class DaemonBinariesGcAdapterTest extends GcFixture {
   void aVersionSomethingStillDownloadsSurvivesTheWindowThatCondemnedItsNeighbour()
       throws Exception {
     // The access half of the rule, on the one read this type can see: the version-addressed GET.
-    // Two versions equally far down the belt, one of them fetched last month — that one stays, and
-    // the report says so under the window's own sentence rather than under the belt's.
+    // Two versions equally far down the belt, one of them fetched yesterday — that one stays, and
+    // the report says so under the window's own sentence rather than under the belt's. Yesterday
+    // rather than last month since the window came down to P3D: a fetch a month old is cold now.
     repository();
-    daemonRow(CI, "2026.501.1", blob(61), daysAgo(500), daysAgo(30));
+    daemonRow(CI, "2026.501.1", blob(61), daysAgo(500), daysAgo(1));
     daemonRow(CI, "2026.502.2", blob(62), daysAgo(500), null);
     daemonRow(CI, "2026.801.30", blob(63), daysAgo(200), null);
     daemonRow(CI, "2026.802.40", blob(64), daysAgo(100), null);

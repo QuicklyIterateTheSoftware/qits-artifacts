@@ -135,6 +135,10 @@ class AdminWriteGuardTest {
     // qits:admin, so a qits:admin-only POST /gc/plan would 403 the one caller the route exists for
     // — while the sweep it feeds stayed open to that same token. This asserts the pair: the machine
     // reads the plan, and it reads it with a body of supplied pins, which is the whole call.
+    //
+    // FOUR members since 2026-09-04, and all four are needed for `executable`: a member left out is
+    // that source unanswered. Empty answers throughout, because what is on trial here is the role
+    // rather than the keep-set.
     given()
         .header("Authorization", bearer(MachineTokens.forThisService()))
         .contentType(ContentType.JSON)
@@ -142,7 +146,9 @@ class AdminWriteGuardTest {
             """
             {"pins":{"deployments":{"pins":[]},
                      "ciDaemon":{"daemonName":"qits-ci-daemon","daemonVersion":"",
-                                 "previousDaemonVersion":"","source":"none"}}}
+                                 "previousDaemonVersion":"","source":"none"},
+                     "dependencies":{"repositories":[],"pins":[]},
+                     "configuredImages":{"pins":[]}}}
             """)
         .when()
         .post("/artifacts/api/gc/plan")

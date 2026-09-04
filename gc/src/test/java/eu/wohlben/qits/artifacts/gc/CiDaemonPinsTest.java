@@ -116,10 +116,10 @@ class CiDaemonPinsTest {
   }
 
   @Test
-  void bothSourcesAreAskedSoOneOutageNeverHidesAnother() throws IOException {
-    // A run that stopped at the first failure would report one broken service and hide the second,
-    // and whoever fixed it would find the next run just as dead with nothing to say why.
-    GcPinSources sources = new GcPinSources();
+  void everySourceIsAskedSoOneOutageNeverHidesAnother() throws IOException {
+    // A run that stopped at the first failure would report one broken service and hide the other
+    // three, and whoever fixed it would find the next run just as dead with nothing to say why.
+    GcPinSources sources = sources("http://127.0.0.1:1/ci/api");
     sources.cd =
         () -> {
           throw new IllegalStateException("qits-platform-deployments unreachable at http://qits-platform-deployments:8080/platform-deployments/api/pins");
@@ -128,12 +128,24 @@ class CiDaemonPinsTest {
         () -> {
           throw new IllegalStateException("qits-ci unreachable at http://qits-ci:8080/ci/api/daemon");
         };
+    sources.maintenance =
+        () -> {
+          throw new IllegalStateException(
+              "qits-platform-maintenance unreachable at http://qits-platform-maintenance:8080");
+        };
+    sources.configuration =
+        () -> {
+          throw new IllegalStateException(
+              "qits-configuration unreachable at http://qits-configuration:8080");
+        };
 
     GcPins pins = sources.fetch();
 
-    assertEquals(2, pins.failures().size());
+    assertEquals(4, pins.failures().size());
     assertTrue(pins.whyIncomplete().contains("qits-platform-deployments"));
     assertTrue(pins.whyIncomplete().contains("qits-ci"));
+    assertTrue(pins.whyIncomplete().contains("qits-platform-maintenance"));
+    assertTrue(pins.whyIncomplete().contains("qits-configuration"));
   }
 
   @Test
@@ -174,7 +186,15 @@ class CiDaemonPinsTest {
     }
   }
 
-  /** The two sources as CDI would wire them, with cd pointed nowhere and ci at the stub. */
+  /**
+   * The four sources as CDI would wire them, with only ci at the stub and the other three answering
+   * with nothing.
+   *
+   * <p>All four are set because they are all injection points: a collector built by hand with two of
+   * them left null meets an NPE rather than the fold the case is about. Answering with nothing is
+   * the honest stand-in — this suite is about qits-ci, and a source that answers empty neither fails
+   * the aggregate nor contributes to it.
+   */
   private static GcPinSources sources(String ciBaseUrl) {
     GcPinSources sources = new GcPinSources();
     sources.cd = List::of;
@@ -183,6 +203,8 @@ class CiDaemonPinsTest {
     ci.timeout = Duration.ofSeconds(5);
     ci.objectMapper = new ObjectMapper();
     sources.ci = ci;
+    sources.maintenance = List::of;
+    sources.configuration = List::of;
     return sources;
   }
 }

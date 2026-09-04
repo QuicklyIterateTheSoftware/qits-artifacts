@@ -9,10 +9,19 @@ import java.util.regex.Pattern;
 /**
  * Every live pin one run holds, read once at its start and never cached.
  *
- * <p>Two services answer it: qits-platform-deployments names the image shas a restart or a rollback would pull,
- * qits-ci names the daemon versions its ladder would launch. Both are facts no timestamp in this
- * store implies — a container running untouched for months still pulls its sha the moment it
- * restarts — which is why pinned is a keep-class the engines check <b>before</b> the access rule.
+ * <p>Four services answer it, and they answer four different questions. qits-platform-deployments
+ * names the image shas a restart or a rollback would pull; qits-ci names the daemon versions its
+ * ladder would launch; qits-platform-maintenance names the internal maven, npm and docker versions
+ * repositories' manifests still <b>reference</b> on main; qits-configuration names the container
+ * images the platform is <b>configured</b> to launch. All four are facts no timestamp in this store
+ * implies — a container running untouched for months still pulls its sha the moment it restarts, and
+ * a library nothing has resolved this month is still what every build of its consumer needs — which
+ * is why pinned is a keep-class the engines check <b>before</b> the access rule.
+ *
+ * <p><b>The two consumption sources exist because age stopped carrying the safety.</b> The windows
+ * are short now (P3D), which is only defensible while what is in use is named explicitly rather than
+ * inferred from a pull that may not have happened inside three days. The deployment and ladder pins
+ * cover what is running; these two cover what is referenced and what would be launched.
  *
  * <p><b>One aggregate per run, taken at the start.</b> Not per type and not per strategy: two
  * fetches inside one run can disagree, and the disagreement is a deployment that landed between them
@@ -31,6 +40,13 @@ import java.util.regex.Pattern;
  *     dropped, because a blank is qits-ci saying "nothing is pinned" rather than naming a version
  * @param blobs digests pinned directly: a daemon version that is 64 hex characters names the blob it
  *     is fetched by as well as any row keyed with it
+ * @param mavenDependencies maven coordinates some repository's manifest references, spelled {@code
+ *     groupId:artifactId:version} — which is {@code MavenPackagesGcAdapter}'s identity verbatim
+ * @param npmDependencies npm coordinates some repository's manifest references, spelled {@code
+ *     name@version} — which is {@code NpmPackagesGcAdapter}'s identity verbatim
+ * @param manifestImages images some repository's Dockerfile references, spelled {@code image:tag}
+ *     with the <b>full</b> image name ({@code qits/workspace-base:2026.902.143920})
+ * @param configuredImages images qits-configuration is configured to launch, spelled the same way
  * @param failures one sentence per pin source that could not answer; empty is a complete aggregate
  * @param sources how this aggregate was read — one entry per source, with its url, its outcome, how
  *     long it took and the keep-identities it produced. Carried on the aggregate rather than
@@ -42,6 +58,10 @@ public record GcPins(
     String daemonName,
     Set<String> daemonVersions,
     Set<String> blobs,
+    Set<String> mavenDependencies,
+    Set<String> npmDependencies,
+    Set<String> manifestImages,
+    Set<String> configuredImages,
     List<String> failures,
     List<GcPinSource> sources) {
 
@@ -51,6 +71,13 @@ public record GcPins(
   /** The rule a daemon binary is kept under when qits-ci's ladder holds it. */
   public static final String BY_CI = "pinned by qits-ci daemon ladder";
 
+  /** The rule a version is kept under when some repository's manifest on main still names it. */
+  public static final String BY_MANIFEST =
+      "referenced by a repository manifest on main (qits-platform-maintenance dependency pins)";
+
+  /** The rule an image is kept under when the platform is configured to launch it. */
+  public static final String BY_CONFIGURATION = "a configured container image (qits-configuration)";
+
   /** A pin spelled as a digest — the historic {@code QITS_CI_DAEMON_VERSION} shape. */
   static final Pattern DIGEST = Pattern.compile("[0-9a-f]{64}");
 
@@ -58,12 +85,21 @@ public record GcPins(
     deployments = Map.copyOf(deployments);
     daemonVersions = Set.copyOf(daemonVersions);
     blobs = Set.copyOf(blobs);
+    mavenDependencies = Set.copyOf(mavenDependencies);
+    npmDependencies = Set.copyOf(npmDependencies);
+    manifestImages = Set.copyOf(manifestImages);
+    configuredImages = Set.copyOf(configuredImages);
     failures = List.copyOf(failures);
     sources = List.copyOf(sources);
   }
 
   /**
-   * The keep-set alone, with no provenance — what a case that hands pins in directly is stating.
+   * The four execution pins alone — the shape a case about deployments or the daemon ladder states,
+   * with the two consumption sets empty because it is not about them.
+   *
+   * <p>A defaulted overload rather than a new spelling at every call site: the members are on the
+   * record and a reader of the report sees all four sets, but a case that is about one of them
+   * should not have to write out three empty sets to say so.
    *
    * <p>{@link #sources()} is how a <b>run</b> read its pins, so a value constructed in a test has
    * none to report and must not invent one: an empty list reads as "this aggregate was not fetched",
@@ -76,6 +112,51 @@ public record GcPins(
       Set<String> blobs,
       List<String> failures) {
     this(deployments, daemonName, daemonVersions, blobs, failures, List.of());
+  }
+
+  /** The same, for a run that read its pins and has provenance to report. */
+  public GcPins(
+      Map<String, Set<String>> deployments,
+      String daemonName,
+      Set<String> daemonVersions,
+      Set<String> blobs,
+      List<String> failures,
+      List<GcPinSource> sources) {
+    this(
+        deployments,
+        daemonName,
+        daemonVersions,
+        blobs,
+        Set.of(),
+        Set.of(),
+        Set.of(),
+        Set.of(),
+        failures,
+        sources);
+  }
+
+  /** Every keep-set and no provenance — what a case that hands pins in directly is stating. */
+  public GcPins(
+      Map<String, Set<String>> deployments,
+      String daemonName,
+      Set<String> daemonVersions,
+      Set<String> blobs,
+      Set<String> mavenDependencies,
+      Set<String> npmDependencies,
+      Set<String> manifestImages,
+      Set<String> configuredImages,
+      List<String> failures) {
+    this(
+        deployments,
+        daemonName,
+        daemonVersions,
+        blobs,
+        mavenDependencies,
+        npmDependencies,
+        manifestImages,
+        configuredImages,
+        failures,
+        List.of());
   }
 
   /** Nothing pinned and nothing broken — the shape a test states explicitly. */
@@ -121,5 +202,43 @@ public record GcPins(
       }
     }
     return null;
+  }
+
+  /**
+   * {@link #BY_MANIFEST} when a repository's pom still references this maven coordinate, else null.
+   *
+   * <p>The argument is the adapter's identity unchanged — {@code groupId:artifactId:version} is both
+   * what a pom names and what {@code MavenPackagesGcAdapter} folds its rows into — so there is no
+   * translation here to get wrong.
+   */
+  public String pinsMavenCoordinate(String coordinate) {
+    return mavenDependencies.contains(coordinate) ? BY_MANIFEST : null;
+  }
+
+  /**
+   * {@link #BY_MANIFEST} when a repository's package.json still references this npm coordinate, else
+   * null. {@code name@version}, which is {@code NpmPackagesGcAdapter}'s identity verbatim.
+   */
+  public String pinsNpmCoordinate(String coordinate) {
+    return npmDependencies.contains(coordinate) ? BY_MANIFEST : null;
+  }
+
+  /**
+   * {@link #BY_MANIFEST} when a repository's Dockerfile still references this image's tag, else
+   * null.
+   *
+   * @param image the <b>full</b> image name, {@code <repository row>/<image>} — what a Dockerfile
+   *     writes and what an {@code oci_tag} row only carries in two halves
+   */
+  public String pinsManifestImage(String image, String tag) {
+    return manifestImages.contains(image + ":" + tag) ? BY_MANIFEST : null;
+  }
+
+  /**
+   * {@link #BY_CONFIGURATION} when the platform is configured to launch this image's tag, else null.
+   * The full image name, for the reason {@link #pinsManifestImage} spells out.
+   */
+  public String pinsConfiguredImage(String image, String tag) {
+    return configuredImages.contains(image + ":" + tag) ? BY_CONFIGURATION : null;
   }
 }

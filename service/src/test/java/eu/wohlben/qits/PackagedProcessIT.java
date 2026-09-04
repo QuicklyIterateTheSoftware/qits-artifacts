@@ -119,6 +119,8 @@ public class PackagedProcessIT {
       // the binary.
       overrides.put("qits.artifacts.gc.pins.cd-base-url", "http://localhost:1/platform-deployments/api");
       overrides.put("qits.artifacts.gc.pins.ci-base-url", "http://localhost:1/ci/api");
+      overrides.put("qits.artifacts.gc.pins.maintenance-base-url", "http://localhost:1/maintenance/api");
+      overrides.put("qits.artifacts.gc.pins.configuration-base-url", "http://localhost:1/configuration/api");
       // The mirror upstream override stays although nothing here mirrors. V14 took V7's three
       // prefilled upstream rows out, so this binary resolves no mirror namespace at all — but the
       // oci jar still carries the miss path, and a closed port is what keeps a row put back by
@@ -686,7 +688,7 @@ public class PackagedProcessIT {
     // Every one of the eight REGISTERED types is claimed. Eight, not ten: the three cache profiles
     // are vetoed out of bean discovery here, so a plan that reported on them would be reporting on
     // qits-platform-mirror's types. oci-images and daemon-binaries must name their
-    // strategy — and, with no qits-platform-deployments and no qits-ci to answer, must report the refusal rather than
+    // strategy — and, with none of the four pin peers answering, must report the refusal rather than
     // a plan. That
     // fail-closed path only exists in the binary if the JDK HttpClient survived the compile, so this
     // is the one assertion here that a JVM test cannot make on its behalf, and every type on an
@@ -697,7 +699,7 @@ public class PackagedProcessIT {
         .then()
         .statusCode(200)
         .body("dryRun", equalTo(true))
-        .body("graceWindow", equalTo("P7D"))
+        .body("graceWindow", equalTo("P2D"))
         .body("types", hasSize(8))
         .body("types.find { it.type == 'oci-images' }.strategy", equalTo("OciImageGcStrategy"))
         .body("types.find { it.type == 'oci-images' }.error", containsString("qits-platform-deployments"))
@@ -759,7 +761,7 @@ public class PackagedProcessIT {
         .then()
         .statusCode(200)
         .body("dryRun", equalTo(false))
-        .body("graceWindow", equalTo("P7D"))
+        .body("graceWindow", equalTo("P2D"))
         .body("types", hasSize(8))
         .body("aborted", containsString("qits-platform-deployments"))
         .body("types.find { it.type == 'oci-images' }.error", containsString("qits-platform-deployments"))
