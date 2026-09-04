@@ -23,9 +23,12 @@ import jakarta.inject.Singleton;
  * loosens the rule: a sha tag something is still pulling now survives, where the structural rule
  * condemned it.
  *
- * <p><b>What did not change is the belt that closes the IMAGE_MISSING hazard.</b> Every sha qits-platform-deployments
- * pins is kept, and so is each image's newest build tag — the pull the next deploy will make, which
- * cd cannot answer for because it has not happened yet. Both live in {@link
+ * <p><b>What did not change is the belt that closes the IMAGE_MISSING hazard — only which tag it
+ * names.</b> Every coordinate qits-platform-deployments pins is kept, and so is each image's newest
+ * <b>calver</b> tag: the pull the next deploy will make, which cd cannot answer for because it has
+ * not happened yet. It named the newest build sha until 2026-09-04, when deployments started being
+ * made by version coordinate and the sha stopped being anything's pull target; {@link
+ * OciImagesGcAdapter} carries the flip and the audit behind it. Both pins live in {@link
  * OciImagesGcAdapter#pinnedBy}, checked before the access rule, and an image with no deployment row
  * at all still keeps the tag a deploy would ask for.
  *

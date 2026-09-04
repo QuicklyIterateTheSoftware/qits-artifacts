@@ -28,20 +28,30 @@ import org.junit.jupiter.api.Test;
  * The own engine over docker's facts, case by case, against real manifests and the real census.
  *
  * <p><b>This suite is the port of {@code OciImageGcStrategyTest}, and the cases carry over one for
- * one</b> — calver, cd's pins, the newest-build belt, the untagged manifests, the grace window —
+ * one</b> — calver, cd's pins, the newest-release belt, the untagged manifests, the grace window —
  * with the one change the settlement made: what condemns a coordinate is no longer "a newer build
  * exists" but "nothing has pulled it inside the window". Every case therefore has to say how old its
  * rows are, and the ones that used to prove a structural kill now prove an <em>access-gated</em>
  * one. The direction of that change is a loosening: {@code aShaTagSomethingStillPulls…} is the case
  * that could not have existed before.
  *
- * <p>The pins are handed in as a value rather than fetched: what is under test is the keep-set, and
- * its whole input is "which shas does cd pin for this image". Which rows those shas came from is
- * cd's rule and is tested in cd's own repository.
+ * <p><b>The belt's cases moved from the sha to the calver on 2026-09-04</b>, with the deployments
+ * they describe: cd creates a deployment from {@code qits/<app>:<version>} now, so "the next
+ * deploy's pull target" is the newest release and a sha tag has no claim on that rule any more.
+ * Three cases carry the flip directly — {@code theBeltNamesTheNewestCALVER…}, {@code
+ * theBeltReadsTheVersionsOwnOrder…} and {@code anImageThatHasNeverBeenReleasedHasNoBeltAtAll} — and
+ * a fourth, {@code aReleasedVersionNothingHasDeployedYetSurvives…}, holds the audit that went with
+ * it: a released-but-undeployed version is covered by the access rule's fold of {@code updated_at},
+ * not by the pin and not by retention.
  *
- * <p>Tags are written as full 40-hex shas because that is what post-receive pushes and what a
- * deployment row carries; a case using {@code v1} would prove nothing about the classification these
- * facts turn on.
+ * <p>The pins are handed in as a value rather than fetched: what is under test is the keep-set, and
+ * its whole input is "which coordinates does cd pin for this image". Which rows those came from is
+ * cd's rule and is tested in cd's own repository. The port's field is still called {@code shas} and
+ * its strings are opaque, so cases pin whichever shape they are about.
+ *
+ * <p>Sha tags are written as full 40-hex strings because that is what per-push CI used to push and
+ * what an old deployment row carries; a case using {@code v1} would prove nothing about the
+ * classification these facts turn on. Version tags are written as real calvers for the same reason.
  */
 @QuarkusTest
 class OciImagesGcAdapterTest extends GcFixture {
@@ -73,15 +83,100 @@ class OciImagesGcAdapterTest extends GcFixture {
     assertEquals(List.of("qits-stt:2026.801.85448"), identities(plan.dead()));
     assertEquals(OwnArtifactsStrategy.deadUnaccessed(WINDOW), plan.dead().get(0).rule());
     assertEquals(
-        OwnArtifactsStrategy.KEPT_RELEASE, ruleFor(plan.kept(), "qits-stt:2026.1201.5"),
-        "1201 is a later month than 802, which a lexical comparison gets backwards");
+        OciImagesGcAdapter.KEPT_NEWEST, ruleFor(plan.kept(), "qits-stt:2026.1201.5"),
+        "1201 is a later month than 802, which a lexical comparison gets backwards — and the highest"
+            + " version is now the belt's tag, so it is kept as the next deploy's pull target rather"
+            + " than as one of the last two");
     assertEquals(OwnArtifactsStrategy.KEPT_RELEASE, ruleFor(plan.kept(), "qits-stt:2026.802.10"));
   }
 
   @Test
-  void aCalverReleaseIsKeptWhenNothingDeploysItAndItIsNotTheNewestBuild() throws Exception {
+  void theBeltNamesTheNewestCALVERAndNoLongerTheNewestSha() throws Exception {
+    // THE FLIP, stated as one case. Every row here is colder than the window, so nothing survives on
+    // access and only a keep-rule can save anything — and the two candidates for "the next deploy's
+    // pull target" are side by side: the newest build sha, which is what this belt used to name, and
+    // the newest calver, which is what a deployment is actually created from since 2026-09-04.
+    //
+    // The sha is deliberately the more recently WRITTEN row of the two, so a belt still reading
+    // updated_at would pick it and this assertion would fail on the old code for the right reason.
+    repository();
+    String config = config();
+    tag("qits-events", "2026.903.113443", image("qits-events", config, 801), daysAgo(120));
+    tag("qits-events", SHA_A, image("qits-events", config, 802), daysAgo(40));
+
+    GcStrategy.Plan plan = strategy.plan(census.take(), GcPins.none());
+
+    assertEquals(
+        OciImagesGcAdapter.KEPT_NEWEST, ruleFor(plan.kept(), "qits-events:2026.903.113443"));
+    assertEquals(
+        OwnArtifactsStrategy.deadUnaccessed(WINDOW),
+        ruleFor(plan.dead(), "qits-events:" + SHA_A),
+        "nothing deploys a sha coordinate any more, so the newest one is not a pull target and has"
+            + " no claim on the belt");
+  }
+
+  @Test
+  void theBeltReadsTheVersionsOwnOrderAndNotTheOrderTheRowsWereWritten() throws Exception {
+    // The belt's ordering is BY_CALVER rather than a timestamp, which matters exactly when a release
+    // is pushed out of order — a re-push of an older version, or a release run that lands after a
+    // newer one. The highest version is the pull target whenever its row happened to be written.
+    repository();
+    String config = config();
+    tag("qits-ci", "2026.1201.5", image("qits-ci", config, 811), daysAgo(300));
+    tag("qits-ci", "2026.802.10", image("qits-ci", config, 812), daysAgo(200));
+    tag("qits-ci", "2026.801.85448", image("qits-ci", config, 813), daysAgo(100));
+
+    GcStrategy.Plan plan = strategy.plan(census.take(), GcPins.none());
+
+    assertEquals(
+        OciImagesGcAdapter.KEPT_NEWEST,
+        ruleFor(plan.kept(), "qits-ci:2026.1201.5"),
+        "the oldest row and the highest version — the belt reads the name, not updated_at");
+    assertEquals(OwnArtifactsStrategy.KEPT_RELEASE, ruleFor(plan.kept(), "qits-ci:2026.802.10"));
+    assertEquals(
+        OwnArtifactsStrategy.deadUnaccessed(WINDOW), ruleFor(plan.dead(), "qits-ci:2026.801.85448"));
+  }
+
+  @Test
+  void aReleasedVersionNothingHasDeployedYetSurvivesOnItsPushAloneHoweverManyDisplaceIt()
+      throws Exception {
+    // THE AUDIT of 2026-09-04, as a case: cd pins only what is LIVE and retention keeps only the
+    // last two, so a third-newest version that was released and never deployed is named by neither
+    // rule. It survives anyway, on the one that was already there — a tag's effective access time
+    // folds updated_at in as a first access, so a version is kept for a full window from its push
+    // whether or not anything ever pulled it.
+    //
+    // Four releases, the newest three pushed today; the third-newest is the one under test. Nothing
+    // is deployed, so GcPins.none() is the honest aggregate.
+    repository();
+    String config = config();
+    tag("qits-configuration", "2026.901.10", image("qits-configuration", config, 821), daysAgo(90));
+    tag("qits-configuration", "2026.904.35208", image("qits-configuration", config, 822), daysAgo(0));
+    tag("qits-configuration", "2026.904.83611", image("qits-configuration", config, 823), daysAgo(0));
+    tag("qits-configuration", "2026.904.94820", image("qits-configuration", config, 824), daysAgo(0));
+
+    GcStrategy.Plan plan = strategy.plan(census.take(), GcPins.none());
+
+    assertEquals(
+        OwnArtifactsStrategy.keptAccessed(WINDOW),
+        ruleFor(plan.kept(), "qits-configuration:2026.904.35208"),
+        "third-newest, undeployed, pinned by nothing and outside the last two — and still kept,"
+            + " because a release is young for a whole window from the moment it was pushed");
+    assertEquals(
+        OciImagesGcAdapter.KEPT_NEWEST, ruleFor(plan.kept(), "qits-configuration:2026.904.94820"));
+    assertEquals(
+        List.of("qits-configuration:2026.901.10"),
+        identities(plan.dead()),
+        "the only one eligible is the release nobody deployed in 90 days and three have superseded");
+  }
+
+  @Test
+  void aCalverReleaseIsKeptWhenNothingDeploysItAndEveryShaBesideItAgesOut() throws Exception {
     // The release coordinate in docker sits BESIDE the sha tag rather than replacing it, so a
-    // release nobody runs is still a release. The cold sha beside it is what the window condemns.
+    // release nobody runs is still a release. What changed on 2026-09-04 is the fate of the shas: a
+    // deployment is created from the version now, so BOTH cold shas here are superseded coordinates
+    // that nothing will pull and the window condemns them together. The one that used to be spared
+    // as "the newest build" is SHA_C, and it dies beside SHA_B.
     repository();
     String config = config();
     String release = image("qits-stt", config, 111);
@@ -91,42 +186,77 @@ class OciImagesGcAdapterTest extends GcFixture {
 
     GcStrategy.Plan plan = strategy.plan(census.take(), GcPins.none());
 
+    assertEquals(OciImagesGcAdapter.KEPT_NEWEST, ruleFor(plan.kept(), "qits-stt:2026.801.85448"));
     assertEquals(
-        OwnArtifactsStrategy.KEPT_RELEASE, ruleFor(plan.kept(), "qits-stt:2026.801.85448"));
-    assertEquals(OciImagesGcAdapter.KEPT_NEWEST, ruleFor(plan.kept(), "qits-stt:" + SHA_C));
-    assertEquals(
-        OwnArtifactsStrategy.deadUnaccessed(WINDOW), ruleFor(plan.dead(), "qits-stt:" + SHA_B));
+        Stream.of("qits-stt:" + SHA_B, "qits-stt:" + SHA_C).sorted().toList(),
+        identities(plan.dead()));
     assertTrue(
         plan.blobsRetained().contains(release),
         "the release manifest survives on its version tag alone");
   }
 
   @Test
-  void anActiveDeploymentPinKeepsItsShaEvenWhenAYoungerBuildExists() throws Exception {
-    // The IMAGE_MISSING hazard, priced: the container was created from qits/<app>:<sha> and a
+  void anActiveDeploymentPinKeepsItsCoordinateEvenWhenAYoungerReleaseExists() throws Exception {
+    // The IMAGE_MISSING hazard, priced: the container was created from qits/<app>:<version> and a
     // restart pulls that reference again, however long it has been running untouched. The pinned tag
-    // is deliberately neither the newest nor recently pulled, so only the pin can save it.
+    // is deliberately neither the newest release nor recently pulled, so only the pin can save it —
+    // and the belt is spent on the newest version rather than on it, which is what makes this case
+    // about the pin and nothing else.
+    //
+    // The coordinates are versions because that is what cd deploys and therefore what it pins now;
+    // the port carries opaque strings (the field is still called `shas`), so the join is the tag
+    // name whatever shape it has.
     repository();
     String config = config();
-    tag("qits-artifacts", SHA_A, image("qits-artifacts", config, 201), daysAgo(300));
-    tag("qits-artifacts", SHA_B, image("qits-artifacts", config, 202), daysAgo(200));
-    tag("qits-artifacts", SHA_C, image("qits-artifacts", config, 203), daysAgo(100));
+    tag("qits-artifacts", "2026.801.85448", image("qits-artifacts", config, 201), daysAgo(300));
+    tag("qits-artifacts", "2026.802.10", image("qits-artifacts", config, 202), daysAgo(200));
+    tag("qits-artifacts", "2026.803.20", image("qits-artifacts", config, 203), daysAgo(100));
+
+    GcStrategy.Plan plan = strategy.plan(census.take(), pinning("qits-artifacts", "2026.801.85448"));
+
+    assertEquals(GcPins.BY_CD, ruleFor(plan.kept(), "qits-artifacts:2026.801.85448"));
+    assertEquals(OciImagesGcAdapter.KEPT_NEWEST, ruleFor(plan.kept(), "qits-artifacts:2026.803.20"));
+    assertEquals(
+        OwnArtifactsStrategy.KEPT_RELEASE,
+        ruleFor(plan.kept(), "qits-artifacts:2026.802.10"),
+        "second-newest release: retention has it, which is why the pin case needs a third row to be"
+            + " about the pin");
+  }
+
+  @Test
+  void aPinnedCoordinateOutlivesTheWindowWhereAnUnpinnedNeighbourDoesNot() throws Exception {
+    // The pin doing the work alone, with no release in the image to arm the belt or retention: three
+    // cold sha tags of a deployment that predates version coordinates, one of which cd still names.
+    // This is the shape a store carries during the changeover, and the pin is the only rule left
+    // that can speak for a sha.
+    repository();
+    String config = config();
+    tag("qits-artifacts", SHA_A, image("qits-artifacts", config, 211), daysAgo(300));
+    tag("qits-artifacts", SHA_B, image("qits-artifacts", config, 212), daysAgo(200));
+    tag("qits-artifacts", SHA_C, image("qits-artifacts", config, 213), daysAgo(100));
 
     GcStrategy.Plan plan = strategy.plan(census.take(), pinning("qits-artifacts", SHA_A));
 
     assertEquals(GcPins.BY_CD, ruleFor(plan.kept(), "qits-artifacts:" + SHA_A));
-    assertEquals(OciImagesGcAdapter.KEPT_NEWEST, ruleFor(plan.kept(), "qits-artifacts:" + SHA_C));
+    assertEquals(List.of("qits-artifacts:" + SHA_A), identities(plan.kept()));
     assertEquals(
-        OwnArtifactsStrategy.deadUnaccessed(WINDOW),
-        ruleFor(plan.dead(), "qits-artifacts:" + SHA_B));
+        Stream.of("qits-artifacts:" + SHA_B, "qits-artifacts:" + SHA_C).sorted().toList(),
+        identities(plan.dead()),
+        "the newest sha has no belt of its own now — being newest among dead coordinates is not a"
+            + " claim on anything");
   }
 
   @Test
-  void everyShaCdPinsIsKeptUnderOneRuleAndAnythingElseIsNot() throws Exception {
-    // cd answers with a SET of shas per application — what serves and what a rollback restores,
-    // unioned over every environment — so this type keeps all of them under one rule and derives
-    // nothing. The third sha is one cd did not name, and it dies: applying cd's rule again here
-    // would be the drift the pin port exists to remove.
+  void everyCoordinateCdPinsIsKeptUnderOneRuleAndAnythingElseIsNot() throws Exception {
+    // cd answers with a SET of coordinates per application — what serves and what a rollback
+    // restores, unioned over every environment — so this type keeps all of them under one rule and
+    // derives nothing. The third one is one cd did not name, and it dies: applying cd's rule again
+    // here would be the drift the pin port exists to remove.
+    //
+    // The rows are shas rather than versions on purpose: a store carries both shapes through the
+    // changeover, the port's strings are opaque, and a pin must keep whatever coordinate it names.
+    // The fourth sha is the one the old belt spared for being newest, and it now dies with the
+    // third — the pin is the only rule that speaks for a sha.
     repository();
     String config = config();
     tag("qits-platform-deployments", SHA_A, image("qits-platform-deployments", config, 301), daysAgo(400));
@@ -140,31 +270,65 @@ class OciImagesGcAdapterTest extends GcFixture {
     assertEquals(GcPins.BY_CD, ruleFor(plan.kept(), "qits-platform-deployments:" + SHA_B));
     assertEquals(
         OwnArtifactsStrategy.deadUnaccessed(WINDOW), ruleFor(plan.dead(), "qits-platform-deployments:" + SHA_C));
-    assertEquals(OciImagesGcAdapter.KEPT_NEWEST, ruleFor(plan.kept(), "qits-platform-deployments:" + SHA_D));
+    assertEquals(
+        OwnArtifactsStrategy.deadUnaccessed(WINDOW),
+        ruleFor(plan.dead(), "qits-platform-deployments:" + SHA_D));
   }
 
   @Test
-  void anImageNoDeploymentEverNamedKeepsItsNewestBuildAndDropsTheColdOnes() throws Exception {
-    // qits-spa-home's shape, measured: an image with tags and not a single deployment row, every
-    // tag older than the window. Without the newest-build belt the whole image would be eligible and
-    // the next deploy would pull a tag this run deleted — which is why the belt reads updated_at
-    // rather than the access time the window judges on.
+  void anImageNoDeploymentEverNamedKeepsItsNewestReleaseAndDropsTheColdOnes() throws Exception {
+    // qits-spa-home's shape, measured: an image with tags and not a single deployment row, every tag
+    // older than the window. Without the belt the whole image would be eligible and the next deploy
+    // would pull a tag this run deleted — and the tag that deploy will ask for is the newest
+    // VERSION, so that is the one the belt names. cd still cannot answer for it: there is no
+    // deployment row here to answer from, which is the entire reason this rule is derived here and
+    // not fetched.
+    //
+    // The sha rows are the same image's per-push history. They are cold, nothing pulls them, and no
+    // deploy will ever ask for one again, so this case is also where the flip actually collects
+    // something: SHA_C used to be kept for being the newest build.
     repository();
     String config = config();
     tag("qits-spa-home", SHA_A, image("qits-spa-home", config, 401), daysAgo(300));
     tag("qits-spa-home", SHA_B, image("qits-spa-home", config, 402), daysAgo(200));
-    String newest = image("qits-spa-home", config, 403);
-    tag("qits-spa-home", SHA_C, newest, daysAgo(100));
+    tag("qits-spa-home", SHA_C, image("qits-spa-home", config, 403), daysAgo(100));
+    String newest = image("qits-spa-home", config, 404);
+    tag("qits-spa-home", "2026.903.113443", newest, daysAgo(100));
 
     GcStrategy.Plan plan = strategy.plan(census.take(), GcPins.none());
 
-    assertEquals(OciImagesGcAdapter.KEPT_NEWEST, ruleFor(plan.kept(), "qits-spa-home:" + SHA_C));
+    assertEquals(
+        OciImagesGcAdapter.KEPT_NEWEST, ruleFor(plan.kept(), "qits-spa-home:2026.903.113443"));
     assertEquals(1, plan.kept().size());
     assertEquals(
-        Stream.of("qits-spa-home:" + SHA_A, "qits-spa-home:" + SHA_B).sorted().toList(),
+        Stream.of("qits-spa-home:" + SHA_A, "qits-spa-home:" + SHA_B, "qits-spa-home:" + SHA_C)
+            .sorted()
+            .toList(),
         identities(plan.dead()),
-        "the two cold tags; their manifests are still tagged today and are collected next run");
+        "the three cold shas; their manifests are still tagged today and are collected next run");
     assertTrue(plan.blobsRetained().contains(newest));
+  }
+
+  @Test
+  void anImageThatHasNeverBeenReleasedHasNoBeltAtAll() throws Exception {
+    // The honest consequence of naming the belt after the release: an image made only of sha tags
+    // has no next-deploy pull target to protect, because nothing can be deployed from it. Every cold
+    // tag goes, and the answer is a keep-list that is empty rather than one arbitrary survivor.
+    //
+    // This is a real loosening and it is stated rather than hidden. It costs nothing on a live
+    // store: an image nothing has ever released is an image nothing deploys, and the day it IS
+    // released the belt arms itself on that release.
+    repository();
+    String config = config();
+    tag("qits-scratch", SHA_A, image("qits-scratch", config, 411), daysAgo(300));
+    tag("qits-scratch", SHA_B, image("qits-scratch", config, 412), daysAgo(100));
+
+    GcStrategy.Plan plan = strategy.plan(census.take(), GcPins.none());
+
+    assertEquals(List.of(), plan.kept());
+    assertEquals(
+        Stream.of("qits-scratch:" + SHA_A, "qits-scratch:" + SHA_B).sorted().toList(),
+        identities(plan.dead()));
   }
 
   @Test
@@ -172,6 +336,11 @@ class OciImagesGcAdapterTest extends GcFixture {
     // The loosening the settlement bought, and the case the structural rule could not have had: two
     // superseded build tags, one of them pulled last week. The old rule condemned both the moment a
     // newer build existed; this one keeps whatever is in use and names the rule that saved it.
+    //
+    // Since the belt reads the release rather than the newest build, ACCESS is now the only thing
+    // that can save a sha tag with no pin on it — which is what this case was always about, and the
+    // third row is here to show it: SHA_C is younger than both and dies anyway, because being the
+    // newest sha stopped being a reason for anything.
     repository();
     String config = config();
     String pulled = image("qits-events", config, 411);
@@ -183,7 +352,9 @@ class OciImagesGcAdapterTest extends GcFixture {
 
     assertEquals(
         OwnArtifactsStrategy.keptAccessed(WINDOW), ruleFor(plan.kept(), "qits-events:" + SHA_A));
-    assertEquals(List.of("qits-events:" + SHA_B), identities(plan.dead()));
+    assertEquals(
+        Stream.of("qits-events:" + SHA_B, "qits-events:" + SHA_C).sorted().toList(),
+        identities(plan.dead()));
     assertTrue(plan.blobsRetained().contains(pulled));
   }
 
@@ -237,11 +408,15 @@ class OciImagesGcAdapterTest extends GcFixture {
     // The strand hazard, closed at the identity rather than at the unlink: deleting the tag row over
     // a young file would leave that file row-less — and row-less blobs are untouchable by
     // construction, so it would never be reclaimed at all. The tag waits out the window with it.
+    //
+    // The second tag is the image's release, which the belt keeps: this case is about ONE condemned
+    // identity meeting a young blob, and a second dead row would only make the assertions below
+    // about arithmetic. It was a sha when the belt spared the newest build for free.
     repository();
     String config = config();
     String doomed = image("qits-projects", config, 701);
     tag("qits-projects", SHA_A, doomed, daysAgo(300));
-    tag("qits-projects", SHA_B, image("qits-projects", config, 702), daysAgo(100));
+    tag("qits-projects", "2026.801.85448", image("qits-projects", config, 702), daysAgo(100));
 
     GcStrategy.Plan plan = strategy.plan(census.take(), GcPins.none());
     GcStrategy.Applied applied = strategy.apply(plan, blobId -> blobId.equals(doomed));
@@ -258,7 +433,7 @@ class OciImagesGcAdapterTest extends GcFixture {
   void anIncompletePinAggregateIsRefusedRatherThanReadAsNothingIsDeployed() throws Exception {
     // Belt and braces on the run-level abort: the planner never asks a readsPins() strategy to plan
     // against a broken aggregate, and if something ever did, an empty pin map would read as "nothing
-    // is deployed" and take the newest-build belt with it. Refusing is the only safe answer.
+    // is deployed" and condemn every coordinate cd holds. Refusing is the only safe answer.
     repository();
     tag("qits-projects", SHA_A, image("qits-projects", config(), 711), daysAgo(300));
 

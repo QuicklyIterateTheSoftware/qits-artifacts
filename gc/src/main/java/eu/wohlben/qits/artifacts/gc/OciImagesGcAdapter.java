@@ -15,10 +15,8 @@ import jakarta.inject.Singleton;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -36,19 +34,57 @@ import java.util.regex.Pattern;
  * is the version's own order ({@link #BY_CALVER}) rather than a row timestamp, because a release
  * pulled last week is not thereby a newer release than one cut yesterday.
  *
- * <h2>The one belt this type derives itself: the newest build tag per image</h2>
+ * <h2>The one belt this type derives itself: the newest RELEASE tag per image</h2>
  *
- * <p>{@link #pinnedBy} keeps every sha qits-platform-deployments names <b>and</b> each image's most recently written
- * build tag. The second is a pin in all but name — the pull the <em>next</em> deploy will make —
- * and it is here rather than in cd because cd cannot answer for a deployment that has not happened:
- * {@code qits-spa-home} has tags and not a single deployment row, and without this line its whole
- * image would be eligible and the next deploy would pull a tag this run deleted. That is the
- * measured {@code IMAGE_MISSING} hazard, and it is one line.
+ * <p>{@link #pinnedBy} keeps every coordinate qits-platform-deployments names <b>and</b> each
+ * image's newest calver tag. The second is a pin in all but name — the pull the <em>next</em> deploy
+ * will make — and it is here rather than in cd because cd cannot answer for a deployment that has
+ * not happened: {@code qits-spa-home} has tags and not a single deployment row, and without this
+ * line the next deploy could pull a tag this run deleted. That is the measured {@code
+ * IMAGE_MISSING} hazard, and it is one line.
  *
- * <p>"Most recently written" is {@code oci_tag.updated_at}, the row a re-push moves — deliberately
- * <em>not</em> the candidate's effective access time, which a pull of an older sha would lift. A
- * cold, never-deployed image is exactly the case this belt exists for, so reading a pull into it
- * would disarm it precisely where it is needed.
+ * <p><b>It reads the CALVER tag and not the sha tag, and that flip is the whole of 2026-09-04.</b>
+ * This belt used to name each image's most recently written <em>build sha</em>, because that is what
+ * cd pulled: a deployment was created from {@code qits/<app>:<sha>} and the next one would be
+ * created from the newest sha the store held. Deployments are made by VERSION COORDINATE now — cd
+ * asks for {@code qits/<app>:<version>}, the calver the release was cut under — so the newest sha
+ * is a coordinate nothing will ever pull again, and a belt spent on it protects nothing while
+ * telling every reader of the report that it is protecting "the next deployment's pull target". A
+ * lie in a keep-rule is worse than a missing belt: it is the line a reviewer trusts when deciding
+ * whether a tag may go.
+ *
+ * <p><b>Newest is {@link #BY_CALVER}, the version's own order, and no timestamp at all.</b> The sha
+ * form had no intrinsic order, so the old belt had to read {@code oci_tag.updated_at} and had to
+ * argue at length for why it was not reading the access time (a pull of an older sha would have
+ * lifted it and disarmed the belt on exactly the cold image it exists for). A calver tag carries its
+ * order in its name: the next deploy pulls the highest version, whenever its row happened to be
+ * written and whoever last pulled it. The argument disappears with the timestamp, and so does the
+ * per-group query the old belt needed — the enumeration in hand already says which candidates are
+ * releases.
+ *
+ * <p><b>The belt overlaps the last-2 retention today, and it is still not the same fact.</b> The
+ * newest calver of a group is always among that group's two newest releases, so this rule and {@code
+ * OwnArtifactsStrategy}'s keep the same tag — under different names and for different reasons.
+ * Retention is archival policy ("keep the last two, whatever their age"); this is an operational
+ * fact ("this exact coordinate is what the next deploy will ask the registry for"). Two independent
+ * reasons for one keep is what a belt is; and the belt is the one that survives a change to
+ * {@code RELEASES_KEPT}, which is a number and not a guarantee.
+ *
+ * <h2>Whether a released-but-undeployed version can be collected</h2>
+ *
+ * <p>Audited on 2026-09-04, because cd's pins cover only <em>live</em> deployments and retention
+ * covers only the last two releases — so a third-newest version that was released and never deployed
+ * is named by neither. It is nevertheless covered, by the rule that was already there: a candidate's
+ * effective access time folds creation in ({@link #latest}), and for a tag "creation" is {@code
+ * updated_at}, the moment the release pushed it. <b>Every calver tag is therefore kept for a full
+ * window from its push, deployed or not</b> — which is the "minimum age before a release is
+ * collectable" guard, already load-bearing and arrived at from the other direction.
+ *
+ * <p>What is left eligible is a version that is all four of: older than the window, unpulled for
+ * every day of it, displaced from the last two releases of its image, and named by no deployment cd
+ * would restore. That is "a release nobody deployed in a month, superseded twice since" — the
+ * settlement's intended collection rather than a hazard, and the same sentence it already applies to
+ * an old npm version nobody installs. Nothing was widened; this paragraph is the change.
  *
  * <h2>What is a candidate, and what is not</h2>
  *
@@ -78,24 +114,29 @@ import java.util.regex.Pattern;
 public class OciImagesGcAdapter implements GcTypeAdapter {
 
   /**
-   * The release coordinate: {@code <year>.<month><day>.<time>}, e.g. {@code 2026.801.85448}. Matched
-   * before the sha shape, so a version can never be read as an abbreviated digest.
+   * The release coordinate: {@code <year>.<month><day>.<time>}, e.g. {@code 2026.801.85448}.
+   *
+   * <p>It is the only tag shape this type classifies now. There used to be a {@code BUILD_SHA}
+   * pattern beside it, matched second so a version could never be read as an abbreviated digest;
+   * the belt that consulted it is gone with the sha deploys it served, and no other rule here asks
+   * whether a tag is a sha. A tag that is not a calver is simply not a release — it is kept for as
+   * long as something pulls it and no longer, which is what the access rule already said about every
+   * coordinate this pattern does not match.
    */
   static final Pattern CALVER = Pattern.compile("\\d{4}\\.\\d{1,4}\\.\\d+");
-
-  /**
-   * The per-build coordinate: a lowercase hex commit sha, full or abbreviated. post-receive pushes
-   * {@code :$QITS_CI_SHA} per commit, which is the 40-hex form; the range starts at 7 so the one
-   * stray short tag ({@code qits-observability:2994a5e}) is classified as the build coordinate it is
-   * rather than kept as a mystery.
-   */
-  static final Pattern BUILD_SHA = Pattern.compile("[0-9a-f]{7,40}");
 
   /** The digest form the untagged-manifest identities are spelled with. */
   static final String DIGEST_PREFIX = "@sha256:";
 
-  /** The belt this type derives for itself, named so a report says which pull it protects. */
-  static final String KEPT_NEWEST = "this image's newest build — the next deployment's pull target";
+  /**
+   * The belt this type derives for itself, named so a report says which pull it protects.
+   *
+   * <p>It says "release" rather than "build" since 2026-09-04, and the word is the assertion: the
+   * coordinate a deployment is created from is the version, so the version is the only tag this
+   * sentence can truthfully be written beside.
+   */
+  static final String KEPT_NEWEST =
+      "this image's newest release — the next deployment's pull target";
 
   @Inject ArtifactRepositoryRepository repositories;
   @Inject OciTagRepository tags;
@@ -123,25 +164,18 @@ public class OciImagesGcAdapter implements GcTypeAdapter {
   }
 
   /**
-   * The two coordinate pins: every sha qits-platform-deployments holds, and each image's newest build tag.
+   * The two coordinate pins: every coordinate qits-platform-deployments holds, and each image's
+   * newest release tag.
    *
-   * <p>The newest build is read off the tag rows rather than off the candidates, for the reason the
-   * class javadoc gives — a candidate carries its access time, and a pull of an older sha must not
-   * be able to move this belt.
+   * <p>The newest release is read straight off the enumeration in hand — no second query and no
+   * timestamp. {@link #BY_CALVER} orders releases by the version itself, so nothing a pull or a
+   * re-push does to a row can move this belt, which is the property the old sha belt had to buy with
+   * a per-group read of {@code oci_tag.updated_at} and a paragraph explaining which timestamp it was
+   * careful not to use.
    */
   @Override
   public GcPinned pinnedBy(List<GcCandidate> candidates, GcPins pins) {
-    Map<String, String> newestBuild = new HashMap<>();
-    for (String group : groupsOf(candidates)) {
-      // A repository name cannot contain a slash and an image name can, so the FIRST one is the
-      // boundary the group was built with.
-      int slash = group.indexOf('/');
-      String newest =
-          newestBuildTag(tags.listByImage(group.substring(0, slash), group.substring(slash + 1)));
-      if (newest != null) {
-        newestBuild.put(group, newest);
-      }
-    }
+    Map<String, String> newestRelease = newestReleasePerGroup(candidates);
     return candidate -> {
       if (isManifest(candidate.identity())) {
         return null;
@@ -153,7 +187,7 @@ public class OciImagesGcAdapter implements GcTypeAdapter {
       if (byCd != null) {
         return byCd;
       }
-      return tag.equals(newestBuild.get(candidate.group())) ? KEPT_NEWEST : null;
+      return tag.equals(newestRelease.get(candidate.group())) ? KEPT_NEWEST : null;
     };
   }
 
@@ -246,25 +280,32 @@ public class OciImagesGcAdapter implements GcTypeAdapter {
     return repository + "/" + image;
   }
 
-  /** Every identity group the enumeration touched, in encounter order. */
-  private static Set<String> groupsOf(List<GcCandidate> candidates) {
-    Set<String> groups = new LinkedHashSet<>();
-    for (GcCandidate candidate : candidates) {
-      groups.add(candidate.group());
-    }
-    return groups;
-  }
-
   /**
-   * The image's most recently written build tag by {@code oci_tag.updated_at}, or null when it has
-   * none. Ties break on the tag name so a report is stable across runs rather than on row order.
+   * Each identity group's highest calver tag, in encounter order; a group with no release at all
+   * contributes no entry, and an image made only of sha tags therefore has no belt.
+   *
+   * <p>That absence is the honest answer now, not a hole. The old sha belt existed because a
+   * never-deployed image's newest sha was the coordinate the next deploy would ask for; nothing asks
+   * for a sha any more, so an image that has never been released has no next-deploy pull target to
+   * name, and its tags live or die on use like any other unclassified coordinate.
+   *
+   * <p>{@link GcCandidate#released()} is the release test rather than a second match of {@link
+   * #CALVER} here: the enumeration already decided which coordinates are releases, and asking twice
+   * is how the two answers drift apart.
    */
-  private static String newestBuildTag(List<OciTag> imageTags) {
-    return imageTags.stream()
-        .filter(tag -> !CALVER.matcher(tag.tag).matches() && BUILD_SHA.matcher(tag.tag).matches())
-        .max(Comparator.comparing((OciTag tag) -> tag.updatedAt).thenComparing(tag -> tag.tag))
-        .map(tag -> tag.tag)
-        .orElse(null);
+  private static Map<String, String> newestReleasePerGroup(List<GcCandidate> candidates) {
+    Map<String, String> newest = new LinkedHashMap<>();
+    for (GcCandidate candidate : candidates) {
+      if (!candidate.released()) {
+        continue;
+      }
+      String tag = tagOf(candidate.identity());
+      String held = newest.get(candidate.group());
+      if (held == null || BY_CALVER.compare(tag, held) > 0) {
+        newest.put(candidate.group(), tag);
+      }
+    }
+    return newest;
   }
 
   /** Everything a manifest reaches, or nothing when the row it named is already gone. */
