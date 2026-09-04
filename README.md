@@ -1285,9 +1285,9 @@ dies once nothing has pulled it for P30D.**
 
 | Kept because | Spelled |
 |---|---|
-| it is one of the last two releases | a tag shaped like a calver version (`2026.801.85448`), ranked by the version's own order — not by a row timestamp, so a release pulled last week is not thereby the newer release. There is no `-main.g<sha>` suffix in docker: the sha tag *is* the prerelease coordinate and a release adds a version tag beside it |
+| it is one of the last two releases | a tag shaped like a calver version (`2026.801.85448`), ranked by the version's own order — not by a row timestamp, so a release pulled last week is not thereby the newer release. There is no `-main.g<sha>` suffix in docker: the sha tag *was* the prerelease coordinate, back when a push built one, and a release published a version tag beside it. Per-push builds are gone, so a release publishes the version tag alone |
 | qits-cd pins it | any sha `GET /cd/api/pins` names for that image — what is serving, and what a rollback would restore. **One rule, cd's**: this used to be two rules derived here from raw deployment rows, and the derivation was wrong (it read a `FAILED` attempt as the rollback target and dropped the sha that actually served) |
-| the next deploy will pull it | the newest sha tag per image, by `oci_tag.updated_at`. This is the whole safety net for an image cd has never deployed, and it reads `updated_at` rather than the access time the window judges on — a cold, never-deployed image is exactly the case it exists for |
+| the next deploy will pull it | the newest **calver** tag per image, ordered `BY_CALVER` — the version's own order. This is the whole safety net for an image cd has never deployed, and a deploy pulls a version coordinate, so the newest release is the coordinate it will ask for. It named the newest build sha until 2026-09-04, which stopped being the pull target when deployments moved to version coordinates |
 | something still pulls it | anything else accessed inside P30D. This is where the old *unclassified-means-keep* backstop went: a coordinate nobody modelled is kept for as long as it is used, which is a better answer than "forever" and a safer one than the structural rule it replaces |
 
 **Two rules changed direction, and both changes are the settlement's.** Calver releases used to be
