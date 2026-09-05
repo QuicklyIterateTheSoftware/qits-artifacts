@@ -57,7 +57,6 @@ one in is the library's, not this repository's.
 | `npm/NpmUpstream` | the `HttpClient` is an instance field, not static | build fails: an `HttpClientFacade` frozen into the image heap |
 | `maven/MavenUpstream` | the `HttpClient` is an instance field, not static | same as above; the sixth outbound client, and the rule has still not changed. It reads and writes only `String`/`byte[]` and needs nothing else declared — the maven stack, like `registry` and `npm`, still adds zero native-image configuration |
 | `gc/CdHttpDeploymentPins`, `gc/CiHttpDaemonPins`, `gc/MaintenanceHttpDependencyPins`, `gc/ConfigurationHttpImagePins`, `gc/WorkspacesHttpLaunchPins`, `gc/ProjectsHttpLaunchPins` | the `HttpClient` is an instance field, not static | same as above; the third, fifth, seventh, eighth, ninth and tenth outbound clients, and the rule has not changed. It moved with the class when GC became its own module — the rule travels with the client, not with the package. The two pin readers added on 2026-09-04 and the two added on 2026-09-05 carry it for the same reason and add no other native-image configuration: they read `JsonNode`, never a bound type |
-| `gc/MavenPomClosure` | nothing — and that is the entry: it parses poms with the **JDK's own** `DocumentBuilder`, reachable through the default `DocumentBuilderFactory`, which native-image resolves without configuration. A DOM library off maven central would have needed a reflection registration and a `ServiceLoader` declaration to do the same job | — (the reason the closure took a dependency-free parser rather than a nicer one) |
 | `registry/MirrorUpstream` | the `HttpClient` is an instance field, not static — and so is `MirrorBearerTokens`' `ObjectMapper`, which is reachable from one | same as above; the fourth outbound client, and the rule still has not changed |
 | artifacts' `microprofile-config.properties` | the `QITS_RESOURCE_DB_*` triple with **no defaults** | nothing — and that is the point: an unset variable dies at Flyway naming the missing one, rather than opening a fallback store. It replaced an H2 file url that resolved `${user.home}` through `getpwuid` and came out as `jdbc:h2:file:?/…` under UID 1001 |
 | `registry/MirrorUpstream`'s config | `endpoint-override` injected as `Optional<String>`, not `String` | the binary dies at boot on `Failed to load config value of type java.lang.String` — SmallRye reads a **configured-empty** value as absent, and that key ships blank. `defaultValue = ""` does not help. Invisible to `mvn verify`, where every test sets a real value |
@@ -428,12 +427,14 @@ collection" section is the contract; these are the rules that get "helpfully" re
   since 2026-09-05, down from `P3D`/`P2D` the day before and `P30D`/`P90D`/`P7D` before that. The
   windows are in the `gc` jar's config, the grace period in the `artifacts` jar's.
   **Zero is not "collect harder", it is the statement that RETENTION IS THE KEEP-SET**: an identity
-  lives because a pin source, a belt or the maven pom closure names it, and access — the one input
-  here nobody owns — decides nothing. It is safe because per-push CI is retired: every QA build
-  resolves the octopus FOLD with current main, and main's manifests are what the maintenance
-  dependency pins name, so a branch's build resolves the keep-set by construction. The one branch
-  that can miss hand-pins an internal version three releases stale, which fails loudly and is
-  re-bumped in a commit.
+  lives because a pin source or a belt names it, and access — the one input here nobody owns —
+  decides nothing. It is safe because per-push CI is retired: every QA build resolves the octopus
+  FOLD with current main, and main's manifests are what the maintenance dependency pins name, so a
+  branch's build resolves the keep-set by construction. The one branch that can miss hand-pins an
+  internal version three releases stale, which fails loudly and is re-bumped in a commit.
+  **`maven-packages` is where the window decides least, and that was bought at the price of an
+  outage**: since 2026-09-05 no published release is age-collected at any window, so zero reaches
+  only superseded snapshot sets there. See the bullet below.
   **The grace period is the only clock left and it is race safety, not retention**: it gates
   identity rows as well as blob unlinks, so bytes pushed minutes ago — an image racing its
   deployment row, a lib racing its consumer's fold — are immune whole for six hours while their pin
@@ -492,30 +493,28 @@ collection" section is the contract; these are the rules that get "helpfully" re
 - **`maven-packages`' identity is a COORDINATE, not a row.** A version is a set of files, and half
   a version is a broken resolve, so `MavenPackagesGcAdapter` folds rows into
   `groupId:artifactId:version` (timestamped snapshots into their own resolvable coordinate) and the
-  grace window withholds the whole set. Its first derived belt is **the newest deployable set of
-  every snapshot line** — what `maven-metadata.xml` redirects `1.0.1-SNAPSHOT` to; deleting it would
-  point the document at a file the store no longer has. No N-per-line rule was invented: §3.6 named
-  the shape and never priced it.
-- **Its second derived belt is the POM CLOSURE (`MavenPomClosure`), and it is what a zero window
-  cost.** A manifest pin names what a repository's pom writes; nothing names what THAT pom then
-  resolves. So the keep-set is closed under the references of the poms already in it: seeded from
-  the manifest pins plus both belts, each kept coordinate's `.pom` is read out of the store
-  (`BlobStore.open` — public and read-only, so no narrow door is owed, and it moves no
-  `accessed_at`), its `<parent>`, `<dependencies>` and `dependencyManagement` imports are parsed
-  with the JDK's `DocumentBuilder` (no new dependency, nothing new for the native image), and every
-  referenced coordinate **that exists in this store** joins the keep-set, to a fixpoint bounded by a
-  visited set. **Internal-ness needs no configuration — existing here IS the definition.**
-  `${project.version}` resolves against the pom's own coordinates and every other `${…}` drops the
-  reference, because the platform's own poms spell internal versions literally by house rule. The
-  release belt is **asked** rather than re-derived (`OwnArtifactsStrategy.lastReleasesPerGroup` is
-  package-visible for this one caller): an adapter carrying a keep-count would be the doctrine
-  broken to save three lines. An unreadable or unparseable pom is logged and skipped — the rule only
-  ever ADDS keeps, so failing to read one under-keeps by that pom alone rather than refusing a type.
-  **The npm twin does not exist and the gap is deliberate**: `npm_version.manifest_json` does carry
-  the published manifest, but internal npm deps are spelled as caret RANGES (`^2026.902.204627`), so
-  an equality join keeps nothing and a correct closure would need semver range resolution
-  (`NpmSemver` compares, it does not match ranges). What a range resolves to is the newest matching
-  version, which the last-2-releases belt already holds.
+  grace window withholds the whole set. Its one derived belt is **the newest deployable set of every
+  snapshot line** — what `maven-metadata.xml` redirects `1.0.1-SNAPSHOT` to; deleting it would point
+  the document at a file the store no longer has. No N-per-line rule was invented: §3.6 named the
+  shape and never priced it, so the window decides.
+- **`maven-packages` DOES NOT AGE-COLLECT PUBLISHED RELEASES. Do not put the belt back.** Withdrawn
+  2026-09-05 after the `P3D` access rule deleted 67 published `eu.wohlben.qits` coordinates at
+  `01:58Z` and every gating build on the platform stopped resolving. The three reasons, so this is
+  not re-derived the next time the store looks large: a jar is fetched **once** and answered out of
+  local `~/.m2` caches forever after, so age here measures cache warmth rather than need; the
+  dependency pin names what main's manifests **directly** reference (13 coordinates against hundreds
+  held) and is a floor under nothing; and the whole hosted maven repository rounds to nothing beside
+  28.8 GB of images, so the trade was a platform-wide outage for a few megabytes. The keep is
+  answered in `MavenPackagesGcAdapter.pinnedBy` — the adapter's own facts, so `OwnArtifactsStrategy`
+  and the other three own types are untouched — and `MavenPackagesGcStrategy.note()` carries the
+  correction onto every report line, because the configuration echo is the engine's sentence and
+  still describes a belt. The window governs **superseded timestamped snapshot sets only**.
+- **A maven coordinate is removed inside ONE transaction.** `MavenRegistryService.collect` is
+  `@Transactional` per *file*, so the delete loop used to commit path by path: a throw on the second
+  file left the first one deleted, and since paths sort `.jar` before `.pom` the shape it leaves is a
+  version whose pom answers 200 and whose jar answers 404 — the half-sweep the identity model claims
+  to prevent. `MavenPackagesGcAdapter.delete` wraps each coordinate in `QuarkusTransaction`; a
+  failure is a no-op reported against an identity that is still whole.
 - **`daemon-binaries` has no tombstone and must not grow one.** npm has one because a deleted
   version re-opens its name under somebody's lockfile; a daemon version is resolved by a pin a
   bootstrap re-reads, so a re-release at a collected version is legitimate. Its funnel is

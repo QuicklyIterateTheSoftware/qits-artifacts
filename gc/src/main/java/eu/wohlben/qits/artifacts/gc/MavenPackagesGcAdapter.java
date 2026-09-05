@@ -3,24 +3,20 @@ package eu.wohlben.qits.artifacts.gc;
 import eu.wohlben.qits.artifacts.control.MavenLayout;
 import eu.wohlben.qits.artifacts.control.MavenRegistryCollection;
 import eu.wohlben.qits.artifacts.control.MavenVersionOrder;
-import eu.wohlben.qits.blobstore.control.BlobStore;
 import eu.wohlben.qits.blobstore.entity.ArtifactRepository;
 import eu.wohlben.qits.artifacts.entity.MavenArtifact;
 import eu.wohlben.qits.artifacts.control.MavenPackagesProfile;
 import eu.wohlben.qits.artifacts.gc.dto.GcIdentity;
 import eu.wohlben.qits.blobstore.persistence.ArtifactRepositoryRepository;
 import eu.wohlben.qits.artifacts.persistence.MavenArtifactRepository;
-import io.quarkus.logging.Log;
+import io.quarkus.narayana.jta.QuarkusTransaction;
 import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
-import java.io.IOException;
-import java.io.InputStream;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -53,36 +49,70 @@ import java.util.TreeSet;
  * deploy one — the wire refuses an unparseable path at the door — so this is the honest answer for
  * a row that predates a rule rather than a case that happens.
  *
- * <h2>The belt, and the belt maven needs beyond it</h2>
+ * <h2>A published release is never collected. Not by age, not by a belt.</h2>
  *
- * <p>Releases: the last two per {@code (groupId, artifactId)}, by maven's own version order. Older
- * ones survive on use, which for a library means something built against it inside the window.
+ * <p>This type used to be priced like the other three own types: the last two releases per {@code
+ * (groupId, artifactId)} kept by policy, everything older surviving only on access inside the
+ * configured window. On <b>2026-09-05T01:58Z</b> that rule deleted 67 published {@code
+ * eu.wohlben.qits} coordinates in one run — every one of them under "superseded and unaccessed for
+ * longer than P3D" — and every gating build on the platform stopped resolving. The rule is
+ * therefore <b>withdrawn</b> rather than retuned, and the argument is written here so it is not
+ * quietly re-derived the next time this store looks large:
  *
- * <p>Snapshots get the belt maven's derived metadata forces: <b>the newest deployable set of every
- * snapshot version line is always kept</b> ({@link #pinnedBy}) — the newest timestamped set if the
- * line has any, else the literal {@code -SNAPSHOT} set. {@code maven-metadata.xml} is computed from
- * the surviving rows at read time, so a resolver asking for {@code 1.0.1-SNAPSHOT} is redirected to
- * whatever is newest; deleting that one would point the document at a file the store no longer has,
- * which is the single failure this type must not produce. Older timestamped sets are ordinary
- * candidates and go on the next run.
+ * <ul>
+ *   <li><b>For a library, access was never consumption.</b> Every other own type is consumed by
+ *       being fetched: an image is pulled to run, a daemon binary is downloaded to launch. A jar is
+ *       fetched <em>once</em> and then answered out of a hundred local {@code ~/.m2} caches and
+ *       every build image baked since. A version can be what a thousand builds compile against and
+ *       still show no read here for a month. Age on a maven row measures cache warmth, not need,
+ *       and no window length makes it measure need.
+ *   <li><b>A pin cannot be the floor under a deletion this size.</b> The short window was made
+ *       defensible by {@code MaintenanceDependencyPins} naming what main's manifests reference.
+ *       That source is right about what it claims and much narrower than the set a build resolves:
+ *       on the morning of the incident it named 13 maven coordinates — one current version per
+ *       artifact, from main — while the store held hundreds that branches, parent poms, transitive
+ *       ranges and every unbumped consumer still resolve. A keep-set assembled from direct
+ *       references on one branch is a floor under nothing, and a pin source that is one service's
+ *       reachability away from empty is a floor that disappears exactly when it is load-bearing.
+ *   <li><b>The disk this buys is not the disk that is full.</b> Measured the morning of the
+ *       incident: 29.4 GB of store, of which oci-images 28.8 GB, docs 114.7 MB and sboms 134.3 MB.
+ *       The whole hosted maven repository does not appear in that summary, because against images
+ *       it rounds to nothing — the 67 coordinates freed a few megabytes. Disk pressure here is the
+ *       image store's problem and the proxy caches', and those are collected by rules of their own.
+ *       Trading a platform-wide build outage for a rounding error is not a trade this type may make.
+ *   <li><b>The registry is the platform's artifact of record.</b> Nothing else holds these bytes. A
+ *       released coordinate is immutable and re-publishing one is impossible by construction, so a
+ *       collection here is not reclaimable space, it is the loss of a build input — and the pom that
+ *       names it is on someone's main branch whether or not this service can see the branch.
+ * </ul>
  *
- * <h2>The pom closure</h2>
+ * <p><b>What is kept, then:</b> every release version, whatever its age and whatever its position
+ * in the version order; and every row whose path {@link MavenLayout} cannot read, because a file
+ * this adapter cannot name is a file it cannot promise is not half of something.
  *
- * <p>The third keep and the one the zero window made load-bearing: <b>everything a kept pom itself
- * references is kept</b>, to a fixpoint — see {@link MavenPomClosure} for what a reference is and
- * why "internal" means "already in this store". It is a fact about a stored file rather than a rule
- * about age, which is why it lives on this adapter and not in the engine, and it is composed
- * <em>after</em> the two belts above so a coordinate keeps the strongest reason it has.
- *
- * <p>The seeds are what the keep-set already holds when {@link #pinnedBy} runs: the manifest pins,
- * the release belt ({@link OwnArtifactsStrategy#lastReleasesPerGroup}, asked rather than
- * re-derived), and the snapshot belt. Not every candidate — a closure seeded from everything would
- * keep the store whole and say nothing.
+ * <p><b>What still ages out</b> is the one class of content this store genuinely regenerates:
+ * superseded timestamped snapshot sets. A snapshot is build output rather than a published
+ * coordinate, nothing's main pom pins one, and the set a resolver would actually be sent to is kept
+ * structurally — <b>the newest deployable set of every snapshot version line is always kept</b>
+ * ({@link #pinnedBy}), the newest timestamped set if the line has any, else the literal {@code
+ * -SNAPSHOT} set. {@code maven-metadata.xml} is computed from the surviving rows at read time, so a
+ * resolver asking for {@code 1.0.1-SNAPSHOT} is redirected to whatever is newest; deleting that one
+ * would point the document at a file the store no longer has, which is the single failure this type
+ * must not produce. Older timestamped sets are ordinary candidates and age out at the configured
+ * window. And a pin still outranks all of it: a coordinate some manifest names is kept under the
+ * pin's own rule whether it is a release or a snapshot, so the invariant — <b>anything a main pom
+ * pins survives</b> — holds through both doors rather than through one.
  *
  * <p>What this deliberately does <b>not</b> do is keep a fixed number of snapshot builds. The plan
  * that named this type's cleanup ({@code maven-repository-plan.md} §3.6) never priced deletion, so
- * the conservative reading is taken: the settlement's window decides, and the only structural keep
- * is the one a resolver would break without.
+ * the conservative reading is taken: the window decides for snapshots, and the only structural keep
+ * among them is the one a resolver would break without.
+ *
+ * <p>{@link #byAge()} and {@link OwnArtifactsStrategy#RELEASES_KEPT} therefore no longer decide
+ * anything for this type — every release is kept before the belt is consulted. The comparator stays
+ * because the engine's contract asks for one and because a total order over maven versions is the
+ * honest answer to that question; it is simply no longer the thing standing between a published jar
+ * and a delete.
  *
  * <h2>Access</h2>
  *
@@ -99,18 +129,29 @@ public class MavenPackagesGcAdapter implements GcTypeAdapter {
       "the newest deployable set of this snapshot version — what the derived maven-metadata.xml"
           + " resolves to, so a resolver would 404 without it";
 
+  /**
+   * The keep every published release gets — the rule the 2026-09-05 outage bought, said in full on
+   * every line it saves so a reviewer never has to go looking for why nothing maven died.
+   */
+  static final String KEPT_HOSTED_RELEASE =
+      "a published release of this platform's own maven repository — hosted releases are never"
+          + " collected, at any age and at any depth in the version order. This store is the"
+          + " artifact of record for coordinates that live on someone's main branch, an access"
+          + " timestamp measures cache warmth rather than need, and the disk it would free rounds"
+          + " to nothing beside the image store";
+
+  /**
+   * The keep a row this layout cannot parse gets, for the reason the class javadoc gives: a file
+   * this adapter cannot name is a file it cannot promise is not half of a version.
+   */
+  static final String KEPT_UNREADABLE_PATH =
+      "this path is not <group>/<artifact>/<version>/<file>, so this adapter cannot say which"
+          + " coordinate it belongs to — and a file it cannot name is one it cannot collect without"
+          + " risking half a version";
+
   @Inject ArtifactRepositoryRepository repositories;
   @Inject MavenArtifactRepository artifacts;
   @Inject MavenRegistryCollection maven;
-
-  /**
-   * How the closure reads a pom's bytes: {@code BlobStore.open} is public and read-only, so this
-   * needs no narrow door of its own — the doors exist for the store's package-private write and
-   * delete funnels, and reading is neither. It also moves nothing: {@code accessed_at} lives on the
-   * {@code maven_artifact} row and is touched by the wire, so the collector reading a pom cannot
-   * warm its own candidate.
-   */
-  @Inject BlobStore blobs;
 
   @Override
   public String type() {
@@ -130,21 +171,22 @@ public class MavenPackagesGcAdapter implements GcTypeAdapter {
   }
 
   /**
-   * The coordinates a repository's pom still names, the newest deployable set of every snapshot
-   * version line, and everything those two reach through their own poms — see the class javadoc for
-   * the second and {@link MavenPomClosure} for the third.
+   * Every keep this type has, in the order a report reads best: the coordinates a repository's pom
+   * still names, then every published release, then rows this layout cannot parse, then the newest
+   * deployable set of every snapshot version line.
    *
    * <p><b>The dependency pin needs no translation at all</b>, which is the property that makes it
    * safe: {@code groupId:artifactId:version} is what a pom writes and it is this adapter's identity
    * verbatim, so the lookup is an equality test on the string the enumeration already built. It is
    * asked first because it is a fact about somebody else's source — a reader who sees it wants to
-   * know which repository still builds against this version, not that the snapshot metadata happens
-   * to point here too.
+   * know which repository still builds against this version, not that it would have been kept for
+   * being a release anyway.
    *
-   * <p>The closure is computed <b>once per plan</b>, here, over the enumeration the binder already
-   * took and the pins the run already read. Per candidate it would re-walk the store for every
-   * coordinate; against a second enumeration it would judge one run by two snapshots — which is the
-   * reason this method takes the whole list in the first place.
+   * <p><b>The release keep is expressed here rather than in the engine</b>, and that is the seam
+   * working as designed: what a release <em>is</em> has always been this adapter's fact, and so is
+   * what one is worth. {@link OwnArtifactsStrategy} still counts to two for the three types that
+   * want a belt; this type answers before it is asked, so no release ever reaches the belt or the
+   * access window. Nothing about the engine changes, and nothing about the other three types does.
    */
   @Override
   public GcPinned pinnedBy(List<GcCandidate> candidates, GcPins pins) {
@@ -161,99 +203,24 @@ public class MavenPackagesGcAdapter implements GcTypeAdapter {
           candidate.identity(),
           (held, other) -> BY_SNAPSHOT_RECENCY.compare(held, other) >= 0 ? held : other);
     }
-    Map<String, String> reachable = closure(candidates, pins, newestPerLine);
     return candidate -> {
       String byManifest = pins.pinsMavenCoordinate(candidate.identity());
       if (byManifest != null) {
         return byManifest;
       }
-      if (candidate.identity().equals(newestPerLine.get(candidate.group()))) {
-        return KEPT_RESOLVABLE_SNAPSHOT;
+      if (candidate.released()) {
+        return KEPT_HOSTED_RELEASE;
       }
-      return reachable.get(candidate.identity());
+      // An unparseable row is its own identity under its own path spelling, and `groupOf` gives it
+      // the repository name as its group — which is how it is recognised again here without a
+      // second reading of the layout.
+      if (candidate.group().equals(candidate.repository())) {
+        return KEPT_UNREADABLE_PATH;
+      }
+      return candidate.identity().equals(newestPerLine.get(candidate.group()))
+          ? KEPT_RESOLVABLE_SNAPSHOT
+          : null;
     };
-  }
-
-  /**
-   * The closure over what the keep-set already holds, mapped from coordinate to the sentence naming
-   * its referrer.
-   *
-   * <p>Keyed by coordinate and not by (repository, coordinate) because a reference is a coordinate:
-   * a pom names {@code g:a:v} and says nothing about which repository row of this store serves it.
-   * Every deployment has exactly one hosted maven repository, so the distinction is theoretical
-   * today — and if a second one appears, keeping the same coordinate in both is the answer a
-   * resolver would want anyway.
-   */
-  private Map<String, String> closure(
-      List<GcCandidate> candidates, GcPins pins, Map<String, String> newestPerLine) {
-    Set<GcCandidate> keptReleases = OwnArtifactsStrategy.lastReleasesPerGroup(candidates, this);
-    Set<String> hosted = new LinkedHashSet<>();
-    Set<String> seeds = new LinkedHashSet<>();
-    for (GcCandidate candidate : candidates) {
-      hosted.add(candidate.identity());
-      if (pins.pinsMavenCoordinate(candidate.identity()) != null
-          || keptReleases.contains(candidate)
-          || candidate.identity().equals(newestPerLine.get(candidate.group()))) {
-        seeds.add(candidate.identity());
-      }
-    }
-    if (seeds.isEmpty()) {
-      return Map.of();
-    }
-    Map<String, String> poms = pomBlobs(candidates);
-    return MavenPomClosure.from(
-        seeds, hosted, coordinate -> pomBytes(poms.get(coordinate), coordinate));
-  }
-
-  /**
-   * Every coordinate's {@code .pom} blob, read from the rows rather than composed from the
-   * coordinate: a timestamped snapshot's identity and its file name differ, and {@link
-   * #identityOf} is already the one place that translation is written.
-   *
-   * <p>Only the pom rows are queried. The enumeration reads every row of the type, and this is
-   * deliberately not folded into it — the closure is one keep-class of one type, and paying for a
-   * second narrow query keeps it removable.
-   */
-  private Map<String, String> pomBlobs(List<GcCandidate> candidates) {
-    Map<String, String> poms = new HashMap<>();
-    for (String repository : repositoriesOf(candidates)) {
-      for (MavenArtifact row :
-          artifacts.<MavenArtifact>list("repository = ?1 and path like ?2", repository, "%.pom")) {
-        poms.putIfAbsent(identityOf(MavenLayout.parse(row.path), row.path), row.blobId);
-      }
-    }
-    return poms;
-  }
-
-  /** The repository rows this enumeration touched, in encounter order. */
-  private static Set<String> repositoriesOf(List<GcCandidate> candidates) {
-    Set<String> names = new LinkedHashSet<>();
-    for (GcCandidate candidate : candidates) {
-      names.add(candidate.repository());
-    }
-    return names;
-  }
-
-  /**
-   * One pom's bytes, or null when there are none to read.
-   *
-   * <p>An unreadable blob is logged and skipped rather than thrown: this rule only ever ADDS keeps,
-   * so failing to read one pom under-keeps by whatever that pom alone referenced, while throwing
-   * would refuse the whole type's plan over one file. A coordinate with no pom row at all — an
-   * unparseable path, a jar deployed on its own — is the ordinary case and says nothing.
-   */
-  private byte[] pomBytes(String blobId, String coordinate) {
-    if (blobId == null) {
-      return null;
-    }
-    try (InputStream bytes = blobs.open(blobId)) {
-      return bytes.readNBytes(MavenPomClosure.MAX_POM_BYTES);
-    } catch (IOException | RuntimeException unreadable) {
-      Log.warnf(
-          "gc: the pom of %s could not be read (%s), so its dependency closure is not kept",
-          coordinate, unreadable.toString());
-      return null;
-    }
   }
 
   /**
@@ -281,6 +248,16 @@ public class MavenPackagesGcAdapter implements GcTypeAdapter {
    * rows all stay, and the next run past the window takes rows and files together. Deleting the
    * mature rows and keeping the young one would leave exactly the half-version this type's identity
    * model exists to prevent.
+   *
+   * <p><b>And the removal itself is one transaction per coordinate</b>, which is the half of "lives
+   * or dies together" the model claimed and the code did not have. {@code
+   * MavenRegistryService.collect} is {@code @Transactional} <em>per file</em>, so this loop used to
+   * commit path by path: a throw on the second file — a concurrent deploy or collection moving the
+   * store between planning and applying is the documented way it happens — left the first file
+   * deleted and the rest alive. The paths sort lexically, {@code .jar} before {@code .pom}, so the
+   * shape that failure leaves behind is precisely the one that breaks every resolve: a version whose
+   * pom answers 200 and whose jar answers 404. Wrapping the coordinate makes the failure a no-op,
+   * reported as an error against an identity that is still whole and re-planned next run.
    */
   @Override
   public GcStrategy.Applied delete(GcStrategy.Plan plan, GcStrategy.GraceWindow grace) {
@@ -302,12 +279,20 @@ public class MavenPackagesGcAdapter implements GcTypeAdapter {
         continue;
       }
       try {
-        for (String path : unit.paths()) {
-          maven.collect(dead.repository(), path);
-        }
+        QuarkusTransaction.requiringNew()
+            .run(
+                () -> {
+                  for (String path : unit.paths()) {
+                    maven.collect(dead.repository(), path);
+                  }
+                });
         deleted.add(dead);
       } catch (RuntimeException failed) {
-        errors.add(dead.identity() + ": " + failed.getMessage());
+        errors.add(
+            dead.identity()
+                + ": "
+                + failed.getMessage()
+                + " — the coordinate was left whole, every file of it still a row");
       }
     }
     return new GcStrategy.Applied(deleted, withheld, errors);

@@ -1100,8 +1100,9 @@ one.
 
 **All six windows went to `P0D` on 2026-09-05**, from `P3D` the day before and `P30D`/`P90D` before
 that, and zero is a different kind of number than the two that preceded it: **retention IS the
-keep-set now.** An identity lives because something names it — a pin source, a belt, the maven pom
-closure — and not because somebody pulled it lately. The window was the last place where "in use"
+keep-set now.** An identity lives because something names it — a pin source, a belt, or on
+`maven-packages` the fact that it is a published release — and not because somebody pulled it
+lately. The window was the last place where "in use"
 was *inferred* from a timestamp, and a timestamp is the one input here nobody owns: a container
 running untouched for months pulls its sha on restart, and a library nothing has resolved this week
 is still what every build of its consumer needs. Age answered neither; the keep-classes answer both
@@ -1119,6 +1120,18 @@ removed is a window owed.
 retention: bytes pushed minutes ago must outlive the gap until their pin appears. See "A grace
 window" below.
 
+**That argument did not survive contact with `maven-packages`, and one night later.** At `01:58Z` on
+2026-09-05 the `P3D` window deleted 67 published `eu.wohlben.qits` maven coordinates and every gating
+build on the platform stopped resolving with `Could not find artifact … in qits-maven-network`. The
+pin coverage was not narrowed — the dependency source answered, with 114 pins across 96 repositories
+— it was simply never wide enough to be a floor: it names what **main's manifests directly
+reference**, and a build resolves branches, parent poms, transitive versions and every coordinate
+main pinned before its last bump. So `maven-packages` no longer age-collects published releases at
+all; its window governs superseded snapshot sets and nothing else. The reasoning is in
+`MavenPackagesGcAdapter`'s javadoc and in the section on that type below. The other five windows
+stand: an image, a tarball, a daemon binary, a docs site and an SBOM are each consumed by being
+fetched, which is the property a jar does not have.
+
 **The own engine is live over every configured type**, which is the first change to what dies on
 this platform. What each one condemns, in one line each — the sections below carry the reasoning:
 
@@ -1126,7 +1139,7 @@ this platform. What each one condemns, in one line each — the sections below c
 |---|---|---|---|---|
 | `oci-images` | `own`, `P0D` | a sha tag, or a manifest no tag and no tagged manifest reaches | the last 2 calver releases; a coordinate qits-platform-deployments pins; an image a repository's Dockerfile references; an image qits-configuration would configure; an image qits-workspaces or qits-projects would launch today; the tag literally named `latest`; the newest release per image | manifest closure over surviving tags and manifests |
 | `npm-packages` | `own`, `P0D` | a published version | the last 2 releases by semver; anything a dist-tag names; anything a repository's package.json still resolves to | `npm_version.tarball_blob_id` of survivors |
-| `maven-packages` | `own`, `P0D` | a **coordinate** — one version's whole file set | the last 2 release versions; anything a repository's pom still references; **anything a kept coordinate's own pom references, to a fixpoint** (the pom closure); the newest deployable set of every snapshot line | `maven_artifact.blob_id`, sized from the row |
+| `maven-packages` | `own`, `P0D` — **snapshots only** | a **coordinate** — one version's whole file set, and only ever a superseded timestamped snapshot set | **every published release, at any age and whatever the window says**; anything a repository's pom still references; the newest deployable set of every snapshot line; a path this layout cannot read | `maven_artifact.blob_id`, sized from the row |
 | `daemon-binaries` | `own`, `P0D` | a `daemon_binary` row | the last 2 versions; both rungs qits-ci names; a pinned digest's bytes | `daemon_binary.blob_id`, sized from the row |
 | `docs` | `own`, `P0D` | a published **version** of a site — never a file, because `docs_file` cascades | the last 2 versions of every site | `docs_file.blob_id` of surviving versions |
 | `sboms` | `own`, `P0D` | one stored document, `packageType/packageName@version` | the last 2 released documents of every package | `sbom_document.blob_id`, sized from the row |
@@ -1470,22 +1483,49 @@ lives or dies together:
 
 | Kept because | Spelled |
 |---|---|
-| it is one of the last two release versions | per `(groupId, artifactId)`, by **maven's own version order** (`MavenVersionOrder`) — `1.0.10` above `1.0.9`, which a lexical compare gets backwards |
-| a repository's pom on `main` names it | any `groupId:artifactId:version` `GET /maintenance/api/pins` names in the `maven` ecosystem — the identity spelling verbatim, so the lookup is an equality test |
-| a kept coordinate's own pom references it | **the pom closure** (`MavenPomClosure`, added 2026-09-05). Starting from what the keep-set already holds — the manifest pins, the release belt and the snapshot belt — each kept coordinate's `.pom` is read from the store, its `<parent>`, its `<dependencies>` and its `dependencyManagement` `<scope>import</scope>` entries are parsed, and every referenced coordinate **that exists here** joins the keep-set; then again, to a fixpoint. "Internal" needs no configuration: existing in this store IS the definition. `${project.version}` and its spellings resolve against the pom's own coordinates and any other `${…}` drops the reference — the platform's own poms spell internal versions literally by house rule. The rule sentence names the referrer (`reachable from kept pom eu.wohlben.qits:qits-registries:2026.903.85122 (dependency closure)`). This closed a measured gap: the `P3D` sweep of 2026-09-05 condemned `qits-blobstore`, `qits-registries` and `qits-userflows-parent` versions that pinned poms reference and no manifest names |
+| **it is a published release** | every release version, at any age and at any depth in the version order. See below — this replaced the belt of two on 2026-09-05 |
+| a repository's pom still references it | `groupId:artifactId:version` from `MaintenanceDependencyPins`, joined verbatim. Belt and braces for a release; the only non-structural keep a **snapshot** has |
 | a resolver would break without it | **the newest deployable set of every snapshot version line**: the newest timestamped set if the line has any, else the literal `-SNAPSHOT` set. `maven-metadata.xml` is computed from the surviving rows at read time, so deleting that one would point the document at a file the store no longer has — the single failure this type must not produce |
-| — | there is no fifth row. A resolve used to keep a coordinate alive for `P3D` — the **newest** `max(created_at, accessed_at)` across its files, one warm file keeping the set. At `P0D` it does not, and the closure above is what replaced it: the resolve happened because some pom names the version, and the pom is read directly now |
+| this layout cannot read its path | a row that is not `<group>/<artifact>/<version>/<file>` is its own identity under its own path spelling, so the adapter cannot say which coordinate it is half of. It is not collected |
+| — | there is no fifth keep. A resolve used to keep a coordinate alive — the **newest** `max(created_at, accessed_at)` across its files, one warm file keeping the set — and at `P0D` it keeps nothing at all. For a release that changes nothing, because the release rule answers first; for a **superseded snapshot set** it means the set goes on the run that finds it |
+
+**No published release is age-collected. Withdrawn 2026-09-05, after it broke the platform.** This
+type was priced like the other three own types: a belt of two releases per artifact, everything older
+surviving on access inside the window. At `01:58Z` on 2026-09-05, with the window at `P3D`, that rule
+deleted **67 published `eu.wohlben.qits` coordinates** in one run — every one of them under
+"superseded and unaccessed for longer than P3D" — and every gating build on the platform stopped
+resolving. The argument for withdrawing rather than retuning, in short:
+
+- **For a library, access was never consumption.** A jar is fetched once and answered out of a
+  hundred local `~/.m2` caches thereafter. Age on a maven row measures cache warmth, not need.
+- **A pin cannot be the floor.** `MaintenanceDependencyPins` names what main's manifests reference —
+  13 coordinates on the morning of the incident, against hundreds held that branches, parent poms and
+  unbumped consumers still resolve. And it is one service's reachability away from empty.
+- **The disk is not here.** Measured that morning: 29.4 GB of store, 28.8 GB of it images. The whole
+  hosted maven repository rounds to nothing beside that; the 67 coordinates freed a few megabytes.
+- **The registry is the artifact of record.** Nothing else holds these bytes and a release path is
+  immutable, so a collection here is not reclaimable space, it is the loss of a build input.
+
+`MavenPackagesGcAdapter.pinnedBy` answers the release keep, so no release ever reaches the belt or
+the window; `OwnArtifactsStrategy` is untouched and the other three own types keep their belt.
+`MavenPackagesGcStrategy.note()` carries the correction onto every report line, because the
+configuration echo beside it is the own engine's sentence and still describes the belt.
 
 **Where this is deliberately conservative.** `maven-repository-plan.md` §3.6 sketched "keep the
 newest N timestamped builds per snapshot version" and never settled N or priced the deletion, so no N
-is invented: the window decides, and the only structural keep beyond the release belt is the one a
-resolver would break without. The grace window gates the whole coordinate too — one young file
+is invented: the window decides for snapshots — and at `P0D` that is "on the next run" — with the
+only structural keep among them the one a resolver would break without. The grace window gates the whole coordinate too — one young file
 withholds every row of it, because deleting the mature rows and keeping the young one would produce
 exactly the half-version the identity model exists to prevent.
 
 Deletion goes through `MavenRegistryCollection` → `MavenRegistryService.collect`, one file at a time
-with the collector removing a whole coordinate's set. No tombstone: a collected release path is a
-coordinate the repository no longer serves at all, and a re-deploy there is a fresh deploy rather
+with the collector removing a whole coordinate's set — **inside one transaction per coordinate**.
+`collect` is `@Transactional` per *file*, so the loop used to commit path by path and a throw on the
+second file left the first deleted: the paths sort `.jar` before `.pom`, so what that leaves behind
+is a version whose pom answers 200 and whose jar answers 404. The coordinate is now removed whole or
+not at all, and a failure is reported against an identity that is still intact. No tombstone: a
+collected release path is a coordinate the repository no longer serves at all, and a re-deploy there
+is a fresh deploy rather
 than a mutation of a live one. `maven-proxy` was the cache beside it, sharing `maven_artifact`; the
 type-filter on this adapter outlives it for `npm-packages`' reason above.
 

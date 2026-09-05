@@ -149,14 +149,8 @@ public final class OwnArtifactsStrategy {
    * releases than the belt simply keeps all of them — the honest answer for a package that has
    * published once.
    *
-   * <p><b>Package-visible rather than private, for exactly one caller</b>: {@code
-   * MavenPackagesGcAdapter}'s pom closure starts from what the keep-set already holds, and the belt
-   * is half of that. Re-deriving "the newest two releases of every group" inside the adapter would
-   * be the same rule written twice, which is the failure mode this whole design refuses — and it
-   * would be the adapter carrying a keep-count, which the doctrine forbids outright. The engine
-   * still decides; the adapter only asks it what it decided.
    */
-  static Set<GcCandidate> lastReleasesPerGroup(
+  private static Set<GcCandidate> lastReleasesPerGroup(
       List<GcCandidate> candidates, GcTypeAdapter adapter) {
     Map<String, List<GcCandidate>> releasesByGroup = new LinkedHashMap<>();
     for (GcCandidate candidate : candidates) {
