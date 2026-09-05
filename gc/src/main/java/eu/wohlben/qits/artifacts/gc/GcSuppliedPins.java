@@ -15,22 +15,26 @@ import java.util.Optional;
  *
  * <p>Each member is the peer's response body <b>verbatim</b>: {@code deployments} is what {@code
  * GET /platform-deployments/api/pins} answered, {@code ciDaemon} is what {@code GET /ci/api/daemon}
- * answered, {@code dependencies} is what {@code GET /maintenance/api/pins} answered, and {@code
- * configuredImages} is what {@code GET /configuration/api/pins} answered. Verbatim rather than a
- * re-shaped keep-set, because they are then read by the very same parsers the HTTP readers use
- * ({@link CdHttpDeploymentPins#parse}, {@link CiHttpDaemonPins#parse}, {@link
- * MaintenanceHttpDependencyPins#parse}, {@link ConfigurationHttpImagePins#parse}); a caller-shaped
- * keep-set would be a second definition of the same document waiting to disagree with the first.
+ * answered, {@code dependencies} is what {@code GET /maintenance/api/pins} answered, {@code
+ * configuredImages} is what {@code GET /configuration/api/pins} answered, and {@code
+ * workspaceLaunches} / {@code projectLaunches} are what {@code GET /workspaces/api/pins} and {@code
+ * GET /projects/api/pins} answered. Verbatim rather than a re-shaped keep-set, because they are then
+ * read by the very same parsers the HTTP readers use ({@link CdHttpDeploymentPins#parse}, {@link
+ * CiHttpDaemonPins#parse}, {@link MaintenanceHttpDependencyPins#parse}, {@link
+ * ConfigurationHttpImagePins#parse}, {@link LaunchImagePins#parse}); a caller-shaped keep-set would
+ * be a second definition of the same document waiting to disagree with the first.
  *
  * <p><b>A missing member is not "nothing is pinned".</b> It is that source unanswered, and it fails
  * the run closed exactly as an unreachable service does: the plan reports itself non-executable and
  * a sweep aborts with nothing deleted. An empty {@code {"pins":[]}} is the opposite — a real answer
  * from a platform with nothing deployed — and it pins nothing, which is what it says.
  *
- * <p><b>The two members added on 2026-09-04 make an old orchestrator's body a refusal</b>, which is
- * why this half ships last: a caller sending only the first two supplies half a keep-set, and half a
- * keep-set condemns whatever the missing half protected. The rollout order is maintenance and
- * configuration, then the orchestrator, then this.
+ * <p><b>Every member added makes an older orchestrator's body a refusal</b>, which is why this half
+ * always ships last: a caller sending four of six supplies two thirds of a keep-set, and a partial
+ * keep-set condemns whatever the missing part protected. It happened on 2026-09-04 with {@code
+ * dependencies}/{@code configuredImages} and again on 2026-09-05 with the two launch members, and
+ * the rollout order is the same shape both times — the answering services, then the orchestrator,
+ * then this.
  *
  * @param deployments the deployer's pins document, or null when the caller sent none
  * @param ciDaemon qits-ci's daemon document, or null when the caller sent none
@@ -38,9 +42,16 @@ import java.util.Optional;
  *     sent none
  * @param configuredImages qits-configuration's configured image document, or null when the caller
  *     sent none
+ * @param workspaceLaunches qits-workspaces' launch pins document, or null when the caller sent none
+ * @param projectLaunches qits-projects' launch pins document, or null when the caller sent none
  */
 public record GcSuppliedPins(
-    JsonNode deployments, JsonNode ciDaemon, JsonNode dependencies, JsonNode configuredImages) {
+    JsonNode deployments,
+    JsonNode ciDaemon,
+    JsonNode dependencies,
+    JsonNode configuredImages,
+    JsonNode workspaceLaunches,
+    JsonNode projectLaunches) {
 
   /** How the deployments source is named on a report when it was supplied rather than fetched. */
   public static final String CD_SOURCE = "supplied: qits-platform-deployments";
@@ -54,14 +65,22 @@ public record GcSuppliedPins(
   /** How the configured-image source is named on a report when it was supplied. */
   public static final String CONFIGURATION_SOURCE = "supplied: qits-configuration";
 
+  /** How the workspace launch source is named on a report when it was supplied. */
+  public static final String WORKSPACES_SOURCE = "supplied: qits-workspaces";
+
+  /** How the project launch source is named on a report when it was supplied. */
+  public static final String PROJECTS_SOURCE = "supplied: qits-projects";
+
   /**
    * The optional request body of {@code POST /gc/plan} and the two sweeps, read into this.
    *
    * <pre>
-   * {"pins": {"deployments":      &lt;verbatim body of GET /platform-deployments/api/pins&gt;,
-   *           "ciDaemon":         &lt;verbatim body of GET /ci/api/daemon&gt;,
-   *           "dependencies":     &lt;verbatim body of GET /maintenance/api/pins&gt;,
-   *           "configuredImages": &lt;verbatim body of GET /configuration/api/pins&gt;}}
+   * {"pins": {"deployments":       &lt;verbatim body of GET /platform-deployments/api/pins&gt;,
+   *           "ciDaemon":          &lt;verbatim body of GET /ci/api/daemon&gt;,
+   *           "dependencies":      &lt;verbatim body of GET /maintenance/api/pins&gt;,
+   *           "configuredImages":  &lt;verbatim body of GET /configuration/api/pins&gt;,
+   *           "workspaceLaunches": &lt;verbatim body of GET /workspaces/api/pins&gt;,
+   *           "projectLaunches":   &lt;verbatim body of GET /projects/api/pins&gt;}}
    * </pre>
    *
    * <p>An envelope with one member rather than the four documents at the top level, so a later run
@@ -89,15 +108,17 @@ public record GcSuppliedPins(
     }
     if (!pins.isObject()) {
       throw new IllegalArgumentException(
-          "'pins' must be an object holding 'deployments', 'ciDaemon', 'dependencies' and"
-              + " 'configuredImages'");
+          "'pins' must be an object holding 'deployments', 'ciDaemon', 'dependencies',"
+              + " 'configuredImages', 'workspaceLaunches' and 'projectLaunches'");
     }
     return Optional.of(
         new GcSuppliedPins(
             pins.get("deployments"),
             pins.get("ciDaemon"),
             pins.get("dependencies"),
-            pins.get("configuredImages")));
+            pins.get("configuredImages"),
+            pins.get("workspaceLaunches"),
+            pins.get("projectLaunches")));
   }
 
   /**
@@ -136,6 +157,30 @@ public record GcSuppliedPins(
   public List<ConfigurationImagePins.ImagePin> configuredImagePins() {
     return ConfigurationHttpImagePins.parse(
         require(configuredImages, "configuredImages"), "the supplied document");
+  }
+
+  /**
+   * The images qits-workspaces would launch today, read from the supplied document.
+   *
+   * @throws IllegalStateException no document was supplied, or its shape cannot be read
+   */
+  public List<LaunchImagePins.LaunchPin> workspaceLaunchPins() {
+    return LaunchImagePins.parse(
+        require(workspaceLaunches, "workspaceLaunches"),
+        WorkspacesHttpLaunchPins.SERVICE,
+        "the supplied document");
+  }
+
+  /**
+   * The images qits-projects would launch today, read from the supplied document.
+   *
+   * @throws IllegalStateException no document was supplied, or its shape cannot be read
+   */
+  public List<LaunchImagePins.LaunchPin> projectLaunchPins() {
+    return LaunchImagePins.parse(
+        require(projectLaunches, "projectLaunches"),
+        ProjectsHttpLaunchPins.SERVICE,
+        "the supplied document");
   }
 
   private static JsonNode require(JsonNode document, String member) {

@@ -352,9 +352,11 @@ class GcSweepExecutorTest extends GcFixture {
     assertTrue(report.aborted().contains("qits-ci"), report.aborted());
     assertTrue(report.aborted().contains("qits-platform-maintenance"), report.aborted());
     assertTrue(report.aborted().contains("qits-configuration"), report.aborted());
+    assertTrue(report.aborted().contains("qits-workspaces"), report.aborted());
+    assertTrue(report.aborted().contains("qits-projects"), report.aborted());
     assertEquals(List.of(), report.deleted());
     assertEquals(0, report.sweep().blobsUnlinked());
-    assertEquals(4, report.pins().size(), "an aborted receipt still says how it read its pins");
+    assertEquals(6, report.pins().size(), "an aborted receipt still says how it read its pins");
     assertTrue(
         report.untouchable().reason().contains("not computed"),
         "no census was taken, so the pool is uncomputed rather than empty");

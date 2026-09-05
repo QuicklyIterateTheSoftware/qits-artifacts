@@ -21,8 +21,8 @@ import org.junit.jupiter.api.Test;
  * indistinguishable from a broken one.
  *
  * <p>Refusing is the deployed behaviour under a broken dependency, not a test artefact: every type
- * on an engine reads live pins, this repository has none of the four pin peers, and the suite points
- * all four base urls at a closed port. Fail-closed on the wire is worth an assertion of its own — a
+ * on an engine reads live pins, this repository has none of the six pin peers, and the suite points
+ * all six base urls at a closed port. Fail-closed on the wire is worth an assertion of its own — a
  * plan that answered with an empty keep-set would condemn every sha tag on the platform.
  *
  * <p>The execute route exists now — {@code POST /gc/sweep}, landed after the user reviewed the
@@ -127,7 +127,7 @@ class GcPlanControllerTest {
         .body("configuration.find { it.type == 'ci-videos' }.strategy", is("excluded"))
         .body("configuration.find { it.type == 'ci-videos' }.window", nullValue())
         .body("executable", is(false))
-        .body("pinFailures", hasSize(4))
+        .body("pinFailures", hasSize(6))
         .body(
             "types.find { it.type == 'oci-images' }.error",
             org.hamcrest.Matchers.containsString("live pins unavailable"));
@@ -191,14 +191,16 @@ class GcPlanControllerTest {
         .body(
             "summary.types.find { it.startsWith('ci-videos') }",
             org.hamcrest.Matchers.containsString("excluded by configuration"))
-        .body("pins", hasSize(4))
+        .body("pins", hasSize(6))
         .body(
             "pins.source",
             org.hamcrest.Matchers.containsInAnyOrder(
                 "qits-platform-deployments",
                 "qits-ci",
                 "qits-platform-maintenance",
-                "qits-configuration"))
+                "qits-configuration",
+                "qits-workspaces",
+                "qits-projects"))
         .body("pins.find { it.source == 'qits-platform-deployments' }.url", is("http://localhost:1/platform-deployments/api/pins"))
         .body("pins.find { it.source == 'qits-platform-deployments' }.answered", is(false))
         .body("pins.find { it.source == 'qits-ci' }.url", is("http://localhost:1/ci/api/daemon"))
@@ -208,7 +210,13 @@ class GcPlanControllerTest {
             is("http://localhost:1/maintenance/api/pins"))
         .body(
             "pins.find { it.source == 'qits-configuration' }.url",
-            is("http://localhost:1/configuration/api/pins"));
+            is("http://localhost:1/configuration/api/pins"))
+        .body(
+            "pins.find { it.source == 'qits-workspaces' }.url",
+            is("http://localhost:1/workspaces/api/pins"))
+        .body(
+            "pins.find { it.source == 'qits-projects' }.url",
+            is("http://localhost:1/projects/api/pins"));
   }
 
   @Test
@@ -280,7 +288,7 @@ class GcPlanControllerTest {
         .body("generatedAt", notNullValue())
         .body("graceWindow", is("P2D"))
         .body("executable", is(false))
-        .body("pinFailures", hasSize(4))
+        .body("pinFailures", hasSize(6))
         .body("repositories.size()", greaterThanOrEqualTo(1))
         .body("repositories.blobsSweepable", everyItem(is(0)))
         .body("repositories.reclaimableBytes", everyItem(is(0)))
@@ -316,7 +324,7 @@ class GcPlanControllerTest {
         .body("dryRun", is(true))
         .body("executable", is(false))
         .body("graceWindow", is("P2D"))
-        .body("pins", hasSize(4))
+        .body("pins", hasSize(6))
         .body("configuration.type", notNullValue())
         .body("dead", hasSize(0))
         .body("sweep.blobCount", is(0))
@@ -342,7 +350,9 @@ class GcPlanControllerTest {
         .body("aborted", org.hamcrest.Matchers.containsString("qits-platform-deployments"))
         .body("aborted", org.hamcrest.Matchers.containsString("qits-ci"))
         .body("aborted", org.hamcrest.Matchers.containsString("qits-configuration"))
-        .body("pins", hasSize(4))
+        .body("aborted", org.hamcrest.Matchers.containsString("qits-workspaces"))
+        .body("aborted", org.hamcrest.Matchers.containsString("qits-projects"))
+        .body("pins", hasSize(6))
         .body("deleted", hasSize(0))
         .body("withheldByGraceWindow", hasSize(0))
         .body("sweep.blobsUnlinked", is(0))
@@ -402,14 +412,45 @@ class GcPlanControllerTest {
                 "application":"qits-workspaces","key":"env.QITS_WORKSPACE_IMAGE_VERSION"}]}
       """;
 
+  /**
+   * qits-workspaces' answer, verbatim as {@code GET /workspaces/api/pins} spells it.
+   *
+   * <p>The workspace version here is deliberately OLDER than {@link #CONFIGURED_IMAGES}': that gap
+   * is what the effective sources exist for, and a fixture agreeing with itself would prove nothing
+   * about why there are six sources rather than four.
+   */
+  private static final String WORKSPACE_LAUNCHES =
+      """
+      {"generatedAt":"2026-09-05T06:00:00Z",
+       "pins":[{"image":"qits/workspace","version":"2026.903.120000","launches":"workspace"}]}
+      """;
+
+  /** qits-projects' answer, verbatim as {@code GET /projects/api/pins} spells it. */
+  private static final String PROJECT_LAUNCHES =
+      """
+      {"generatedAt":"2026-09-05T06:00:00Z",
+       "pins":[{"image":"qits/project-agent","version":"2026.903.090000","launches":"agent"}]}
+      """;
+
   /** The whole envelope the orchestrator sends. */
   private static String body() {
-    return body(DEPLOYMENTS, CI_DAEMON, DEPENDENCIES, CONFIGURED_IMAGES);
+    return body(
+        DEPLOYMENTS,
+        CI_DAEMON,
+        DEPENDENCIES,
+        CONFIGURED_IMAGES,
+        WORKSPACE_LAUNCHES,
+        PROJECT_LAUNCHES);
   }
 
   /** The same, with any member left out to make that source unanswered. */
   private static String body(
-      String deployments, String ciDaemon, String dependencies, String configuredImages) {
+      String deployments,
+      String ciDaemon,
+      String dependencies,
+      String configuredImages,
+      String workspaceLaunches,
+      String projectLaunches) {
     java.util.List<String> members = new java.util.ArrayList<>();
     if (deployments != null) {
       members.add("\"deployments\":" + deployments);
@@ -422,6 +463,12 @@ class GcPlanControllerTest {
     }
     if (configuredImages != null) {
       members.add("\"configuredImages\":" + configuredImages);
+    }
+    if (workspaceLaunches != null) {
+      members.add("\"workspaceLaunches\":" + workspaceLaunches);
+    }
+    if (projectLaunches != null) {
+      members.add("\"projectLaunches\":" + projectLaunches);
     }
     return "{\"pins\":{" + String.join(",", members) + "}}";
   }
@@ -443,14 +490,16 @@ class GcPlanControllerTest {
         .body("dryRun", is(true))
         .body("executable", is(true))
         .body("pinFailures", hasSize(0))
-        .body("pins", hasSize(4))
+        .body("pins", hasSize(6))
         .body(
             "pins.source",
             org.hamcrest.Matchers.containsInAnyOrder(
                 "supplied: qits-platform-deployments",
                 "supplied: qits-ci",
                 "supplied: qits-platform-maintenance",
-                "supplied: qits-configuration"))
+                "supplied: qits-configuration",
+                "supplied: qits-workspaces",
+                "supplied: qits-projects"))
         .body("pins.url", everyItem(is("")))
         .body(
             "pins.find { it.source == 'supplied: qits-platform-deployments' }.keeps",
@@ -465,6 +514,14 @@ class GcPlanControllerTest {
         .body(
             "pins.find { it.source == 'supplied: qits-configuration' }.keeps",
             org.hamcrest.Matchers.contains("qits/workspace:2026.904.160522"))
+        // The EFFECTIVE coordinate, and it is a different version of the same image — which is the
+        // whole reason the two sources are not one. Both survive the run.
+        .body(
+            "pins.find { it.source == 'supplied: qits-workspaces' }.keeps",
+            org.hamcrest.Matchers.contains("qits/workspace:2026.903.120000"))
+        .body(
+            "pins.find { it.source == 'supplied: qits-projects' }.keeps",
+            org.hamcrest.Matchers.contains("qits/project-agent:2026.903.090000"))
         // With both sources answered, the pin-dependent types plan instead of refusing.
         .body("types.find { it.type == 'oci-images' }.error", nullValue());
   }
@@ -476,7 +533,10 @@ class GcPlanControllerTest {
     // protected — so the plan is not executable and the sweep deletes nothing.
     given()
         .contentType(io.restassured.http.ContentType.JSON)
-        .body(body(DEPLOYMENTS, null, DEPENDENCIES, CONFIGURED_IMAGES))
+        .body(
+            body(
+                DEPLOYMENTS, null, DEPENDENCIES, CONFIGURED_IMAGES, WORKSPACE_LAUNCHES,
+                PROJECT_LAUNCHES))
         .when()
         .post("/artifacts/api/gc/plan")
         .then()
@@ -488,29 +548,57 @@ class GcPlanControllerTest {
         .body("pins.find { it.source == 'supplied: qits-platform-deployments' }.answered", is(true))
         .body("pins.find { it.source == 'supplied: qits-platform-maintenance' }.answered", is(true));
 
-    // The two members added on 2026-09-04, each left out on its own: an orchestrator that has not
-    // been upgraded sends the old two-member envelope, and that has to refuse rather than plan
-    // against half a keep-set. This is why this service ships LAST in the rollout.
+    // The four members added since 2026-09-04, left out together: an orchestrator that has not been
+    // upgraded sends an older envelope, and that has to refuse rather than plan against a partial
+    // keep-set. This is why this service ships LAST in every one of those rollouts.
     given()
         .contentType(io.restassured.http.ContentType.JSON)
-        .body(body(DEPLOYMENTS, CI_DAEMON, null, null))
+        .body(body(DEPLOYMENTS, CI_DAEMON, null, null, null, null))
         .when()
         .post("/artifacts/api/gc/plan")
         .then()
         .statusCode(200)
         .body("executable", is(false))
-        .body("pinFailures", hasSize(2))
+        .body("pinFailures", hasSize(4))
         .body(
             "pinFailures",
             org.hamcrest.Matchers.hasItem(org.hamcrest.Matchers.containsString("dependencies")))
         .body(
             "pinFailures",
             org.hamcrest.Matchers.hasItem(
-                org.hamcrest.Matchers.containsString("configuredImages")));
+                org.hamcrest.Matchers.containsString("configuredImages")))
+        .body(
+            "pinFailures",
+            org.hamcrest.Matchers.hasItem(
+                org.hamcrest.Matchers.containsString("workspaceLaunches")))
+        .body(
+            "pinFailures",
+            org.hamcrest.Matchers.hasItem(
+                org.hamcrest.Matchers.containsString("projectLaunches")));
+
+    // …and one of the launch members alone, because that is the state an orchestrator mid-rollout
+    // is in: everything else answered and the effective versions missing, which is exactly the
+    // keep-set a run must not proceed without.
+    given()
+        .contentType(io.restassured.http.ContentType.JSON)
+        .body(
+            body(DEPLOYMENTS, CI_DAEMON, DEPENDENCIES, CONFIGURED_IMAGES, null, PROJECT_LAUNCHES))
+        .when()
+        .post("/artifacts/api/gc/plan")
+        .then()
+        .statusCode(200)
+        .body("executable", is(false))
+        .body("pinFailures", hasSize(1))
+        .body("pinFailures[0]", org.hamcrest.Matchers.containsString("workspaceLaunches"))
+        .body("pins.find { it.source == 'supplied: qits-workspaces' }.answered", is(false))
+        .body("pins.find { it.source == 'supplied: qits-projects' }.answered", is(true));
 
     given()
         .contentType(io.restassured.http.ContentType.JSON)
-        .body(body(DEPLOYMENTS, null, DEPENDENCIES, CONFIGURED_IMAGES))
+        .body(
+            body(
+                DEPLOYMENTS, null, DEPENDENCIES, CONFIGURED_IMAGES, WORKSPACE_LAUNCHES,
+                PROJECT_LAUNCHES))
         .when()
         .post("/artifacts/api/gc/sweep")
         .then()
@@ -565,13 +653,16 @@ class GcPlanControllerTest {
         .then()
         .statusCode(200)
         .body("executable", is(false))
-        .body("pinFailures", hasSize(4))
+        .body("pinFailures", hasSize(6))
         .body(
             "pins.find { it.source == 'qits-platform-deployments' }.url",
             is("http://localhost:1/platform-deployments/api/pins"))
         .body(
             "pins.find { it.source == 'qits-configuration' }.url",
-            is("http://localhost:1/configuration/api/pins"));
+            is("http://localhost:1/configuration/api/pins"))
+        .body(
+            "pins.find { it.source == 'qits-workspaces' }.url",
+            is("http://localhost:1/workspaces/api/pins"));
 
     // An empty JSON object is the SPA's scoped sweep, which posts {} rather than nothing.
     given()

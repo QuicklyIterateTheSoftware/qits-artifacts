@@ -340,6 +340,53 @@ class OciImagesGcAdapterTest extends GcFixture {
   }
 
   @Test
+  void theImageQitsWorkspacesWouldLaunchTodayIsKeptAlthoughItIsNotTheConfiguredOne() throws Exception {
+    // The residual the configured-image pin left, and the case is the gap itself: qits-configuration
+    // has already moved to 2026.905.100000, but qits-workspaces has not been redeployed and is still
+    // starting containers from 2026.904.160522. Under a P3D window the coordinate every workspace
+    // start actually pulls is a third-newest cold release named by nothing else on the platform.
+    repository();
+    String config = config();
+    tag("workspace", "2026.904.160522", image("workspace", config, 921), daysAgo(60));
+    tag("workspace", "2026.904.170000", image("workspace", config, 922), daysAgo(50));
+    tag("workspace", "2026.905.100000", image("workspace", config, 923), daysAgo(40));
+
+    GcStrategy.Plan plan =
+        strategy.plan(census.take(), launchingFromWorkspaces("qits/workspace:2026.904.160522"));
+
+    assertEquals(
+        GcPins.BY_WORKSPACE_LAUNCH, ruleFor(plan.kept(), "workspace:2026.904.160522"));
+    assertEquals(List.of(), plan.dead());
+    assertEquals(
+        List.of("workspace:2026.904.160522"),
+        identities(strategy.plan(census.take(), GcPins.none()).dead()),
+        "so the keep above is the effective pin and nothing in the fixture");
+  }
+
+  @Test
+  void theImageQitsProjectsWouldLaunchTodayIsKeptUnderItsOwnSentence() throws Exception {
+    // The twin, and the sentence is its own because the two services launch overlapping images: a
+    // reviewer deciding whether an agent image may go needs to read WHICH service is still pulling
+    // it, not that some launch answer somewhere named it.
+    repository();
+    String config = config();
+    tag("project-agent", "2026.903.090000", image("project-agent", config, 931), daysAgo(70));
+    tag("project-agent", "2026.904.160152", image("project-agent", config, 932), daysAgo(55));
+    tag("project-agent", "2026.905.110000", image("project-agent", config, 933), daysAgo(45));
+
+    GcStrategy.Plan plan =
+        strategy.plan(census.take(), launchingFromProjects("qits/project-agent:2026.903.090000"));
+
+    assertEquals(
+        GcPins.BY_PROJECT_LAUNCH, ruleFor(plan.kept(), "project-agent:2026.903.090000"));
+    assertEquals(List.of(), plan.dead());
+    assertEquals(
+        List.of("project-agent:2026.903.090000"),
+        identities(strategy.plan(census.take(), GcPins.none()).dead()),
+        "so the keep above is the effective pin and nothing in the fixture");
+  }
+
+  @Test
   void aTagNamedLatestIsAlwaysKeptHoweverColdAndHoweverManyReleasesSitAboveIt() throws Exception {
     // The structural belt of 2026-09-04. A step image is named `qits/build-images/*:latest` in every
     // CI recipe, so it is pulled constantly — and the host-side keep-prefix suppresses exactly those
@@ -601,6 +648,23 @@ class OciImagesGcAdapterTest extends GcFixture {
     return new GcPins(
         Map.of(), "", Set.of(), Set.of(), Set.of(), Set.of(), Set.of(), Set.of(coordinates),
         List.of());
+  }
+
+  /**
+   * The same, for the coordinates qits-workspaces would pull TODAY — with everything else empty,
+   * including the configured set, so a keep can only be the effective pin.
+   */
+  private static GcPins launchingFromWorkspaces(String... coordinates) {
+    return new GcPins(
+        Map.of(), "", Set.of(), Set.of(), Set.of(), Set.of(), Set.of(), Set.of(),
+        Set.of(coordinates), Set.of(), List.of());
+  }
+
+  /** The same, for the coordinates qits-projects would pull today. */
+  private static GcPins launchingFromProjects(String... coordinates) {
+    return new GcPins(
+        Map.of(), "", Set.of(), Set.of(), Set.of(), Set.of(), Set.of(), Set.of(), Set.of(),
+        Set.of(coordinates), List.of());
   }
 
   private void repository() {

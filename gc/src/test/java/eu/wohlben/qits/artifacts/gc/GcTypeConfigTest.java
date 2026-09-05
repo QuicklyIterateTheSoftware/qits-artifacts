@@ -58,7 +58,7 @@ class GcTypeConfigTest extends GcFixture {
   void everyRepositoryTypeIsConfiguredAndTheShippedValuesAreTheSettlements() {
     // The settlement's own numbers, as revised on 2026-09-04: P3D for all six own types, and the two
     // CI types excluded and honest about it. The old P30D/P90D split priced two different guesses at
-    // how long consumption takes; consumption is named outright now — four pin sources and the
+    // how long consumption takes; consumption is named outright now — six pin sources and the
     // structural belts — so the window is what bounds the store rather than what carries the safety.
     // Looping over the REGISTERED types rather than listing cases is what makes a newly contributed
     // profile fail here — a type with no policy is a decision nobody took, not a default.
@@ -245,8 +245,8 @@ class GcTypeConfigTest extends GcFixture {
   @Test
   void everyPinReadingTypeRefusesToPlanWhileThePinSourcesCannotAnswer() throws Exception {
     // The other side of the same wiring, on the report a deployment actually gets when one of the
-    // four pin peers is down: every type on an engine reads pins, so every one of them is refused
-    // rather than planned against "nothing is pinned". This suite's four pin urls are closed ports,
+    // six pin peers is down: every type on an engine reads pins, so every one of them is refused
+    // rather than planned against "nothing is pinned". This suite's six pin urls are closed ports,
     // which is that state exactly.
     seed();
 

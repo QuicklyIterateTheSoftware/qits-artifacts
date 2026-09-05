@@ -136,7 +136,7 @@ class AdminWriteGuardTest {
     // — while the sweep it feeds stayed open to that same token. This asserts the pair: the machine
     // reads the plan, and it reads it with a body of supplied pins, which is the whole call.
     //
-    // FOUR members since 2026-09-04, and all four are needed for `executable`: a member left out is
+    // SIX members since 2026-09-05, and all six are needed for `executable`: a member left out is
     // that source unanswered. Empty answers throughout, because what is on trial here is the role
     // rather than the keep-set.
     given()
@@ -148,7 +148,9 @@ class AdminWriteGuardTest {
                      "ciDaemon":{"daemonName":"qits-ci-daemon","daemonVersion":"",
                                  "previousDaemonVersion":"","source":"none"},
                      "dependencies":{"repositories":[],"pins":[]},
-                     "configuredImages":{"pins":[]}}}
+                     "configuredImages":{"pins":[]},
+                     "workspaceLaunches":{"pins":[]},
+                     "projectLaunches":{"pins":[]}}}
             """)
         .when()
         .post("/artifacts/api/gc/plan")

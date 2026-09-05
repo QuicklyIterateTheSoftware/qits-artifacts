@@ -26,10 +26,10 @@ import org.junit.jupiter.api.Test;
  * that source <b>unanswered</b>, which fails the run closed exactly as an unreachable service does,
  * and a document this cannot read is refused rather than read as "nothing is pinned".
  *
- * <p><b>Four members since 2026-09-04</b>, and the two new ones behave identically to the two that
- * were there: same verbatim documents, same shared parsers, same fail-closed rule for a member left
- * out. That last property is what makes the rollout order load-bearing — an orchestrator still
- * sending two members supplies half a keep-set — so this service ships last.
+ * <p><b>Six members since 2026-09-05</b>, and every one added behaves identically to the two that
+ * were there first: same verbatim documents, same shared parsers, same fail-closed rule for a member
+ * left out. That last property is what makes the rollout order load-bearing — an orchestrator still
+ * sending four members supplies two thirds of a keep-set — so this service ships last.
  */
 class GcSuppliedPinsTest {
 
@@ -72,6 +72,23 @@ class GcSuppliedPinsTest {
        ]}
       """;
 
+  private static final String WORKSPACE_LAUNCHES =
+      """
+      {"generatedAt":"2026-09-05T06:00:00Z",
+       "pins":[
+         {"image":"qits/workspace","version":"2026.903.120000","launches":"workspace"},
+         {"image":"qits/workspace-editor","version":"2026.904.100239","launches":"editor"}
+       ]}
+      """;
+
+  private static final String PROJECT_LAUNCHES =
+      """
+      {"generatedAt":"2026-09-05T06:00:00Z",
+       "pins":[
+         {"image":"qits/project-agent","version":"2026.903.090000","launches":"agent"}
+       ]}
+      """;
+
   @Test
   void suppliedDocumentsProduceTheSameKeepsAsFetchedOnes() throws IOException {
     // The equivalence the orchestrator's whole design rests on: one document, two ways in, one
@@ -80,9 +97,17 @@ class GcSuppliedPinsTest {
     try (StubPinService cd = StubPinService.serving("/pins", DEPLOYMENTS);
         StubPinService ci = StubPinService.serving("/daemon", CI_DAEMON);
         StubPinService maintenance = StubPinService.serving("/pins", DEPENDENCIES);
-        StubPinService configuration = StubPinService.serving("/pins", CONFIGURED_IMAGES)) {
+        StubPinService configuration = StubPinService.serving("/pins", CONFIGURED_IMAGES);
+        StubPinService workspaces = StubPinService.serving("/pins", WORKSPACE_LAUNCHES);
+        StubPinService projects = StubPinService.serving("/pins", PROJECT_LAUNCHES)) {
       GcPins fetched =
-          httpSources(cd.baseUrl(), ci.baseUrl(), maintenance.baseUrl(), configuration.baseUrl())
+          httpSources(
+                  cd.baseUrl(),
+                  ci.baseUrl(),
+                  maintenance.baseUrl(),
+                  configuration.baseUrl(),
+                  workspaces.baseUrl(),
+                  projects.baseUrl())
               .fetch();
       GcPins supplied = new GcPinSources().fetch(documents());
 
@@ -95,6 +120,8 @@ class GcSuppliedPinsTest {
       assertEquals(fetched.npmDependencies(), supplied.npmDependencies());
       assertEquals(fetched.manifestImages(), supplied.manifestImages());
       assertEquals(fetched.configuredImages(), supplied.configuredImages());
+      assertEquals(fetched.workspaceLaunchImages(), supplied.workspaceLaunchImages());
+      assertEquals(fetched.projectLaunchImages(), supplied.projectLaunchImages());
       assertEquals(GcPins.BY_CD, supplied.pinsImageTag("qits-artifacts", "bbbb"));
       assertEquals(GcPins.BY_CI, supplied.pinsDaemonVersion("qits-ci-daemon", "2026.804.9"));
       assertEquals(
@@ -103,6 +130,14 @@ class GcSuppliedPinsTest {
       assertEquals(
           GcPins.BY_CONFIGURATION,
           supplied.pinsConfiguredImage("qits/workspace", "2026.904.160522"));
+      // The effective version, which is NOT the configured one — the gap these two members exist
+      // to cover, and it survives the trip through the request body unchanged.
+      assertEquals(
+          GcPins.BY_WORKSPACE_LAUNCH,
+          supplied.pinsWorkspaceLaunchImage("qits/workspace", "2026.903.120000"));
+      assertEquals(
+          GcPins.BY_PROJECT_LAUNCH,
+          supplied.pinsProjectLaunchImage("qits/project-agent", "2026.903.090000"));
       assertEquals(
           keepsOf(fetched, "qits-platform-deployments"),
           keepsOf(supplied, GcSuppliedPins.CD_SOURCE),
@@ -114,6 +149,11 @@ class GcSuppliedPinsTest {
       assertEquals(
           keepsOf(fetched, "qits-configuration"),
           keepsOf(supplied, GcSuppliedPins.CONFIGURATION_SOURCE));
+      assertEquals(
+          keepsOf(fetched, "qits-workspaces"),
+          keepsOf(supplied, GcSuppliedPins.WORKSPACES_SOURCE));
+      assertEquals(
+          keepsOf(fetched, "qits-projects"), keepsOf(supplied, GcSuppliedPins.PROJECTS_SOURCE));
     }
   }
 
@@ -131,6 +171,8 @@ class GcSuppliedPinsTest {
     assertEquals("", source(pins, GcSuppliedPins.CI_SOURCE).url());
     assertEquals("", source(pins, GcSuppliedPins.MAINTENANCE_SOURCE).url());
     assertEquals("", source(pins, GcSuppliedPins.CONFIGURATION_SOURCE).url());
+    assertEquals("", source(pins, GcSuppliedPins.WORKSPACES_SOURCE).url());
+    assertEquals("", source(pins, GcSuppliedPins.PROJECTS_SOURCE).url());
   }
 
   @Test
@@ -138,7 +180,16 @@ class GcSuppliedPinsTest {
     // The fail-closed rule, unchanged: a caller that supplied one document supplied half a keep-set,
     // and half a keep-set condemns whatever the missing half protected. The source that DID arrive
     // still answers, so a report says exactly what was missing.
-    GcPins noCi = new GcPinSources().fetch(documents(DEPLOYMENTS, null, DEPENDENCIES, CONFIGURED_IMAGES));
+    GcPins noCi =
+        new GcPinSources()
+            .fetch(
+                documents(
+                    DEPLOYMENTS,
+                    null,
+                    DEPENDENCIES,
+                    CONFIGURED_IMAGES,
+                    WORKSPACE_LAUNCHES,
+                    PROJECT_LAUNCHES));
 
     assertFalse(noCi.complete());
     assertEquals(1, noCi.failures().size());
@@ -150,7 +201,11 @@ class GcSuppliedPinsTest {
     // The two members added on 2026-09-04, each unanswered on its own: an orchestrator that has not
     // been upgraded sends neither, and the run must refuse rather than plan against half a keep-set.
     GcPins noDependencies =
-        new GcPinSources().fetch(documents(DEPLOYMENTS, CI_DAEMON, null, CONFIGURED_IMAGES));
+        new GcPinSources()
+            .fetch(
+                documents(
+                    DEPLOYMENTS, CI_DAEMON, null, CONFIGURED_IMAGES, WORKSPACE_LAUNCHES,
+                    PROJECT_LAUNCHES));
     assertFalse(noDependencies.complete());
     assertTrue(
         noDependencies.whyIncomplete().contains("dependencies"), noDependencies.whyIncomplete());
@@ -162,13 +217,54 @@ class GcSuppliedPinsTest {
         noDependencies.mavenDependencies(),
         "and nothing half-folded is left behind for a report to claim");
 
-    GcPins noImages = new GcPinSources().fetch(documents(DEPLOYMENTS, CI_DAEMON, DEPENDENCIES, null));
+    GcPins noImages =
+        new GcPinSources()
+            .fetch(
+                documents(
+                    DEPLOYMENTS, CI_DAEMON, DEPENDENCIES, null, WORKSPACE_LAUNCHES,
+                    PROJECT_LAUNCHES));
     assertFalse(noImages.complete());
     assertTrue(noImages.whyIncomplete().contains("configuredImages"), noImages.whyIncomplete());
 
-    GcPins none = new GcPinSources().fetch(new GcSuppliedPins(null, null, null, null));
+    // The two members of 2026-09-05, each unanswered on its own. This is the case an orchestrator
+    // that has not been upgraded lands in, and it is the reason this service ships last: it sends
+    // four members, so a run against it refuses rather than planning against a keep-set with the
+    // effective versions missing.
+    GcPins noWorkspaceLaunches =
+        new GcPinSources()
+            .fetch(
+                documents(
+                    DEPLOYMENTS, CI_DAEMON, DEPENDENCIES, CONFIGURED_IMAGES, null,
+                    PROJECT_LAUNCHES));
+    assertFalse(noWorkspaceLaunches.complete());
+    assertTrue(
+        noWorkspaceLaunches.whyIncomplete().contains("workspaceLaunches"),
+        noWorkspaceLaunches.whyIncomplete());
+    assertTrue(
+        noWorkspaceLaunches.whyIncomplete().contains(GcSuppliedPins.WORKSPACES_SOURCE),
+        noWorkspaceLaunches.whyIncomplete());
+    assertEquals(
+        Set.of(),
+        noWorkspaceLaunches.workspaceLaunchImages(),
+        "and nothing half-folded is left behind for a report to claim");
+    assertFalse(
+        noWorkspaceLaunches.projectLaunchImages().isEmpty(),
+        "while the twin that DID answer keeps its keeps — one outage, named once");
+
+    GcPins noProjectLaunches =
+        new GcPinSources()
+            .fetch(
+                documents(
+                    DEPLOYMENTS, CI_DAEMON, DEPENDENCIES, CONFIGURED_IMAGES, WORKSPACE_LAUNCHES,
+                    null));
+    assertFalse(noProjectLaunches.complete());
+    assertTrue(
+        noProjectLaunches.whyIncomplete().contains("projectLaunches"),
+        noProjectLaunches.whyIncomplete());
+
+    GcPins none = new GcPinSources().fetch(new GcSuppliedPins(null, null, null, null, null, null));
     assertFalse(none.complete());
-    assertEquals(4, none.failures().size(), "every source is asked, so no outage hides");
+    assertEquals(6, none.failures().size(), "every source is asked, so no outage hides");
   }
 
   @Test
@@ -178,7 +274,14 @@ class GcSuppliedPinsTest {
     // old enough is a candidate. The orchestrator has to know these two states read differently.
     GcPins pins =
         new GcPinSources()
-            .fetch(documents("{\"pins\":[]}", CI_DAEMON, "{\"pins\":[]}", "{\"pins\":[]}"));
+            .fetch(
+                documents(
+                    "{\"pins\":[]}",
+                    CI_DAEMON,
+                    "{\"pins\":[]}",
+                    "{\"pins\":[]}",
+                    "{\"pins\":[]}",
+                    "{\"pins\":[]}"));
 
     assertTrue(pins.complete());
     assertEquals(0, source(pins, GcSuppliedPins.CD_SOURCE).pinCount());
@@ -188,6 +291,12 @@ class GcSuppliedPinsTest {
     assertEquals(Set.of(), pins.mavenDependencies());
     assertTrue(source(pins, GcSuppliedPins.CONFIGURATION_SOURCE).answered());
     assertEquals(Set.of(), pins.configuredImages());
+    // A launching service with no image version configured launches nothing pinnable, and that is
+    // an answer rather than an outage — the state a fresh install is in.
+    assertTrue(source(pins, GcSuppliedPins.WORKSPACES_SOURCE).answered());
+    assertEquals(Set.of(), pins.workspaceLaunchImages());
+    assertTrue(source(pins, GcSuppliedPins.PROJECTS_SOURCE).answered());
+    assertEquals(Set.of(), pins.projectLaunchImages());
   }
 
   @Test
@@ -196,7 +305,14 @@ class GcSuppliedPinsTest {
     // as an empty keep-set would condemn every sha tag on the platform.
     GcPins pins =
         new GcPinSources()
-            .fetch(documents("{\"deployments\":[]}", CI_DAEMON, DEPENDENCIES, CONFIGURED_IMAGES));
+            .fetch(
+                documents(
+                    "{\"deployments\":[]}",
+                    CI_DAEMON,
+                    DEPENDENCIES,
+                    CONFIGURED_IMAGES,
+                    WORKSPACE_LAUNCHES,
+                    PROJECT_LAUNCHES));
 
     assertFalse(pins.complete());
     assertTrue(pins.whyIncomplete().contains("'pins' array"), pins.whyIncomplete());
@@ -206,7 +322,14 @@ class GcSuppliedPinsTest {
     // and an ecosystem this store cannot file is a keep silently dropped.
     GcPins badDependencies =
         new GcPinSources()
-            .fetch(documents(DEPLOYMENTS, CI_DAEMON, "{\"repositories\":[]}", CONFIGURED_IMAGES));
+            .fetch(
+                documents(
+                    DEPLOYMENTS,
+                    CI_DAEMON,
+                    "{\"repositories\":[]}",
+                    CONFIGURED_IMAGES,
+                    WORKSPACE_LAUNCHES,
+                    PROJECT_LAUNCHES));
     assertFalse(badDependencies.complete());
     assertTrue(badDependencies.whyIncomplete().contains("'pins' array"), badDependencies.whyIncomplete());
 
@@ -217,7 +340,9 @@ class GcSuppliedPinsTest {
                     DEPLOYMENTS,
                     CI_DAEMON,
                     "{\"pins\":[{\"ecosystem\":\"gitlink\",\"name\":\"qits-ci\",\"version\":\"abc\"}]}",
-                    CONFIGURED_IMAGES));
+                    CONFIGURED_IMAGES,
+                    WORKSPACE_LAUNCHES,
+                    PROJECT_LAUNCHES));
     assertFalse(unknownEcosystem.complete());
     assertTrue(unknownEcosystem.whyIncomplete().contains("gitlink"), unknownEcosystem.whyIncomplete());
 
@@ -228,9 +353,30 @@ class GcSuppliedPinsTest {
                     DEPLOYMENTS,
                     CI_DAEMON,
                     DEPENDENCIES,
-                    "{\"pins\":[{\"image\":\"qits/workspace\"}]}"));
+                    "{\"pins\":[{\"image\":\"qits/workspace\"}]}",
+                    WORKSPACE_LAUNCHES,
+                    PROJECT_LAUNCHES));
     assertFalse(badImages.complete());
     assertTrue(badImages.whyIncomplete().contains("no image or no version"), badImages.whyIncomplete());
+
+    // And from the shared launch parse, with the SERVICE that answered in the message — which is
+    // the condition one parse for two sources is allowed under.
+    GcPins badLaunches =
+        new GcPinSources()
+            .fetch(
+                documents(
+                    DEPLOYMENTS,
+                    CI_DAEMON,
+                    DEPENDENCIES,
+                    CONFIGURED_IMAGES,
+                    WORKSPACE_LAUNCHES,
+                    "{\"pins\":[{\"image\":\"qits/project-agent\",\"launches\":\"agent\"}]}"));
+    assertFalse(badLaunches.complete());
+    assertTrue(
+        badLaunches.whyIncomplete().contains("qits-projects"), badLaunches.whyIncomplete());
+    assertTrue(
+        badLaunches.whyIncomplete().contains("no image or no version"),
+        badLaunches.whyIncomplete());
   }
 
   @Test
@@ -247,33 +393,50 @@ class GcSuppliedPinsTest {
                         + ",\"ciDaemon\":" + CI_DAEMON
                         + ",\"dependencies\":" + DEPENDENCIES
                         + ",\"configuredImages\":" + CONFIGURED_IMAGES
+                        + ",\"workspaceLaunches\":" + WORKSPACE_LAUNCHES
+                        + ",\"projectLaunches\":" + PROJECT_LAUNCHES
                         + "}}"))
             .orElseThrow();
     assertEquals(2, all.deploymentPins().size());
     assertEquals("qits-ci-daemon", all.daemonPin().daemonName());
     assertEquals(3, all.dependencyPins().size());
     assertEquals(1, all.configuredImagePins().size());
+    assertEquals(2, all.workspaceLaunchPins().size());
+    assertEquals(1, all.projectLaunchPins().size());
 
-    // Present but empty is a supplied set with nothing in it — four unanswered sources, not a
+    // Present but empty is a supplied set with nothing in it — six unanswered sources, not a
     // no-body call, because the caller said it was supplying pins and then supplied none.
     assertTrue(GcSuppliedPins.inRequestBody(json("{\"pins\":{}}")).isPresent());
     assertThrows(
         IllegalArgumentException.class, () -> GcSuppliedPins.inRequestBody(json("{\"pins\":5}")));
   }
 
-  /** The four documents this suite's happy path supplies. */
+  /** The six documents this suite's happy path supplies. */
   private static GcSuppliedPins documents() throws IOException {
-    return documents(DEPLOYMENTS, CI_DAEMON, DEPENDENCIES, CONFIGURED_IMAGES);
+    return documents(
+        DEPLOYMENTS,
+        CI_DAEMON,
+        DEPENDENCIES,
+        CONFIGURED_IMAGES,
+        WORKSPACE_LAUNCHES,
+        PROJECT_LAUNCHES);
   }
 
   private static GcSuppliedPins documents(
-      String deployments, String ciDaemon, String dependencies, String configuredImages)
+      String deployments,
+      String ciDaemon,
+      String dependencies,
+      String configuredImages,
+      String workspaceLaunches,
+      String projectLaunches)
       throws IOException {
     return new GcSuppliedPins(
         deployments == null ? null : json(deployments),
         ciDaemon == null ? null : json(ciDaemon),
         dependencies == null ? null : json(dependencies),
-        configuredImages == null ? null : json(configuredImages));
+        configuredImages == null ? null : json(configuredImages),
+        workspaceLaunches == null ? null : json(workspaceLaunches),
+        projectLaunches == null ? null : json(projectLaunches));
   }
 
   private static JsonNode json(String document) throws IOException {
@@ -291,9 +454,14 @@ class GcSuppliedPinsTest {
     return source(pins, named).keeps();
   }
 
-  /** The four HTTP adapters as CDI would wire them, pointed at the stubs. */
+  /** The six HTTP adapters as CDI would wire them, pointed at the stubs. */
   private static GcPinSources httpSources(
-      String cdBaseUrl, String ciBaseUrl, String maintenanceBaseUrl, String configurationBaseUrl) {
+      String cdBaseUrl,
+      String ciBaseUrl,
+      String maintenanceBaseUrl,
+      String configurationBaseUrl,
+      String workspacesBaseUrl,
+      String projectsBaseUrl) {
     GcPinSources sources = new GcPinSources();
     CdHttpDeploymentPins cd = new CdHttpDeploymentPins();
     cd.baseUrl = cdBaseUrl;
@@ -315,6 +483,16 @@ class GcSuppliedPinsTest {
     configuration.timeout = Duration.ofSeconds(5);
     configuration.objectMapper = MAPPER;
     sources.configuration = configuration;
+    WorkspacesHttpLaunchPins workspaces = new WorkspacesHttpLaunchPins();
+    workspaces.baseUrl = workspacesBaseUrl;
+    workspaces.timeout = Duration.ofSeconds(5);
+    workspaces.objectMapper = MAPPER;
+    sources.workspaces = workspaces;
+    ProjectsHttpLaunchPins projects = new ProjectsHttpLaunchPins();
+    projects.baseUrl = projectsBaseUrl;
+    projects.timeout = Duration.ofSeconds(5);
+    projects.objectMapper = MAPPER;
+    sources.projects = projects;
     return sources;
   }
 }

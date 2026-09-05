@@ -15,13 +15,13 @@ import java.util.TreeSet;
 import java.util.function.Supplier;
 
 /**
- * Reads all four pin sources once and folds them into one {@link GcPins}.
+ * Reads all six pin sources once and folds them into one {@link GcPins}.
  *
  * <p>Called at the start of a plan and at the start of a sweep, and nowhere else — one aggregate per
  * run is what keeps two halves of a run from planning against two different truths.
  *
  * <p><b>Every source is asked even when an earlier one fails.</b> A run that stopped at the first
- * failure would report one broken service and hide the other three, and whoever fixed it would find
+ * failure would report one broken service and hide the other five, and whoever fixed it would find
  * the next run just as dead with no warning it was coming. Every failure lands in {@link
  * GcPins#failures()}, and the run's refusal is what the executor and the planner do with it.
  *
@@ -42,6 +42,8 @@ public class GcPinSources {
   @Inject CiDaemonPins ci;
   @Inject MaintenanceDependencyPins maintenance;
   @Inject ConfigurationImagePins configuration;
+  @Inject WorkspacesLaunchPins workspaces;
+  @Inject ProjectsLaunchPins projects;
 
   /**
    * One source as the fold sees it: how it is named on the report, where it was read from (empty
@@ -55,7 +57,9 @@ public class GcPinSources {
         new Source<>("qits-platform-deployments", cd.url(), cd::pins),
         new Source<>("qits-ci", ci.url(), ci::daemonPin),
         new Source<>("qits-platform-maintenance", maintenance.url(), maintenance::pins),
-        new Source<>("qits-configuration", configuration.url(), configuration::pins));
+        new Source<>("qits-configuration", configuration.url(), configuration::pins),
+        new Source<>(WorkspacesHttpLaunchPins.SERVICE, workspaces.url(), workspaces::pins),
+        new Source<>(ProjectsHttpLaunchPins.SERVICE, projects.url(), projects::pins));
   }
 
   /**
@@ -74,15 +78,19 @@ public class GcPinSources {
         new Source<>(GcSuppliedPins.CD_SOURCE, "", supplied::deploymentPins),
         new Source<>(GcSuppliedPins.CI_SOURCE, "", supplied::daemonPin),
         new Source<>(GcSuppliedPins.MAINTENANCE_SOURCE, "", supplied::dependencyPins),
-        new Source<>(GcSuppliedPins.CONFIGURATION_SOURCE, "", supplied::configuredImagePins));
+        new Source<>(GcSuppliedPins.CONFIGURATION_SOURCE, "", supplied::configuredImagePins),
+        new Source<>(GcSuppliedPins.WORKSPACES_SOURCE, "", supplied::workspaceLaunchPins),
+        new Source<>(GcSuppliedPins.PROJECTS_SOURCE, "", supplied::projectLaunchPins));
   }
 
-  /** All four answers folded into one aggregate, whoever produced them. */
+  /** All six answers folded into one aggregate, whoever produced them. */
   private GcPins fold(
       Source<List<CdDeploymentPins.ApplicationPin>> cdSource,
       Source<CiDaemonPins.DaemonPin> ciSource,
       Source<List<MaintenanceDependencyPins.DependencyPin>> maintenanceSource,
-      Source<List<ConfigurationImagePins.ImagePin>> configurationSource) {
+      Source<List<ConfigurationImagePins.ImagePin>> configurationSource,
+      Source<List<LaunchImagePins.LaunchPin>> workspacesSource,
+      Source<List<LaunchImagePins.LaunchPin>> projectsSource) {
     Map<String, Set<String>> deployments = new HashMap<>();
     Set<String> daemonVersions = new HashSet<>();
     Set<String> blobs = new HashSet<>();
@@ -90,6 +98,8 @@ public class GcPinSources {
     Set<String> npmDependencies = new TreeSet<>();
     Set<String> manifestImages = new TreeSet<>();
     Set<String> configuredImages = new TreeSet<>();
+    Set<String> workspaceLaunchImages = new TreeSet<>();
+    Set<String> projectLaunchImages = new TreeSet<>();
     List<String> failures = new ArrayList<>();
     List<GcPinSource> sources = new ArrayList<>();
 
@@ -233,6 +243,18 @@ public class GcPinSources {
       configuredImages.clear();
     }
 
+    // The two EFFECTIVE sources. Same fold twice, because they are two services answering the same
+    // question about themselves — and two sets rather than one, because a report has to be able to
+    // say which of them saved a tag.
+    foldLaunches(
+        workspacesSource,
+        workspaceLaunchImages,
+        "a workspace or editor start",
+        failures,
+        sources);
+    foldLaunches(
+        projectsSource, projectLaunchImages, "an agent or refinement start", failures, sources);
+
     return new GcPins(
         deployments,
         daemonName,
@@ -242,8 +264,53 @@ public class GcPinSources {
         npmDependencies,
         manifestImages,
         configuredImages,
+        workspaceLaunchImages,
+        projectLaunchImages,
         failures,
         sources);
+  }
+
+  /**
+   * One launching service's answer, folded into its own keep-set.
+   *
+   * <p>Shared between the two because the shape and the rule are identical — {@code image:version},
+   * cleared whole on a failure so no half-folded keep-set outlives the source that stopped stating
+   * it. What is <b>not</b> shared is the set or the report line: each service gets its own of both,
+   * so an outage names one service and a keep names one reason.
+   */
+  private static void foldLaunches(
+      Source<List<LaunchImagePins.LaunchPin>> source,
+      Set<String> images,
+      String start,
+      List<String> failures,
+      List<GcPinSource> sources) {
+    Instant startedAt = Instant.now();
+    try {
+      List<LaunchImagePins.LaunchPin> pins = source.read().get();
+      for (LaunchImagePins.LaunchPin pin : pins) {
+        // `launches` is provenance and decides nothing: two kinds of start pulling one image are
+        // one keep, which is exactly what a set says.
+        images.add(pin.image() + ":" + pin.version());
+      }
+      sources.add(
+          answered(
+              source,
+              startedAt,
+              pins.size()
+                  + " launch images over "
+                  + images.size()
+                  + " coordinates — what "
+                  + start
+                  + " would pull TODAY, which the configured version only names after the next"
+                  + " deploy",
+              pins.size(),
+              images));
+    } catch (RuntimeException unreachable) {
+      String why = source.name() + " launch pins: " + message(unreachable);
+      failures.add(why);
+      sources.add(failed(source, startedAt, why));
+      images.clear();
+    }
   }
 
   private static GcPinSource answered(
