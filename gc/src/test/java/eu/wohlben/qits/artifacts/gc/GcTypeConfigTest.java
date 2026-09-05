@@ -206,16 +206,28 @@ class GcTypeConfigTest extends GcFixture {
     assertEquals(
         List.of("@qits/thing@1.0.0", "@qits/thing@1.1.0"), kept.get(RepositoryTypeProfile.wireNameOf(NpmPackagesProfile.KEY)));
     assertEquals(
-        List.of("eu.wohlben.qits:qits-other:1.0.0"),
+        List.of(),
         dead.get(RepositoryTypeProfile.wireNameOf(MavenPackagesProfile.KEY)),
-        "one coordinate, not one path — the jar of a version the belt no longer covers");
+        "maven-packages condemns NOTHING here since 2026-09-05: qits-other:1.0.0 is a published"
+            + " release a year cold and three deep, which is exactly the identity the access rule"
+            + " deleted 67 of on the night it ran");
     assertEquals(
         List.of(
             "eu.wohlben.qits:qits-eventstream:1.0.0",
+            "eu.wohlben.qits:qits-other:1.0.0",
             "eu.wohlben.qits:qits-other:1.1.0",
             "eu.wohlben.qits:qits-other:2.0.0"),
         kept.get(RepositoryTypeProfile.wireNameOf(MavenPackagesProfile.KEY)),
-        "the jar and pom of the fixture's release are one identity now");
+        "the jar and pom of the fixture's release are one identity, and every release stays");
+    // And the correction travels with the echo. The configuration echo for this type is the OWN
+    // ENGINE's sentence — "keep the last 2 released versions … delete the rest once unaccessed for
+    // longer than P3D" — which for maven now describes a belt and a window that decide nothing. A
+    // reviewer must not be able to read that line without reading this one, so it rides the type's
+    // own note on every plan and every sweep receipt.
+    assertEquals(
+        MavenPackagesGcStrategy.NOTE,
+        typePlan(report, MavenPackagesProfile.KEY).note(),
+        "the type's own line has to say the echo beside it no longer holds");
 
     // The two nobody collects — excluded by the settlement, and still saying so.
     for (String type : List.of(CiScreenshotsProfile.KEY, CiVideosProfile.KEY)) {
@@ -233,12 +245,13 @@ class GcTypeConfigTest extends GcFixture {
       assertEquals(List.of(), kept.get(wire), wire);
     }
 
-    // The blob half of the same comparison: the cold daemon binary, the cold published tarball and
-    // the cold jar. The cold image tag frees nothing on its own — its manifest is still named by the
-    // tags beside it, which is the reconciliation doing its job.
+    // The blob half of the same comparison: the cold daemon binary and the cold published tarball.
+    // The cold jar is NOT here any more and that absence is the fix — its coordinate is a published
+    // release, so nothing released it and the bytes stay. The cold image tag frees nothing on its
+    // own either: its manifest is still named by the tags beside it, which is the reconciliation
+    // doing its job.
     assertEquals(
-        List.of(coldDaemon, coldTarball, coldJar).stream().sorted().toList(),
-        report.sweep().blobIds());
+        List.of(coldDaemon, coldTarball).stream().sorted().toList(), report.sweep().blobIds());
     assertEquals(List.of(store.rowless()), report.untouchable().blobIds());
   }
 

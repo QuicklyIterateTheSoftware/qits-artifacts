@@ -4,11 +4,14 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.artifacts.control.LiveBlobCensus;
+import eu.wohlben.qits.artifacts.control.MavenRegistryCollection;
 import eu.wohlben.qits.artifacts.entity.MavenArtifact;
 import eu.wohlben.qits.artifacts.control.MavenPackagesProfile;
 import eu.wohlben.qits.blobstore.entity.RepositoryTypeProfile;
 import eu.wohlben.qits.artifacts.gc.dto.GcIdentity;
+import io.quarkus.arc.ClientProxy;
 import io.quarkus.narayana.jta.QuarkusTransaction;
+import io.quarkus.test.junit.QuarkusMock;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import java.io.IOException;
@@ -28,54 +31,92 @@ import org.junit.jupiter.api.Test;
  * priced every own type at once, so the pin the old suite held is replaced deliberately rather than
  * eroded.
  *
- * <p>The case that carries is {@code theNewestTimestampedSnapshotSetIsAlwaysKept…}: {@code
- * maven-metadata.xml} is computed from the surviving rows at read time, so a resolver asking for
- * {@code 1.0.1-SNAPSHOT} is sent to whatever the document says is newest. A run that deleted that
- * one would leave the document pointing at a file the store no longer has, and that is the single
- * failure this type must not produce.
+ * <p><b>Half of it came back on 2026-09-05, and on purpose.</b> The settlement's access rule ran
+ * against this type for one night and deleted 67 published coordinates, breaking every gating build
+ * on the platform. {@code noPublishedReleaseIsEverAgeCollected…} is the case that would have caught
+ * it and {@code theReleaseKeepIsARuleAboutReleases…} is the case that stops the answer widening into
+ * "maven never collects anything": superseded snapshot sets still go, which is the one class of
+ * content here that is build output rather than an artifact of record.
+ *
+ * <p>The two cases that carry the type's structural promises are {@code
+ * theNewestTimestampedSnapshotSetIsAlwaysKept…} — {@code maven-metadata.xml} is computed from the
+ * surviving rows at read time, so a resolver asking for {@code 1.0.1-SNAPSHOT} is sent to whatever
+ * the document says is newest, and deleting that one would point the document at a file the store no
+ * longer has — and {@code aCoordinateIsRemovedWholeOrNotAtAll…}, which is the version-atomicity the
+ * identity model always claimed and the delete loop did not have.
  */
 @QuarkusTest
 class MavenPackagesGcAdapterTest extends GcFixture {
-
-  /** The configured window for this type, and the number every case below is aged against. */
-  private static final Duration WINDOW = Duration.ofDays(3);
 
   private static final String GROUP_ID = "eu.wohlben.qits";
   private static final String ARTIFACT_ID = "qits-eventstream";
   private static final String COORDINATE = GROUP_ID + ":" + ARTIFACT_ID + ":";
 
   @Inject MavenPackagesGcStrategy strategy;
+  @Inject MavenPackagesGcAdapter adapter;
+  @Inject MavenRegistryCollection collection;
   @Inject GcPlanner planner;
 
   @Test
-  void theLastTwoReleaseVersionsOfAnArtifactStayAndTheThirdOneAgesOutWhole() throws Exception {
-    // The settlement's belt, counted in VERSIONS rather than in files — which is the whole reason a
-    // coordinate is the identity here. The oldest version dies as one thing, jar and pom together;
-    // a plan that condemned the jar and kept the pom would leave a broken resolve behind.
+  void noPublishedReleaseIsEverAgeCollectedHoweverColdAndHoweverDeepInTheVersionOrder()
+      throws Exception {
+    // The rule the 2026-09-05 outage bought, and the case that would have caught it. Six releases
+    // of one artifact, every file of every one of them more than a year cold, nothing pinned and
+    // four of them below a belt of two. Under the settlement's original pricing four coordinates
+    // died here; on 2026-09-05T01:58Z the same rule took 67 of them out of the live store and every
+    // gating build on the platform stopped resolving.
+    //
+    // Nothing dies now, and the rule sentence says why on each line — a reviewer reading the report
+    // is told the store is the artifact of record rather than left to infer it from an empty list.
     maven();
-    String oldJar = release("1.0.0", "jar", 11, daysAgo(400));
-    String oldPom = release("1.0.0", "pom", 12, daysAgo(400));
-    release("1.1.0", "jar", 13, daysAgo(380));
-    release("1.1.0", "pom", 14, daysAgo(380));
-    release("2.0.0", "jar", 15, daysAgo(360));
-    release("2.0.0", "pom", 16, daysAgo(360));
+    for (String version : List.of("1.0.0", "1.1.0", "2.0.0", "2.1.0", "3.0.0", "3.1.0")) {
+      release(version, "jar", 11 + version.hashCode() % 7, daysAgo(400));
+      release(version, "pom", 21 + version.hashCode() % 7, daysAgo(400));
+    }
 
     GcStrategy.Plan plan = strategy.plan(census.take(), GcPins.none());
 
-    assertEquals(List.of(COORDINATE + "1.0.0"), identities(plan.dead()));
-    assertEquals(OwnArtifactsStrategy.deadUnaccessed(WINDOW), plan.dead().get(0).rule());
-    assertEquals(Set.of(oldJar, oldPom), plan.blobsReleased(), "the whole version's files");
+    assertEquals(List.of(), plan.dead(), "a published release is never a candidate");
+    assertEquals(Set.of(), plan.blobsReleased());
+    assertEquals(6, plan.kept().size());
     assertEquals(
-        OwnArtifactsStrategy.KEPT_RELEASE, ruleFor(plan.kept(), COORDINATE + "2.0.0"));
+        MavenPackagesGcAdapter.KEPT_HOSTED_RELEASE, ruleFor(plan.kept(), COORDINATE + "1.0.0"),
+        "the oldest one too, and under the release rule rather than under a belt slot");
     assertEquals(
-        List.of(COORDINATE + "1.1.0", COORDINATE + "2.0.0"), identities(plan.kept()));
+        MavenPackagesGcAdapter.KEPT_HOSTED_RELEASE, ruleFor(plan.kept(), COORDINATE + "3.1.0"));
   }
 
   @Test
-  void mavensOwnVersionOrderDecidesTheBeltRatherThanTheOrderTheRowsWereWritten() throws Exception {
+  void theReleaseKeepIsARuleAboutReleasesRatherThanAboutMavenNothingEverDying() throws Exception {
+    // The other direction, so the rule above is pinned as a rule rather than as "this type stopped
+    // collecting". One release and one superseded timestamped snapshot set, identically cold,
+    // identically unpinned, in the same repository: the release stays and the snapshot goes. If the
+    // release keep ever widens into "no maven row is collected" this fails, which is the point.
+    maven();
+    release("1.0.0", "jar", 31, daysAgo(400));
+    snapshot("1.1.0", "20260601.101010", 1, "jar", 32, daysAgo(400));
+    snapshot("1.1.0", "20260802.123456", 2, "jar", 33, daysAgo(400));
+
+    GcStrategy.Plan plan = strategy.plan(census.take(), GcPins.none());
+
+    assertEquals(
+        List.of(COORDINATE + "1.1.0-20260601.101010-1"),
+        identities(plan.dead()),
+        "build output this store regenerates, superseded on its own line");
+    assertEquals(
+        MavenPackagesGcAdapter.KEPT_HOSTED_RELEASE, ruleFor(plan.kept(), COORDINATE + "1.0.0"));
+    assertEquals(
+        MavenPackagesGcAdapter.KEPT_RESOLVABLE_SNAPSHOT,
+        ruleFor(plan.kept(), COORDINATE + "1.1.0-20260802.123456-2"));
+  }
+
+  @Test
+  void mavensOwnVersionOrderIsStillTotalEvenThoughNoReleaseIsCollectedByIt() throws Exception {
     // 1.0.10 is above 1.0.9 and a -SNAPSHOT of a version is below its release, which a lexical
-    // comparison gets backwards — and the rows here are deliberately written oldest-version-last so
-    // insertion order cannot be what answers.
+    // comparison gets backwards. The belt no longer decides anything for this type — every release
+    // is kept before it is consulted — but the engine's contract still asks for a total order over
+    // an adapter's identities, and losing the coverage with the belt would leave that answer
+    // unwatched. So the comparator is asserted directly, and the plan is asserted to keep all three.
     maven();
     release("1.0.10", "jar", 21, daysAgo(400));
     release("1.0.9", "jar", 22, daysAgo(400));
@@ -83,60 +124,92 @@ class MavenPackagesGcAdapterTest extends GcFixture {
 
     GcStrategy.Plan plan = strategy.plan(census.take(), GcPins.none());
 
-    assertEquals(List.of(COORDINATE + "1.0.2"), identities(plan.dead()));
+    assertEquals(List.of(), plan.dead());
     assertEquals(
-        List.of(COORDINATE + "1.0.10", COORDINATE + "1.0.9"), identities(plan.kept()));
+        List.of(COORDINATE + "1.0.10", COORDINATE + "1.0.2", COORDINATE + "1.0.9"),
+        identities(plan.kept()));
+    assertEquals(
+        List.of(COORDINATE + "1.0.2", COORDINATE + "1.0.9", COORDINATE + "1.0.10"),
+        adapter.enumerate().stream()
+            .sorted(adapter.byAge())
+            .map(GcCandidate::identity)
+            .toList(),
+        "oldest release first, by maven's own version order rather than lexically");
   }
 
   @Test
-  void aReleaseSomethingStillResolvesSurvivesOnUseRatherThanOnPolicy() throws Exception {
-    // The settlement's other half, and for a library it is the common case: a version three deep in
-    // the belt that something still builds against. One warm file keeps the coordinate — a pom read
-    // is a resolve of the version, and letting a cold jar drag its own pom out would be the same
-    // half-version failure from the other direction. The resolve is dated yesterday rather than last
-    // week because the window came down to P3D; a version whose consumer has simply not built inside
-    // three days is covered by the maintenance dependency pin, which has a case of its own below.
+  void aReleaseIsKeptUnderTheReleaseRuleRatherThanUnderTheAccessWindow() throws Exception {
+    // What the access window used to be doing for a library, and no longer has to. A version three
+    // deep with one warm file used to be saved by the resolve; it is saved by being a release now,
+    // and the rule sentence has to say so — "accessed inside the P3D window" beside a coordinate
+    // that would be kept cold is a report claiming a rule that is not what saved it.
     maven();
-    release("1.0.0", "jar", 31, daysAgo(400));
-    release("1.0.0", "pom", 32, daysAgo(400), daysAgo(1));
-    release("1.1.0", "jar", 33, daysAgo(380));
-    release("2.0.0", "jar", 34, daysAgo(360));
+    release("1.0.0", "jar", 41, daysAgo(400));
+    release("1.0.0", "pom", 42, daysAgo(400), daysAgo(1));
+    release("1.1.0", "jar", 43, daysAgo(380));
+    release("2.0.0", "jar", 44, daysAgo(360));
 
     GcStrategy.Plan plan = strategy.plan(census.take(), GcPins.none());
 
     assertEquals(List.of(), plan.dead());
     assertEquals(
-        OwnArtifactsStrategy.keptAccessed(WINDOW), ruleFor(plan.kept(), COORDINATE + "1.0.0"));
+        MavenPackagesGcAdapter.KEPT_HOSTED_RELEASE, ruleFor(plan.kept(), COORDINATE + "1.0.0"));
   }
 
   @Test
-  void aVersionSomeRepositorysPomStillReferencesOutlivesTheWindowThatCondemnedItsNeighbour()
-      throws Exception {
-    // The keep that makes P3D defensible for a library. A consumer's pom names 1.0.0 on main and
-    // nothing has built it for a year — no install, no resolve, and no belt slot, with two newer
-    // releases holding both of them. Before the dependency pin the only thing that could save it was a resolve inside
-    // the window, which is a fact about CI scheduling rather than about whether anything needs it.
+  void aVersionSomeRepositorysPomStillReferencesIsKeptUnderThePinItIsNamedBy() throws Exception {
+    // The invariant, stated where it can be read: anything a main pom pins survives. It is belt and
+    // braces now — a pinned release would be kept for being a release anyway — and it is asked
+    // FIRST deliberately, because a reviewer of the report wants to know which repository still
+    // builds against a version rather than that it happens to be a release.
     //
     // The pin joins on the identity UNCHANGED: "g:a:v" is what a pom writes and what this adapter
     // folds its rows into, so the case is written with the same string on both sides deliberately.
-    // Three releases, so the belt of two leaves exactly one eligible and the pin is the only thing
-    // that can be answering.
     maven();
     release("1.0.0", "jar", 101, daysAgo(400));
     release("1.0.0", "pom", 102, daysAgo(400));
     release("1.1.0", "jar", 103, daysAgo(390));
     release("2.0.0", "jar", 104, daysAgo(380));
 
-    GcStrategy.Plan referenced =
-        strategy.plan(census.take(), referencing(COORDINATE + "1.0.0"));
+    GcStrategy.Plan referenced = strategy.plan(census.take(), referencing(COORDINATE + "1.0.0"));
 
     assertEquals(List.of(), referenced.dead(), "a referenced version is never a candidate");
     assertEquals(GcPins.BY_MANIFEST, ruleFor(referenced.kept(), COORDINATE + "1.0.0"));
 
-    // And the other half, so the keep is a fact about the pin rather than about this fixture: with
-    // nothing referencing it, the same coordinate dies as one thing, jar and pom together.
-    GcStrategy.Plan unreferenced = strategy.plan(census.take(), GcPins.none());
-    assertEquals(List.of(COORDINATE + "1.0.0"), identities(unreferenced.dead()));
+    // And the half that matters most: the pin reaches through to a SNAPSHOT too, which is the one
+    // class of maven content this type still collects. A superseded timestamped set that some
+    // manifest names outlives the window that takes its unpinned neighbour.
+    snapshot("1.2.0", "20260601.101010", 1, "jar", 105, daysAgo(400));
+    snapshot("1.2.0", "20260701.202020", 2, "jar", 106, daysAgo(400));
+    snapshot("1.2.0", "20260802.123456", 3, "jar", 107, daysAgo(400));
+    String pinnedSnapshot = COORDINATE + "1.2.0-20260601.101010-1";
+
+    GcStrategy.Plan pinned = strategy.plan(census.take(), referencing(pinnedSnapshot));
+    assertEquals(GcPins.BY_MANIFEST, ruleFor(pinned.kept(), pinnedSnapshot));
+    assertEquals(
+        List.of(COORDINATE + "1.2.0-20260701.202020-2"),
+        identities(pinned.dead()),
+        "and the unpinned superseded set beside it still goes");
+  }
+
+  @Test
+  void aRowWhosePathThisLayoutCannotReadIsNeverCollected() throws Exception {
+    // A path that is not <group>/<artifact>/<version>/<file> is its own identity under its own path
+    // spelling, which makes it the one identity here that is a FILE rather than a version. This
+    // adapter cannot say which coordinate it belongs to, so it cannot promise that deleting it is
+    // not deleting half of something — and half a version is the failure this type exists to
+    // prevent. The wire refuses an unparseable path at the door, so these are rows that predate a
+    // rule; a collector that cleaned them up would be guessing about the one thing it cannot read.
+    maven();
+    row("eu/wohlben/maven-metadata.xml", 51, daysAgo(400), null);
+    release("1.0.0", "jar", 52, daysAgo(400));
+
+    GcStrategy.Plan plan = strategy.plan(census.take(), GcPins.none());
+
+    assertEquals(List.of(), plan.dead());
+    assertEquals(
+        MavenPackagesGcAdapter.KEPT_UNREADABLE_PATH,
+        ruleFor(plan.kept(), "eu/wohlben/maven-metadata.xml"));
   }
 
   @Test
@@ -222,10 +295,12 @@ class MavenPackagesGcAdapterTest extends GcFixture {
   }
 
   @Test
-  void aSnapshotLineNeverSpendsItsArtifactsReleaseBeltAndTheReverseHoldsToo() throws Exception {
-    // Two questions wearing one group field, and this is the case that would catch them colliding:
-    // three snapshot builds must not push a release off the belt of two, and three releases must not
-    // make the snapshot line's newest set eligible.
+  void aSnapshotLineAndItsArtifactsReleasesNeverCollideInTheOneGroupField() throws Exception {
+    // Two questions wearing one group field, and this is the case that would catch them colliding.
+    // The belt half of it went with the release rule — no number of snapshot builds can push a
+    // release anywhere now — but the other direction is still live and still load-bearing: three
+    // releases of this artifact must not make the snapshot line's newest set eligible, which is
+    // exactly what a shared group key would do.
     maven();
     release("1.0.0", "jar", 71, daysAgo(400));
     release("1.1.0", "jar", 72, daysAgo(390));
@@ -238,8 +313,14 @@ class MavenPackagesGcAdapterTest extends GcFixture {
     assertEquals(
         List.of(COORDINATE + "1.2.0-20260601.101010-1", COORDINATE + "1.2.0-20260701.202020-2"),
         identities(plan.dead()));
-    assertEquals(OwnArtifactsStrategy.KEPT_RELEASE, ruleFor(plan.kept(), COORDINATE + "1.0.0"));
-    assertEquals(OwnArtifactsStrategy.KEPT_RELEASE, ruleFor(plan.kept(), COORDINATE + "1.1.0"));
+    assertEquals(
+        MavenPackagesGcAdapter.KEPT_HOSTED_RELEASE, ruleFor(plan.kept(), COORDINATE + "1.0.0"));
+    assertEquals(
+        MavenPackagesGcAdapter.KEPT_HOSTED_RELEASE, ruleFor(plan.kept(), COORDINATE + "1.1.0"));
+    assertEquals(
+        MavenPackagesGcAdapter.KEPT_RESOLVABLE_SNAPSHOT,
+        ruleFor(plan.kept(), COORDINATE + "1.2.0-20260802.123456-3"),
+        "the snapshot line kept its own newest set under its own rule, beside two releases");
   }
 
   @Test
@@ -247,20 +328,107 @@ class MavenPackagesGcAdapterTest extends GcFixture {
     // The strand hazard, and this type's own version of it: deleting the mature rows of a version
     // and leaving the young one would produce exactly the half-version the identity model exists to
     // prevent, on top of stranding the young blob as row-less and therefore untouchable forever.
+    //
+    // Written over a superseded snapshot set since 2026-09-05, because a release cannot be
+    // condemned any more and a case whose subject is what happens to a condemned coordinate needs
+    // one that can be.
     maven();
-    String youngPom = release("1.0.0", "pom", 82, daysAgo(400));
-    release("1.0.0", "jar", 81, daysAgo(400));
-    release("1.1.0", "jar", 83, daysAgo(390));
-    release("2.0.0", "jar", 84, daysAgo(380));
+    String youngPom = snapshot("1.0.1", "20260601.101010", 1, "pom", 82, daysAgo(400));
+    snapshot("1.0.1", "20260601.101010", 1, "jar", 81, daysAgo(400));
+    snapshot("1.0.1", "20260802.123456", 3, "jar", 83, daysAgo(400));
 
     GcStrategy.Plan plan = strategy.plan(census.take(), GcPins.none());
     GcStrategy.Applied applied = strategy.apply(plan, blobId -> blobId.equals(youngPom));
 
     assertEquals(List.of(), applied.deleted());
-    assertEquals(List.of(COORDINATE + "1.0.0"), identities(applied.withheldByGraceWindow()));
+    assertEquals(
+        List.of(COORDINATE + "1.0.1-20260601.101010-1"),
+        identities(applied.withheldByGraceWindow()));
     mavenArtifacts.getEntityManager().clear();
-    assertTrue(mavenArtifacts.findOne(MAVEN_REPO, releasePath("1.0.0", "jar")).isPresent());
-    assertTrue(mavenArtifacts.findOne(MAVEN_REPO, releasePath("1.0.0", "pom")).isPresent());
+    assertTrue(
+        mavenArtifacts
+            .findOne(MAVEN_REPO, snapshotPath("1.0.1", "20260601.101010", 1, "jar"))
+            .isPresent());
+    assertTrue(
+        mavenArtifacts
+            .findOne(MAVEN_REPO, snapshotPath("1.0.1", "20260601.101010", 1, "pom"))
+            .isPresent());
+  }
+
+  @Test
+  void aCoordinateIsRemovedWholeOrNotAtAllWhenOneOfItsFilesCannotBeCollected() throws Exception {
+    // The half-sweep, reproduced. MavenRegistryService.collect is @Transactional PER FILE, so the
+    // loop that removes a coordinate used to commit path by path: a throw on the second file — a
+    // concurrent deploy or collection moving the store between planning and applying is the
+    // documented way it happens — left the first file deleted and the rest alive. The paths sort
+    // lexically, .jar before .pom, so what that leaves behind is precisely the shape that breaks
+    // every resolve: a version whose pom answers 200 and whose jar answers 404.
+    //
+    // The failure is injected at the collection door rather than raced, because the race is not
+    // reproducible and the property under test is not the race — it is that ONE transaction spans
+    // the coordinate, so a failure anywhere in it undoes the whole thing.
+    maven();
+    snapshot("1.0.1", "20260601.101010", 1, "jar", 91, daysAgo(400));
+    snapshot("1.0.1", "20260601.101010", 1, "pom", 92, daysAgo(400));
+    snapshot("1.0.1", "20260802.123456", 3, "jar", 93, daysAgo(400));
+
+    MavenRegistryCollection real = ClientProxy.unwrap(collection);
+    GcStrategy.Applied applied;
+    try {
+      QuarkusMock.installMockForInstance(new FailsOnThePom(real), collection);
+      GcStrategy.Plan plan = strategy.plan(census.take(), GcPins.none());
+      assertEquals(
+          List.of(COORDINATE + "1.0.1-20260601.101010-1"),
+          identities(plan.dead()),
+          "the case only says anything if this set is condemned in the first place");
+      applied = strategy.apply(plan, blobId -> false);
+    } finally {
+      // Installed mid-method, so it outlives the method unless it is put back by hand — and a
+      // MavenRegistryCollection that refuses every pom would fail the rest of this suite silently.
+      QuarkusMock.installMockForInstance(real, collection);
+    }
+
+    assertEquals(List.of(), applied.deleted(), "nothing was removed, so nothing may be reported as");
+    assertEquals(1, applied.errors().size(), applied.errors().toString());
+    assertTrue(
+        applied.errors().get(0).contains("left whole"),
+        "the receipt has to say the coordinate survived: " + applied.errors());
+
+    mavenArtifacts.getEntityManager().clear();
+    assertTrue(
+        mavenArtifacts
+            .findOne(MAVEN_REPO, snapshotPath("1.0.1", "20260601.101010", 1, "jar"))
+            .isPresent(),
+        "the jar goes first in path order — under the old per-file commit it was already gone here");
+    assertTrue(
+        mavenArtifacts
+            .findOne(MAVEN_REPO, snapshotPath("1.0.1", "20260601.101010", 1, "pom"))
+            .isPresent());
+    assertTrue(
+        mavenArtifacts
+            .findOne(MAVEN_REPO, snapshotPath("1.0.1", "20260802.123456", 3, "jar"))
+            .isPresent(),
+        "and the set the metadata resolves to was never a candidate");
+  }
+
+  /** A collection door that removes jars and refuses poms — the mid-coordinate failure, on demand. */
+  private static final class FailsOnThePom extends MavenRegistryCollection {
+
+    private final MavenRegistryCollection delegate;
+
+    private FailsOnThePom(MavenRegistryCollection delegate) {
+      this.delegate = delegate;
+    }
+
+    @Override
+    public void collect(String repository, String path) {
+      if (path.endsWith(".pom")) {
+        throw new IllegalStateException(
+            "no such maven path " + path + " to collect — the store moved since the plan was"
+                + " computed");
+      }
+      delegate.collect(repository, path);
+    }
   }
 
   @Test

@@ -429,6 +429,9 @@ collection" section is the contract; these are the rules that get "helpfully" re
   condemned identity four extra days and make the access window a fiction. The argument for the
   short window is not that three days is long enough to notice a pull — it is that age carries
   little safety once consumption is pinned explicitly, and the keep-classes carry the rest.
+  **`maven-packages` is the exception, bought at the price of an outage**: since 2026-09-05 its
+  window governs superseded snapshot sets only and no published release is age-collected. See the
+  bullet below.
   After this ships, REMOVE the Phase-A env overrides
   `QITS_ARTIFACTS_GC_TYPE_OCI_IMAGES_WINDOW` and `QITS_ARTIFACTS_GC_BLOB_GRACE_PERIOD` from
   qits-configuration, or they shadow these defaults.
@@ -487,6 +490,24 @@ collection" section is the contract; these are the rules that get "helpfully" re
   snapshot line** — what `maven-metadata.xml` redirects `1.0.1-SNAPSHOT` to; deleting it would point
   the document at a file the store no longer has. No N-per-line rule was invented: §3.6 named the
   shape and never priced it, so the window decides.
+- **`maven-packages` DOES NOT AGE-COLLECT PUBLISHED RELEASES. Do not put the belt back.** Withdrawn
+  2026-09-05 after the `P3D` access rule deleted 67 published `eu.wohlben.qits` coordinates at
+  `01:58Z` and every gating build on the platform stopped resolving. The three reasons, so this is
+  not re-derived the next time the store looks large: a jar is fetched **once** and answered out of
+  local `~/.m2` caches forever after, so age here measures cache warmth rather than need; the
+  dependency pin names what main's manifests **directly** reference (13 coordinates against hundreds
+  held) and is a floor under nothing; and the whole hosted maven repository rounds to nothing beside
+  28.8 GB of images, so the trade was a platform-wide outage for a few megabytes. The keep is
+  answered in `MavenPackagesGcAdapter.pinnedBy` — the adapter's own facts, so `OwnArtifactsStrategy`
+  and the other three own types are untouched — and `MavenPackagesGcStrategy.note()` carries the
+  correction onto every report line, because the configuration echo is the engine's sentence and
+  still describes a belt. The window governs **superseded timestamped snapshot sets only**.
+- **A maven coordinate is removed inside ONE transaction.** `MavenRegistryService.collect` is
+  `@Transactional` per *file*, so the delete loop used to commit path by path: a throw on the second
+  file left the first one deleted, and since paths sort `.jar` before `.pom` the shape it leaves is a
+  version whose pom answers 200 and whose jar answers 404 — the half-sweep the identity model claims
+  to prevent. `MavenPackagesGcAdapter.delete` wraps each coordinate in `QuarkusTransaction`; a
+  failure is a no-op reported against an identity that is still whole.
 - **`daemon-binaries` has no tombstone and must not grow one.** npm has one because a deleted
   version re-opens its name under somebody's lockfile; a daemon version is resolved by a pin a
   bootstrap re-reads, so a re-release at a collected version is legitimate. Its funnel is
