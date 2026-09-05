@@ -35,17 +35,17 @@ import org.junit.jupiter.api.Test;
  * releases that used to be kept forever are now kept as the last two — with the third surviving on
  * <em>use</em>, which is the case the structural rule could not have had.
  *
- * <p>The window is P3D since 2026-09-04, so the cases that mean "warm" are dated <b>yesterday</b>
- * rather than last week. What replaced the long window is not a shorter one: it is {@code
- * npmDependencies}, the versions repositories' package.json files still resolve to, which is a
- * separate case below and the reason a lockfile-pinned version no longer needs an install inside the
- * window to survive.
+ * <p><b>The window is P0D since 2026-09-05</b>, and what replaced it was never a shorter window: it
+ * is {@code npmDependencies} — the versions repositories' package.json files still resolve to — and
+ * the dist-tags. Both have cases of their own below, and the two cases that used to prove "an
+ * install keeps a version alive" now prove the opposite doctrine under their own names: being warm
+ * is not a keep, being NAMED is.
  */
 @QuarkusTest
 class NpmPackagesGcAdapterTest extends GcFixture {
 
-  /** The configured window for this type, and the number every case below is aged against. */
-  private static final Duration WINDOW = Duration.ofDays(3);
+  /** The configured window for this type — zero since 2026-09-05, so nothing is kept by age. */
+  private static final Duration WINDOW = Duration.ZERO;
 
   private static final String UI = "@qits/ui-components";
 
@@ -76,33 +76,44 @@ class NpmPackagesGcAdapterTest extends GcFixture {
   }
 
   @Test
-  void anOlderReleaseSomethingStillInstallsSurvivesOnUseRatherThanOnPolicy() throws Exception {
-    // The other half of the settlement's sentence, and the case the old rule could not have had:
-    // consumers pin ranges, and ^0.0.1 resolving is a fact about what is being installed rather than
-    // about what policy protects. The report says "accessed", not "release", because naming the rule
-    // that actually saved a version is the point of the report.
+  void anInstallNoLongerKeepsAnOlderReleaseAliveAndTheLockfileReferenceIsWhatDoes()
+      throws Exception {
+    // THE FLIP of 2026-09-05: this case used to say that ^0.0.1 resolving yesterday kept 0.0.1
+    // alive. It does not any more — an install moves a timestamp, and the timestamp stopped being a
+    // keep-class. What the install actually proves is that some repository's package.json still
+    // resolves that version, and THAT is a fact qits-platform-maintenance answers by name. So the
+    // same store is planned twice: once on the install alone, once with the reference stated.
     hosted();
     version(UI, "0.0.1", 21, daysAgo(1));
     version(UI, "2026.801.63140", 22, daysAgo(360));
     version(UI, "2026.801.85149", 23, daysAgo(340));
 
-    GcStrategy.Plan plan = strategy.plan(census.take(), GcPins.none());
+    GcStrategy.Plan onAccessAlone = strategy.plan(census.take(), GcPins.none());
 
-    assertEquals(List.of(), plan.dead());
-    assertEquals(OwnArtifactsStrategy.keptAccessed(WINDOW), ruleFor(plan.kept(), UI + "@0.0.1"));
+    assertEquals(List.of(UI + "@0.0.1"), identities(onAccessAlone.dead()));
+    assertEquals(
+        OwnArtifactsStrategy.deadUnaccessed(WINDOW), onAccessAlone.dead().get(0).rule());
+
+    GcStrategy.Plan referenced = strategy.plan(census.take(), referencing(UI + "@0.0.1"));
+
+    assertEquals(List.of(), referenced.dead());
+    assertEquals(GcPins.BY_MANIFEST, ruleFor(referenced.kept(), UI + "@0.0.1"));
   }
 
   @Test
-  void aColdPrereleaseDiesAndAWarmOneDoesNotHoweverManyBuildsSitAboveIt() throws Exception {
-    // Prereleases earn no belt — own-ness protects releases, and a main build is not one. What used
-    // to condemn them structurally the moment a newer build existed now condemns only the ones
-    // nothing has installed, which is a loosening: the third build here is superseded twice over and
-    // stays, because something pulled it yesterday.
+  void noPrereleaseSurvivesAZeroWindowNotEvenTheOnePublishedAMomentAgo() throws Exception {
+    // Prereleases earn no belt — own-ness protects releases, and a main build is not one — so with
+    // the window at zero there is nothing left for one to survive on except a dist-tag or a
+    // dependency pin, each of which has its own case. Four builds, aged from a year to a minute, and
+    // all four go: the one installed yesterday and the one published a minute ago included.
+    //
+    // That is the realignment stated at its sharpest, and it is safe for the reason the doctrine
+    // gives: `@main` is what a consumer of a build resolves through, and a dist-tag names it.
     hosted();
     version(UI, "2026.801.85149", 31, daysAgo(200));
     String coldest = version(UI, "2026.801.63140-main.gab854a1", 32, daysAgo(400));
     String cold = version(UI, "2026.801.85149-main.g21655ba", 33, daysAgo(300));
-    version(UI, "2026.801.85149-main.g0fe7780", 34, daysAgo(400), daysAgo(1));
+    String installedYesterday = version(UI, "2026.801.85149-main.g0fe7780", 34, daysAgo(400), daysAgo(1));
     String newest = version(UI, "2026.801.85149-main.gd43d710", 35, Instant.now());
 
     LiveBlobCensus.Census taken = census.take();
@@ -110,20 +121,24 @@ class NpmPackagesGcAdapterTest extends GcFixture {
 
     assertEquals(
         Stream.of(
-                UI + "@2026.801.63140-main.gab854a1", UI + "@2026.801.85149-main.g21655ba")
+                UI + "@2026.801.63140-main.gab854a1",
+                UI + "@2026.801.85149-main.g0fe7780",
+                UI + "@2026.801.85149-main.g21655ba",
+                UI + "@2026.801.85149-main.gd43d710")
             .sorted()
             .toList(),
-        identities(plan.dead()));
+        identities(plan.dead()).stream().sorted().toList());
     assertEquals(
-        OwnArtifactsStrategy.keptAccessed(WINDOW),
-        ruleFor(plan.kept(), UI + "@2026.801.85149-main.g0fe7780"));
-    assertEquals(Set.of(coldest, cold), plan.blobsReleased());
-    assertTrue(plan.blobsRetained().contains(newest));
+        List.of(UI + "@2026.801.85149"),
+        identities(plan.kept()),
+        "the release keeps its belt slot, which is the only keep left in this store");
+    assertEquals(
+        Set.of(coldest, cold, installedYesterday, newest), plan.blobsReleased());
 
     // And through the substrate: a tarball is named by exactly one version, so every released blob
     // loses its last reference and the whole reclaim is real.
     assertEquals(
-        Stream.of(coldest, cold).sorted().toList(),
+        Stream.of(coldest, cold, installedYesterday, newest).sorted().toList(),
         planner.plan(taken, List.of(strategy), GcPins.none()).sweep().blobIds());
   }
 
@@ -199,22 +214,33 @@ class NpmPackagesGcAdapterTest extends GcFixture {
   }
 
   @Test
-  void aVersionThatIsNotSemverIsNeverAReleaseAndAgesOutOnAccessLikeAnythingElse()
+  void aVersionThatIsNotSemverIsNeverAReleaseAndAtAZeroWindowOnlyAPointerSavesIt()
       throws Exception {
     // What cannot be ordered cannot be proved to be the last two of anything, so it earns no belt.
-    // It is not thereby condemned for being unrecognised either — the window is what decides, which
-    // is narrower than the old keep-forever and wider than deleting it on sight.
+    // The window used to be what kept such a version alive while anything installed it; at P0D that
+    // is gone, and the honest answer is that an unrecognised coordinate lives exactly as long as
+    // something POINTS at it. A dist-tag is that pointer, and the packument would be broken without
+    // it — which is why the belt-and-braces keep is what carries this case now.
     hosted();
     version(UI, "1.0.0", 61, daysAgo(400));
     version(UI, "1.1.0", 62, daysAgo(390));
     version(UI, "nightly", 63, daysAgo(1));
     String coldNightly = version(UI, "rolling", 64, daysAgo(400));
 
-    GcStrategy.Plan plan = strategy.plan(census.take(), GcPins.none());
+    GcStrategy.Plan onAccessAlone = strategy.plan(census.take(), GcPins.none());
 
-    assertEquals(OwnArtifactsStrategy.keptAccessed(WINDOW), ruleFor(plan.kept(), UI + "@nightly"));
-    assertEquals(List.of(UI + "@rolling"), identities(plan.dead()));
-    assertEquals(Set.of(coldNightly), plan.blobsReleased());
+    assertEquals(
+        Stream.of(UI + "@nightly", UI + "@rolling").sorted().toList(),
+        identities(onAccessAlone.dead()).stream().sorted().toList(),
+        "installed yesterday is not a keep, and neither is being unrecognised a kill of its own");
+    assertTrue(onAccessAlone.blobsReleased().contains(coldNightly));
+
+    distTag(UI, "nightly", "nightly");
+    GcStrategy.Plan pointed = strategy.plan(census.take(), GcPins.none());
+
+    assertEquals(
+        NpmPackagesGcAdapter.keptByDistTag("nightly"), ruleFor(pointed.kept(), UI + "@nightly"));
+    assertEquals(List.of(UI + "@rolling"), identities(pointed.dead()));
   }
 
   @Test

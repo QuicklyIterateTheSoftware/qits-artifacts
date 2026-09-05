@@ -31,8 +31,8 @@ import org.junit.jupiter.api.Test;
 @QuarkusTest
 class DaemonBinariesGcAdapterTest extends GcFixture {
 
-  /** The configured window for this type, and the number every case below is aged against. */
-  private static final Duration WINDOW = Duration.ofDays(3);
+  /** The configured window for this type — zero since 2026-09-05, so nothing is kept by age. */
+  private static final Duration WINDOW = Duration.ZERO;
 
   private static final String CI = "qits-ci-daemon";
 
@@ -135,22 +135,31 @@ class DaemonBinariesGcAdapterTest extends GcFixture {
   }
 
   @Test
-  void aVersionSomethingStillDownloadsSurvivesTheWindowThatCondemnedItsNeighbour()
+  void aDownloadYesterdayIsNoLongerAKeepAndTheLadderIsWhatSpeaksForAnOldRung()
       throws Exception {
-    // The access half of the rule, on the one read this type can see: the version-addressed GET.
-    // Two versions equally far down the belt, one of them fetched yesterday — that one stays, and
-    // the report says so under the window's own sentence rather than under the belt's. Yesterday
-    // rather than last month since the window came down to P3D: a fetch a month old is cold now.
+    // THE FLIP of 2026-09-05, on the one type where getting it wrong breaks every build at once.
+    // This case used to keep the rung fetched yesterday under the window's own sentence; at P0D a
+    // fetch is a timestamp and a timestamp cannot say whether a runner will start tomorrow. What can
+    // is qits-ci, which answers with both rungs of its ladder on every run — so the second half of
+    // this case is the same store with the ladder read.
     repository();
     daemonRow(CI, "2026.501.1", blob(61), daysAgo(500), daysAgo(1));
     daemonRow(CI, "2026.502.2", blob(62), daysAgo(500), null);
     daemonRow(CI, "2026.801.30", blob(63), daysAgo(200), null);
     daemonRow(CI, "2026.802.40", blob(64), daysAgo(100), null);
 
-    GcStrategy.Plan plan = strategy.plan(census.take(), GcPins.none());
+    GcStrategy.Plan onAccessAlone = strategy.plan(census.take(), GcPins.none());
 
-    assertEquals(List.of(CI + "@2026.502.2"), identities(plan.dead()));
-    assertEquals(OwnArtifactsStrategy.keptAccessed(WINDOW), ruleFor(plan.kept(), CI + "@2026.501.1"));
+    assertEquals(
+        List.of(CI + "@2026.501.1", CI + "@2026.502.2"),
+        identities(onAccessAlone.dead()).stream().sorted().toList());
+    assertEquals(
+        OwnArtifactsStrategy.deadUnaccessed(WINDOW), ruleFor(onAccessAlone.dead(), CI + "@2026.501.1"));
+
+    GcStrategy.Plan pinned = strategy.plan(census.take(), ladder(CI, "2026.501.1"));
+
+    assertEquals(List.of(CI + "@2026.502.2"), identities(pinned.dead()));
+    assertEquals(GcPins.BY_CI, ruleFor(pinned.kept(), CI + "@2026.501.1"));
   }
 
   @Test
@@ -168,7 +177,8 @@ class DaemonBinariesGcAdapterTest extends GcFixture {
 
     assertEquals(
         OwnArtifactsStrategy.KEPT_RELEASE, ruleFor(plan.kept(), CI + "@2026.803.50"),
-        "it is one of the last two, and it would be kept by the window either way");
+        "the belt is what keeps it — at a zero window the fold buys a fresh publish nothing, and"
+            + " what protects its BYTES until a pin names them is the grace window instead");
     assertEquals(List.of(CI + "@2026.601.10"), identities(plan.dead()));
   }
 

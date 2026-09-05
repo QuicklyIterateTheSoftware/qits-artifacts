@@ -57,6 +57,7 @@ one in is the library's, not this repository's.
 | `npm/NpmUpstream` | the `HttpClient` is an instance field, not static | build fails: an `HttpClientFacade` frozen into the image heap |
 | `maven/MavenUpstream` | the `HttpClient` is an instance field, not static | same as above; the sixth outbound client, and the rule has still not changed. It reads and writes only `String`/`byte[]` and needs nothing else declared — the maven stack, like `registry` and `npm`, still adds zero native-image configuration |
 | `gc/CdHttpDeploymentPins`, `gc/CiHttpDaemonPins`, `gc/MaintenanceHttpDependencyPins`, `gc/ConfigurationHttpImagePins`, `gc/WorkspacesHttpLaunchPins`, `gc/ProjectsHttpLaunchPins` | the `HttpClient` is an instance field, not static | same as above; the third, fifth, seventh, eighth, ninth and tenth outbound clients, and the rule has not changed. It moved with the class when GC became its own module — the rule travels with the client, not with the package. The two pin readers added on 2026-09-04 and the two added on 2026-09-05 carry it for the same reason and add no other native-image configuration: they read `JsonNode`, never a bound type |
+| `gc/MavenPomClosure` | nothing — and that is the entry: it parses poms with the **JDK's own** `DocumentBuilder`, reachable through the default `DocumentBuilderFactory`, which native-image resolves without configuration. A DOM library off maven central would have needed a reflection registration and a `ServiceLoader` declaration to do the same job | — (the reason the closure took a dependency-free parser rather than a nicer one) |
 | `registry/MirrorUpstream` | the `HttpClient` is an instance field, not static — and so is `MirrorBearerTokens`' `ObjectMapper`, which is reachable from one | same as above; the fourth outbound client, and the rule still has not changed |
 | artifacts' `microprofile-config.properties` | the `QITS_RESOURCE_DB_*` triple with **no defaults** | nothing — and that is the point: an unset variable dies at Flyway naming the missing one, rather than opening a fallback store. It replaced an H2 file url that resolved `${user.home}` through `getpwuid` and came out as `jdbc:h2:file:?/…` under UID 1001 |
 | `registry/MirrorUpstream`'s config | `endpoint-override` injected as `Optional<String>`, not `String` | the binary dies at boot on `Failed to load config value of type java.lang.String` — SmallRye reads a **configured-empty** value as absent, and that key ships blank. `defaultValue = ""` does not help. Invisible to `mvn verify`, where every test sets a real value |
@@ -212,8 +213,9 @@ the alternative — a driver assembling those
 lists and handing them in — puts a safety-critical input outside the service that acts on it, where
 the two drift and the drift deletes something live. They are fetched **once per run** and never
 cached: a cached pin list is a plan on stale facts, and two fetches inside one run can disagree.
-**The last four are what make a P3D window defensible**: a short window is only honest while what is
-in use is named outright rather than inferred from a pull that may not have happened in three days.
+**The last four are what make a P0D window possible at all**: with the window at zero the keep-set
+IS the retention policy, which is only honest while what is in use is named outright rather than
+inferred from a pull that may or may not have happened lately.
 **And the last two are the fourth in a different TENSE**, not a duplicate of it: qits-configuration
 holds what the NEXT deploy of a launching service will be handed, while that service keeps launching
 what it was deployed with — so for the length of that gap the configured coordinate names an image
@@ -372,7 +374,7 @@ collection" section is the contract; these are the rules that get "helpfully" re
   qits-workspaces / qits-projects (`GET /workspaces/api/pins`, `GET /projects/api/pins`, which
   images each of them would pull TODAY, out of the configuration it is actually running with).
   The last four answer for **consumption** where the first two answer for execution, and they are
-  what the P3D windows rest on. The two launch answers are kept as **separate keep-sets** —
+  what the P0D windows rest on. The two launch answers are kept as **separate keep-sets** —
   `workspaceLaunchImages` and `projectLaunchImages`, rules `BY_WORKSPACE_LAUNCH` /
   `BY_PROJECT_LAUNCH` — because both services launch `qits/workspace` and a folded set could not say
   which of them saved a tag. `launches` on such a pin is provenance: parsed, carried, deciding
@@ -422,16 +424,23 @@ collection" section is the contract; these are the rules that get "helpfully" re
   `qits.artifacts.gc.oci.cd-*`, and they live in the `gc` jar's own
   `META-INF/microprofile-config.properties`. A deployment carrying the old spelling silently loses
   the value.
-- **The settlement's numbers are `P3D` for all six own types and `P2D` for the blob grace period**,
-  down from `P30D`/`P90D` and `P7D` on 2026-09-04. The windows are in the `gc` jar's config, the
-  grace period in the `artifacts` jar's, and the two **move together**: the grace window gates
-  identity rows as well as blob unlinks, so a `P7D` grace under a `P3D` window would withhold every
-  condemned identity four extra days and make the access window a fiction. The argument for the
-  short window is not that three days is long enough to notice a pull — it is that age carries
-  little safety once consumption is pinned explicitly, and the keep-classes carry the rest.
-  After this ships, REMOVE the Phase-A env overrides
-  `QITS_ARTIFACTS_GC_TYPE_OCI_IMAGES_WINDOW` and `QITS_ARTIFACTS_GC_BLOB_GRACE_PERIOD` from
-  qits-configuration, or they shadow these defaults.
+- **The settlement's numbers are `P0D` for all six own types and `PT6H` for the blob grace period**
+  since 2026-09-05, down from `P3D`/`P2D` the day before and `P30D`/`P90D`/`P7D` before that. The
+  windows are in the `gc` jar's config, the grace period in the `artifacts` jar's.
+  **Zero is not "collect harder", it is the statement that RETENTION IS THE KEEP-SET**: an identity
+  lives because a pin source, a belt or the maven pom closure names it, and access — the one input
+  here nobody owns — decides nothing. It is safe because per-push CI is retired: every QA build
+  resolves the octopus FOLD with current main, and main's manifests are what the maintenance
+  dependency pins name, so a branch's build resolves the keep-set by construction. The one branch
+  that can miss hand-pins an internal version three releases stale, which fails loudly and is
+  re-bumped in a commit.
+  **The grace period is the only clock left and it is race safety, not retention**: it gates
+  identity rows as well as blob unlinks, so bytes pushed minutes ago — an image racing its
+  deployment row, a lib racing its consumer's fold — are immune whole for six hours while their pin
+  appears. Raising a window is a decision about disk; removing a pin source is a window owed.
+  If the Phase-A env overrides `QITS_ARTIFACTS_GC_TYPE_OCI_IMAGES_WINDOW` and
+  `QITS_ARTIFACTS_GC_BLOB_GRACE_PERIOD` are still set on qits-configuration, REMOVE them — they
+  shadow these defaults.
 - **The dry-run report is the review surface, and four of its parts are load-bearing.** `summary`
   is first in `GcPlanReport` because it is what a human reads first — executable yes/no, the
   reclaim in bytes and in units, one line per type — and it is **derived** by `GcSummary` from the
@@ -483,10 +492,30 @@ collection" section is the contract; these are the rules that get "helpfully" re
 - **`maven-packages`' identity is a COORDINATE, not a row.** A version is a set of files, and half
   a version is a broken resolve, so `MavenPackagesGcAdapter` folds rows into
   `groupId:artifactId:version` (timestamped snapshots into their own resolvable coordinate) and the
-  grace window withholds the whole set. Its one derived belt is **the newest deployable set of every
-  snapshot line** — what `maven-metadata.xml` redirects `1.0.1-SNAPSHOT` to; deleting it would point
-  the document at a file the store no longer has. No N-per-line rule was invented: §3.6 named the
-  shape and never priced it, so the window decides.
+  grace window withholds the whole set. Its first derived belt is **the newest deployable set of
+  every snapshot line** — what `maven-metadata.xml` redirects `1.0.1-SNAPSHOT` to; deleting it would
+  point the document at a file the store no longer has. No N-per-line rule was invented: §3.6 named
+  the shape and never priced it.
+- **Its second derived belt is the POM CLOSURE (`MavenPomClosure`), and it is what a zero window
+  cost.** A manifest pin names what a repository's pom writes; nothing names what THAT pom then
+  resolves. So the keep-set is closed under the references of the poms already in it: seeded from
+  the manifest pins plus both belts, each kept coordinate's `.pom` is read out of the store
+  (`BlobStore.open` — public and read-only, so no narrow door is owed, and it moves no
+  `accessed_at`), its `<parent>`, `<dependencies>` and `dependencyManagement` imports are parsed
+  with the JDK's `DocumentBuilder` (no new dependency, nothing new for the native image), and every
+  referenced coordinate **that exists in this store** joins the keep-set, to a fixpoint bounded by a
+  visited set. **Internal-ness needs no configuration — existing here IS the definition.**
+  `${project.version}` resolves against the pom's own coordinates and every other `${…}` drops the
+  reference, because the platform's own poms spell internal versions literally by house rule. The
+  release belt is **asked** rather than re-derived (`OwnArtifactsStrategy.lastReleasesPerGroup` is
+  package-visible for this one caller): an adapter carrying a keep-count would be the doctrine
+  broken to save three lines. An unreadable or unparseable pom is logged and skipped — the rule only
+  ever ADDS keeps, so failing to read one under-keeps by that pom alone rather than refusing a type.
+  **The npm twin does not exist and the gap is deliberate**: `npm_version.manifest_json` does carry
+  the published manifest, but internal npm deps are spelled as caret RANGES (`^2026.902.204627`), so
+  an equality join keeps nothing and a correct closure would need semver range resolution
+  (`NpmSemver` compares, it does not match ranges). What a range resolves to is the newest matching
+  version, which the last-2-releases belt already holds.
 - **`daemon-binaries` has no tombstone and must not grow one.** npm has one because a deleted
   version re-opens its name under somebody's lockfile; a daemon version is resolved by a pin a
   bootstrap re-reads, so a re-release at a collected version is legitimate. Its funnel is

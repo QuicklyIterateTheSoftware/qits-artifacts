@@ -1,6 +1,7 @@
 package eu.wohlben.qits.artifacts.gc;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -18,6 +19,12 @@ import org.junit.jupiter.api.Test;
  * <p>Plain JUnit against {@link FakeGcTypeAdapter} for the cache engine's reason: what a release is
  * and which of two is newer are the adapter's answers, so a case driven through a real type would
  * test that type's parsing rather than this engine's counting.
+ *
+ * <p><b>The window here is P90D and no shipped type carries it any more</b>, which is deliberate:
+ * this suite is about the engine's counting, and the engine still behaves exactly this way for
+ * whatever window it is handed. What the deployed configuration hands it is {@code P0D} — the
+ * realignment of 2026-09-05 — and that has a case of its own below, because zero is where the rule's
+ * last branch stops being a window at all.
  */
 class OwnArtifactsStrategyTest {
 
@@ -151,9 +158,48 @@ class OwnArtifactsStrategyTest {
   }
 
   @Test
+  void atAZeroWindowTheKeepClassesAreTheWholeRetentionPolicy() {
+    // The shipped configuration since 2026-09-05, and the doctrine in one case: with the window at
+    // zero, an identity lives because something NAMES it and for no other reason. The version pulled
+    // one second ago dies beside the one nobody has touched in a year; the belt and the pin are
+    // untouched, because they never asked what time it was.
+    FakeGcTypeAdapter adapter =
+        new FakeGcTypeAdapter()
+            .add("@qits/ui@0.0.1", "@qits/ui", true, daysAgo(400), "v1")
+            .add("@qits/ui@0.0.2", "@qits/ui", true, daysAgo(380), "v2")
+            .add("@qits/ui@0.0.3", "@qits/ui", true, daysAgo(360), "v3")
+            .add("@qits/ui@1.0.0-main.gab854a1", "@qits/ui", false, NOW.minusSeconds(1), "warm")
+            .add("@qits/ui@1.0.0-main.gcafe123", "@qits/ui", false, daysAgo(400), "pinned");
+    GcPinned pinned =
+        candidate -> candidate.identity().endsWith("gcafe123") ? "pinned by something live" : null;
+
+    GcStrategy.Plan plan = engine.plan(adapter, Duration.ZERO, NOW, pinned);
+
+    assertEquals(
+        List.of("@qits/ui@0.0.1", "@qits/ui@1.0.0-main.gab854a1"),
+        identities(plan.dead()),
+        "the third release AND the build pulled a second ago — being warm is not a keep any more");
+    assertEquals(
+        OwnArtifactsStrategy.deadUnaccessed(Duration.ZERO),
+        ruleFor(plan.dead(), "@qits/ui@1.0.0-main.gab854a1"));
+    assertEquals(
+        OwnArtifactsStrategy.KEPT_RELEASE, ruleFor(plan.kept(), "@qits/ui@0.0.3"));
+    assertEquals("pinned by something live", ruleFor(plan.kept(), "@qits/ui@1.0.0-main.gcafe123"));
+  }
+
+  @Test
   void theRuleSentenceNamesTheBeltAndTheConfiguredWindow() {
     assertTrue(OwnArtifactsStrategy.rule(WINDOW).contains("P90D"));
     assertTrue(OwnArtifactsStrategy.rule(WINDOW).contains("last 2 released versions"));
+    assertTrue(
+        OwnArtifactsStrategy.rule(WINDOW).contains("use keeps it alive"),
+        "a real window keeps what is in use, and the sentence may say so");
+    // At zero it must not: the tail of that sentence would be a promise about a window there is
+    // none of, and a keep-rule that says something false is the line a reviewer trusts.
+    assertTrue(OwnArtifactsStrategy.rule(Duration.ZERO).contains("P0D"));
+    assertTrue(
+        OwnArtifactsStrategy.rule(Duration.ZERO).contains("keep-classes ARE the retention policy"));
+    assertFalse(OwnArtifactsStrategy.rule(Duration.ZERO).contains("use keeps it alive"));
   }
 
   private static Instant daysAgo(int days) {

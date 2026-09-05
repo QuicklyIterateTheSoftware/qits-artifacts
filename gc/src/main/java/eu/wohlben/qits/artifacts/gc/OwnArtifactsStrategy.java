@@ -17,10 +17,16 @@ import java.util.Set;
  * everything a live pin names lives, and the rest ages out.
  *
  * <p>The settlement's second rule, and the belt in it is deliberately narrow: <b>last 2</b> releases
- * per group, not every release. Anything older survives on use — an old release someone still
- * installs is accessed, so lockfile and range pulls keep it alive by being used rather than by
- * policy — or on a live pin. That is what makes this a collector at all rather than an archive with
- * extra steps.
+ * per group, not every release. Anything older survives on a live pin, or — while the window is
+ * above zero — on use. That is what makes this a collector at all rather than an archive with extra
+ * steps.
+ *
+ * <p><b>Since 2026-09-05 every own type ships a window of {@code P0D}, and that changes what this
+ * engine is.</b> The rule below is unchanged, but with a zero window its last branch condemns
+ * everything the keep-classes did not name: retention IS the keep-set now, and access keeps nothing
+ * alive by itself. The window stays a configured input rather than being deleted, because it is the
+ * one lever a deployment can raise when a keep-class is temporarily missing — a pin source removed
+ * is a window owed.
  *
  * <p><b>The order of the three keep-classes is the safety property.</b> A pin is checked first
  * because it is the only fact that comes from outside this service and the only one an access
@@ -41,15 +47,25 @@ public final class OwnArtifactsStrategy {
   /** How many released versions per identity group are kept whatever their age. */
   public static final int RELEASES_KEPT = 2;
 
-  /** The rule sentence a report echoes for a type configured as own. */
+  /**
+   * The rule sentence a report echoes for a type configured as own.
+   *
+   * <p>The tail changes at a zero window because the sentence would otherwise be false: "use keeps
+   * it alive" is a promise about a window, and at {@code P0D} there is none to keep it in.
+   */
   public static String rule(Duration window) {
     return "own: always keep the last "
         + RELEASES_KEPT
         + " released versions of every identity group and everything a live pin names; delete the"
         + " rest once unaccessed for longer than "
         + GcPlanner.iso(window)
-        + ". An older release still being installed is accessed, so use keeps it alive where policy"
-        + " no longer does.";
+        + ". "
+        + (window.isZero()
+            ? "The window is zero, so the keep-classes ARE the retention policy: an identity"
+                + " nothing names is condemned on the run that finds it, and use keeps nothing"
+                + " alive on its own."
+            : "An older release still being installed is accessed, so use keeps it alive where"
+                + " policy no longer does.");
   }
 
   static final String KEPT_RELEASE =
@@ -132,8 +148,15 @@ public final class OwnArtifactsStrategy {
    * <p>Groups are kept in enumeration order and compared by identity, so a group with fewer
    * releases than the belt simply keeps all of them — the honest answer for a package that has
    * published once.
+   *
+   * <p><b>Package-visible rather than private, for exactly one caller</b>: {@code
+   * MavenPackagesGcAdapter}'s pom closure starts from what the keep-set already holds, and the belt
+   * is half of that. Re-deriving "the newest two releases of every group" inside the adapter would
+   * be the same rule written twice, which is the failure mode this whole design refuses — and it
+   * would be the adapter carrying a keep-count, which the doctrine forbids outright. The engine
+   * still decides; the adapter only asks it what it decided.
    */
-  private static Set<GcCandidate> lastReleasesPerGroup(
+  static Set<GcCandidate> lastReleasesPerGroup(
       List<GcCandidate> candidates, GcTypeAdapter adapter) {
     Map<String, List<GcCandidate>> releasesByGroup = new LinkedHashMap<>();
     for (GcCandidate candidate : candidates) {

@@ -29,8 +29,8 @@ import org.junit.jupiter.api.Test;
 @QuarkusTest
 class DocsGcAdapterTest extends GcFixture {
 
-  /** The configured window for this type, and the number every case below is aged against. */
-  private static final Duration WINDOW = Duration.ofDays(3);
+  /** The configured window for this type — zero since 2026-09-05, so nothing is kept by age. */
+  private static final Duration WINDOW = Duration.ZERO;
 
   private static final String DOCS_REPO = "docs";
   private static final String SITE = "@userflows/qits-githost";
@@ -50,10 +50,16 @@ class DocsGcAdapterTest extends GcFixture {
   }
 
   @Test
-  void theBeltKeepsCalverReleasesWhileShaBundlesLiveOnTheWindowAlone() throws Exception {
-    // Three calver releases: the newest two hold their belt slots forever, the oldest dies once
-    // unread past the window. Two sha bundles: no slot for either — the stale one dies with the
-    // oldest release, the fresh one survives as merely young.
+  void theBeltKeepsCalverReleasesAndAShaBundleHasNoKeepLeftAtAll() throws Exception {
+    // Three calver releases: the newest two hold their belt slots forever, whatever their age, and
+    // the third goes. Two sha bundles from the per-commit pipelines: no slot for either, and since
+    // 2026-09-05 no window for either — the one published yesterday goes with the one published a
+    // hundred days ago.
+    //
+    // That is the intended collection rather than a loss: a userflows bundle for a commit is read by
+    // whoever reviews that run, on the day of the run, and the site's releases are what anybody
+    // reads afterwards. What buys a bundle time to be read at all is the six-hour grace on its
+    // bytes, which withholds the version whole.
     repository();
     String doomedRelease = blob(21);
     String doomedSha = blob(22);
@@ -68,15 +74,20 @@ class DocsGcAdapterTest extends GcFixture {
     GcStrategy.Plan plan = strategy.plan(census.take(), GcPins.none());
 
     assertEquals(
-        Set.of(SITE + "@2026.601.10", SITE + "@" + "a".repeat(40)),
+        Set.of(
+            SITE + "@2026.601.10",
+            SITE + "@" + "a".repeat(40),
+            SITE + "@" + "b".repeat(40)),
         Set.copyOf(identities(plan.dead())));
+    assertTrue(
+        plan.dead().stream()
+            .allMatch(dead -> OwnArtifactsStrategy.deadUnaccessed(WINDOW).equals(dead.rule())));
     assertEquals(OwnArtifactsStrategy.KEPT_RELEASE, ruleFor(plan.kept(), SITE + "@2026.701.20"));
     assertEquals(OwnArtifactsStrategy.KEPT_RELEASE, ruleFor(plan.kept(), SITE + "@2026.801.30"));
-    // The fresh sha bundle is kept, and NOT as a release — publication counts as its first access.
-    assertTrue(identities(plan.kept()).contains(SITE + "@" + "b".repeat(40)));
+    assertEquals(2, plan.kept().size(), "the belt is the whole keep-set of this type");
     assertFalse(
-        OwnArtifactsStrategy.KEPT_RELEASE.equals(ruleFor(plan.kept(), SITE + "@" + "b".repeat(40))),
-        "a sha bundle must never hold a belt slot");
+        identities(plan.kept()).contains(SITE + "@" + "b".repeat(40)),
+        "a sha bundle holds no belt slot, and youth is not a slot either");
   }
 
   @Test

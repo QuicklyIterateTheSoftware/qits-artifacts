@@ -3,19 +3,24 @@ package eu.wohlben.qits.artifacts.gc;
 import eu.wohlben.qits.artifacts.control.MavenLayout;
 import eu.wohlben.qits.artifacts.control.MavenRegistryCollection;
 import eu.wohlben.qits.artifacts.control.MavenVersionOrder;
+import eu.wohlben.qits.blobstore.control.BlobStore;
 import eu.wohlben.qits.blobstore.entity.ArtifactRepository;
 import eu.wohlben.qits.artifacts.entity.MavenArtifact;
 import eu.wohlben.qits.artifacts.control.MavenPackagesProfile;
 import eu.wohlben.qits.artifacts.gc.dto.GcIdentity;
 import eu.wohlben.qits.blobstore.persistence.ArtifactRepositoryRepository;
 import eu.wohlben.qits.artifacts.persistence.MavenArtifactRepository;
+import io.quarkus.logging.Log;
 import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
+import java.io.IOException;
+import java.io.InputStream;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -59,7 +64,20 @@ import java.util.TreeSet;
  * the surviving rows at read time, so a resolver asking for {@code 1.0.1-SNAPSHOT} is redirected to
  * whatever is newest; deleting that one would point the document at a file the store no longer has,
  * which is the single failure this type must not produce. Older timestamped sets are ordinary
- * candidates and age out at P90D.
+ * candidates and go on the next run.
+ *
+ * <h2>The pom closure</h2>
+ *
+ * <p>The third keep and the one the zero window made load-bearing: <b>everything a kept pom itself
+ * references is kept</b>, to a fixpoint — see {@link MavenPomClosure} for what a reference is and
+ * why "internal" means "already in this store". It is a fact about a stored file rather than a rule
+ * about age, which is why it lives on this adapter and not in the engine, and it is composed
+ * <em>after</em> the two belts above so a coordinate keeps the strongest reason it has.
+ *
+ * <p>The seeds are what the keep-set already holds when {@link #pinnedBy} runs: the manifest pins,
+ * the release belt ({@link OwnArtifactsStrategy#lastReleasesPerGroup}, asked rather than
+ * re-derived), and the snapshot belt. Not every candidate — a closure seeded from everything would
+ * keep the store whole and say nothing.
  *
  * <p>What this deliberately does <b>not</b> do is keep a fixed number of snapshot builds. The plan
  * that named this type's cleanup ({@code maven-repository-plan.md} §3.6) never priced deletion, so
@@ -85,6 +103,15 @@ public class MavenPackagesGcAdapter implements GcTypeAdapter {
   @Inject MavenArtifactRepository artifacts;
   @Inject MavenRegistryCollection maven;
 
+  /**
+   * How the closure reads a pom's bytes: {@code BlobStore.open} is public and read-only, so this
+   * needs no narrow door of its own — the doors exist for the store's package-private write and
+   * delete funnels, and reading is neither. It also moves nothing: {@code accessed_at} lives on the
+   * {@code maven_artifact} row and is touched by the wire, so the collector reading a pom cannot
+   * warm its own candidate.
+   */
+  @Inject BlobStore blobs;
+
   @Override
   public String type() {
     return MavenPackagesProfile.KEY;
@@ -103,8 +130,9 @@ public class MavenPackagesGcAdapter implements GcTypeAdapter {
   }
 
   /**
-   * The coordinates a repository's pom still names, and the newest deployable set of every snapshot
-   * version line — see the class javadoc for the second.
+   * The coordinates a repository's pom still names, the newest deployable set of every snapshot
+   * version line, and everything those two reach through their own poms — see the class javadoc for
+   * the second and {@link MavenPomClosure} for the third.
    *
    * <p><b>The dependency pin needs no translation at all</b>, which is the property that makes it
    * safe: {@code groupId:artifactId:version} is what a pom writes and it is this adapter's identity
@@ -112,6 +140,11 @@ public class MavenPackagesGcAdapter implements GcTypeAdapter {
    * asked first because it is a fact about somebody else's source — a reader who sees it wants to
    * know which repository still builds against this version, not that the snapshot metadata happens
    * to point here too.
+   *
+   * <p>The closure is computed <b>once per plan</b>, here, over the enumeration the binder already
+   * took and the pins the run already read. Per candidate it would re-walk the store for every
+   * coordinate; against a second enumeration it would judge one run by two snapshots — which is the
+   * reason this method takes the whole list in the first place.
    */
   @Override
   public GcPinned pinnedBy(List<GcCandidate> candidates, GcPins pins) {
@@ -128,15 +161,99 @@ public class MavenPackagesGcAdapter implements GcTypeAdapter {
           candidate.identity(),
           (held, other) -> BY_SNAPSHOT_RECENCY.compare(held, other) >= 0 ? held : other);
     }
+    Map<String, String> reachable = closure(candidates, pins, newestPerLine);
     return candidate -> {
       String byManifest = pins.pinsMavenCoordinate(candidate.identity());
       if (byManifest != null) {
         return byManifest;
       }
-      return candidate.identity().equals(newestPerLine.get(candidate.group()))
-          ? KEPT_RESOLVABLE_SNAPSHOT
-          : null;
+      if (candidate.identity().equals(newestPerLine.get(candidate.group()))) {
+        return KEPT_RESOLVABLE_SNAPSHOT;
+      }
+      return reachable.get(candidate.identity());
     };
+  }
+
+  /**
+   * The closure over what the keep-set already holds, mapped from coordinate to the sentence naming
+   * its referrer.
+   *
+   * <p>Keyed by coordinate and not by (repository, coordinate) because a reference is a coordinate:
+   * a pom names {@code g:a:v} and says nothing about which repository row of this store serves it.
+   * Every deployment has exactly one hosted maven repository, so the distinction is theoretical
+   * today — and if a second one appears, keeping the same coordinate in both is the answer a
+   * resolver would want anyway.
+   */
+  private Map<String, String> closure(
+      List<GcCandidate> candidates, GcPins pins, Map<String, String> newestPerLine) {
+    Set<GcCandidate> keptReleases = OwnArtifactsStrategy.lastReleasesPerGroup(candidates, this);
+    Set<String> hosted = new LinkedHashSet<>();
+    Set<String> seeds = new LinkedHashSet<>();
+    for (GcCandidate candidate : candidates) {
+      hosted.add(candidate.identity());
+      if (pins.pinsMavenCoordinate(candidate.identity()) != null
+          || keptReleases.contains(candidate)
+          || candidate.identity().equals(newestPerLine.get(candidate.group()))) {
+        seeds.add(candidate.identity());
+      }
+    }
+    if (seeds.isEmpty()) {
+      return Map.of();
+    }
+    Map<String, String> poms = pomBlobs(candidates);
+    return MavenPomClosure.from(
+        seeds, hosted, coordinate -> pomBytes(poms.get(coordinate), coordinate));
+  }
+
+  /**
+   * Every coordinate's {@code .pom} blob, read from the rows rather than composed from the
+   * coordinate: a timestamped snapshot's identity and its file name differ, and {@link
+   * #identityOf} is already the one place that translation is written.
+   *
+   * <p>Only the pom rows are queried. The enumeration reads every row of the type, and this is
+   * deliberately not folded into it — the closure is one keep-class of one type, and paying for a
+   * second narrow query keeps it removable.
+   */
+  private Map<String, String> pomBlobs(List<GcCandidate> candidates) {
+    Map<String, String> poms = new HashMap<>();
+    for (String repository : repositoriesOf(candidates)) {
+      for (MavenArtifact row :
+          artifacts.<MavenArtifact>list("repository = ?1 and path like ?2", repository, "%.pom")) {
+        poms.putIfAbsent(identityOf(MavenLayout.parse(row.path), row.path), row.blobId);
+      }
+    }
+    return poms;
+  }
+
+  /** The repository rows this enumeration touched, in encounter order. */
+  private static Set<String> repositoriesOf(List<GcCandidate> candidates) {
+    Set<String> names = new LinkedHashSet<>();
+    for (GcCandidate candidate : candidates) {
+      names.add(candidate.repository());
+    }
+    return names;
+  }
+
+  /**
+   * One pom's bytes, or null when there are none to read.
+   *
+   * <p>An unreadable blob is logged and skipped rather than thrown: this rule only ever ADDS keeps,
+   * so failing to read one pom under-keeps by whatever that pom alone referenced, while throwing
+   * would refuse the whole type's plan over one file. A coordinate with no pom row at all — an
+   * unparseable path, a jar deployed on its own — is the ordinary case and says nothing.
+   */
+  private byte[] pomBytes(String blobId, String coordinate) {
+    if (blobId == null) {
+      return null;
+    }
+    try (InputStream bytes = blobs.open(blobId)) {
+      return bytes.readNBytes(MavenPomClosure.MAX_POM_BYTES);
+    } catch (IOException | RuntimeException unreadable) {
+      Log.warnf(
+          "gc: the pom of %s could not be read (%s), so its dependency closure is not kept",
+          coordinate, unreadable.toString());
+      return null;
+    }
   }
 
   /**

@@ -361,8 +361,15 @@ public class GcPlanner {
    * hours — the shipped {@code P7D} prints as {@code PT168H} — and a safety window a reviewer has to
    * divide by 24 is a safety window they will misread. Package-visible because the sweep receipt
    * spells the same window and must spell it the same way.
+   *
+   * <p>Zero is spelled {@code P0D} for the same reason and only that reason: the configuration says
+   * {@code P0D} and {@code Duration.ZERO.toString()} says {@code PT0S}, so a reviewer comparing the
+   * report against the property file would be comparing two spellings of one number.
    */
   static String iso(Duration window) {
+    if (window.isZero()) {
+      return "P0D";
+    }
     return window.toDaysPart() > 0 && window.minusDays(window.toDaysPart()).isZero()
         ? "P" + window.toDaysPart() + "D"
         : window.toString();

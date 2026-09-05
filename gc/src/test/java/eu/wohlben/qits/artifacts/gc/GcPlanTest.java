@@ -145,7 +145,7 @@ class GcPlanTest extends GcFixture {
     assertEquals(0L, report.sweep().reclaimableBytes());
     assertEquals(List.of(store.rowless()), report.untouchable().blobIds());
     assertEquals(ROWLESS, report.untouchable().bytes());
-    assertEquals("P2D", report.graceWindow());
+    assertEquals("PT6H", report.graceWindow());
   }
 
   @Test
@@ -176,7 +176,7 @@ class GcPlanTest extends GcFixture {
     assertEquals(REGISTERED_TYPES, executable.types().size());
     assertTrue(
         executable.types().stream()
-            .anyMatch(line -> line.startsWith("oci-images (own, P3D): 1 identities condemned")),
+            .anyMatch(line -> line.startsWith("oci-images (own, P0D): 1 identities condemned")),
         "a per-type line carries the configured engine and window beside the outcome: " + executable
             .types());
     assertTrue(
@@ -523,7 +523,7 @@ class GcPlanTest extends GcFixture {
     assertEquals(List.of(), report.dead());
     assertEquals(0, report.sweep().blobCount());
     assertEquals(0, report.structural().blobCount());
-    assertEquals("P2D", report.graceWindow());
+    assertEquals("PT6H", report.graceWindow());
     assertNotNull(report.untouchable().reason());
 
     assertThrows(

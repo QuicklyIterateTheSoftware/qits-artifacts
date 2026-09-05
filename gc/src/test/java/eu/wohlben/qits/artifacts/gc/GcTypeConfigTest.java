@@ -56,10 +56,11 @@ class GcTypeConfigTest extends GcFixture {
 
   @Test
   void everyRepositoryTypeIsConfiguredAndTheShippedValuesAreTheSettlements() {
-    // The settlement's own numbers, as revised on 2026-09-04: P3D for all six own types, and the two
-    // CI types excluded and honest about it. The old P30D/P90D split priced two different guesses at
-    // how long consumption takes; consumption is named outright now — six pin sources and the
-    // structural belts — so the window is what bounds the store rather than what carries the safety.
+    // The settlement's own numbers, as revised on 2026-09-05: P0D for all six own types, and the two
+    // CI types excluded and honest about it. P30D/P90D priced two guesses at how long consumption
+    // takes and P3D priced a smaller one; zero prices none, which is the point — consumption is
+    // named outright by six pin sources and the structural belts, so RETENTION IS THE KEEP-SET and
+    // the window is not standing in for anything any more.
     // Looping over the REGISTERED types rather than listing cases is what makes a newly contributed
     // profile fail here — a type with no policy is a decision nobody took, not a default.
     Map<String, GcPolicy> strategies = new TreeMap<>();
@@ -82,12 +83,12 @@ class GcTypeConfigTest extends GcFixture {
         strategies.size(),
         "the cache types are not merely unconfigured here — they are unregistered");
 
-    assertEquals(Duration.ofDays(3), config.requireWindow(OciImagesProfile.KEY));
-    assertEquals(Duration.ofDays(3), config.requireWindow(NpmPackagesProfile.KEY));
-    assertEquals(Duration.ofDays(3), config.requireWindow(MavenPackagesProfile.KEY));
-    assertEquals(Duration.ofDays(3), config.requireWindow(DaemonBinariesProfile.KEY));
-    assertEquals(Duration.ofDays(3), config.requireWindow(DocsProfile.KEY));
-    assertEquals(Duration.ofDays(3), config.requireWindow(SbomProfile.KEY));
+    assertEquals(Duration.ZERO, config.requireWindow(OciImagesProfile.KEY));
+    assertEquals(Duration.ZERO, config.requireWindow(NpmPackagesProfile.KEY));
+    assertEquals(Duration.ZERO, config.requireWindow(MavenPackagesProfile.KEY));
+    assertEquals(Duration.ZERO, config.requireWindow(DaemonBinariesProfile.KEY));
+    assertEquals(Duration.ZERO, config.requireWindow(DocsProfile.KEY));
+    assertEquals(Duration.ZERO, config.requireWindow(SbomProfile.KEY));
     assertEquals(Optional.empty(), windows.get(CiScreenshotsProfile.KEY));
     assertEquals(Optional.empty(), windows.get(CiVideosProfile.KEY));
   }
@@ -95,8 +96,8 @@ class GcTypeConfigTest extends GcFixture {
   @Test
   void thePlanEchoesEveryTypesStrategyWindowAndEffectiveRule() {
     // The echo is what a reviewer reads the mapping off, so it carries the sentence rather than the
-    // enum: "own, P3D" is not reviewable, "keep the last 2 released versions … delete the rest once
-    // unaccessed for longer than P3D" is.
+    // enum: "own, P0D" is not reviewable, "keep the last 2 released versions … delete the rest once
+    // unaccessed for longer than P0D, so the keep-classes ARE the retention policy" is.
     GcPlanReport report = planner.plan();
 
     assertEquals(
@@ -115,9 +116,12 @@ class GcTypeConfigTest extends GcFixture {
 
     GcTypeConfiguration maven = line(report, MavenPackagesProfile.KEY);
     assertEquals("own", maven.strategy());
-    assertEquals("P3D", maven.window());
+    assertEquals("P0D", maven.window());
     assertTrue(maven.rule().contains("last 2 released versions"));
-    assertTrue(maven.rule().contains("P3D"));
+    assertTrue(maven.rule().contains("P0D"));
+    assertTrue(
+        maven.rule().contains("keep-classes ARE the retention policy"),
+        "at zero the sentence has to say what the window stopped doing: " + maven.rule());
 
     GcTypeConfiguration videos = line(report, CiVideosProfile.KEY);
     assertEquals("excluded", videos.strategy());
@@ -128,20 +132,23 @@ class GcTypeConfigTest extends GcFixture {
   @Test
   void everyConfiguredTypeCollectsAndTheExcludedOnesStillCondemnNothing() throws Exception {
     // The definition of done for this workstream, and the shape of the comparison it inherits.
-    // Everything is seeded and aged past its own window; the plan is taken with complete pins so
-    // the change under test is the POLICY rather than this suite's closed pin ports.
+    // Everything is seeded and aged; the plan is taken with complete pins so the change under test
+    // is the POLICY rather than this suite's closed pin ports.
     //
-    // What changed, deliberately: npm-packages condemns a cold prerelease, and maven-packages
-    // condemns the third release version of an artifact — as ONE coordinate, jar and pom together,
-    // which is the visible half of maven's new identity model. What must not have changed: the four
-    // types moved by earlier workstreams, and the two CI types, which condemn nothing by
-    // configuration.
+    // WHAT CHANGED on 2026-09-05, deliberately: the windows are P0D, so oci-images now condemns
+    // every tag no keep-class names — the substrate's v1 and v2, and BOTH build shas including the
+    // one written a moment ago. A calver release is added to the fixture so the belt is still
+    // visible beside them; without it this type's keep-list would be empty and the case would prove
+    // only that everything dies. What must NOT have changed is everything else: the belts of
+    // npm-packages, maven-packages and daemon-binaries decide those three exactly as before, because
+    // a belt never asked what time it was.
     Store store = seed();
     seedMaven();
-    // One image, two build shas: the older one is what the access rule condemns, the newer one is
+    // One image, two build shas and a release: the shas are named by nothing and go, the release is
     // the pull target the belt protects for an image cd has never deployed.
     ociTag("alpha", COLD_SHA, store.manifestKept(), Instant.now().minus(Duration.ofDays(60)));
     ociTag("alpha", WARM_SHA, store.manifestKept(), Instant.now());
+    ociTag("alpha", RELEASE_TAG, store.manifestKept(), Instant.now());
     String coldDaemon = store(filled(64, (byte) 64));
     backdate(coldDaemon, Duration.ofDays(30));
     daemonRepository();
@@ -181,15 +188,15 @@ class GcTypeConfigTest extends GcFixture {
                   plan.kept().stream().map(identity -> identity.identity()).sorted().toList());
             });
 
-    // The two that moved in this workstream.
+    // The type this workstream moved.
     assertEquals(
-        List.of("alpha:" + COLD_SHA),
+        List.of("alpha:" + COLD_SHA, "alpha:" + WARM_SHA, "alpha:v1", "alpha:v2"),
         dead.get(RepositoryTypeProfile.wireNameOf(OciImagesProfile.KEY)),
-        "a build sha no pin holds and no deploy would pull, cold past P3D");
+        "every tag no pin, no belt and no pointer names — the sha written this second included");
     assertEquals(
-        List.of("alpha:" + WARM_SHA, "alpha:v1", "alpha:v2"),
+        List.of("alpha:" + RELEASE_TAG),
         kept.get(RepositoryTypeProfile.wireNameOf(OciImagesProfile.KEY)),
-        "the newest build stays for the deploy that has not happened, and the warm tags stay on use");
+        "the release stays as the next deployment's pull target, and it is the whole keep-set now");
     assertEquals(
         List.of(DAEMON + "@2026.601.10"),
         dead.get(RepositoryTypeProfile.wireNameOf(DaemonBinariesProfile.KEY)),
@@ -233,11 +240,17 @@ class GcTypeConfigTest extends GcFixture {
       assertEquals(List.of(), kept.get(wire), wire);
     }
 
-    // The blob half of the same comparison: the cold daemon binary, the cold published tarball and
-    // the cold jar. The cold image tag frees nothing on its own — its manifest is still named by the
-    // tags beside it, which is the reconciliation doing its job.
+    // The blob half of the same comparison: the cold daemon binary, the cold published tarball, the
+    // cold jar — and the doomed manifest's own layer, which the dead v2 tag released and nothing
+    // surviving names. The image's other blobs stay: the release tag reaches the kept manifest, and
+    // the shared layer is an npm tarball besides. This figure is the DRY RUN's, which runs one run
+    // ahead of the store for OCI by design — the manifest rows the dead tags leave behind still hold
+    // their bytes until the next run makes them candidates.
     assertEquals(
-        List.of(coldDaemon, coldTarball, coldJar).stream().sorted().toList(),
+        List.of(coldDaemon, coldTarball, coldJar, store.layerDoomed(), store.manifestDoomed())
+            .stream()
+            .sorted()
+            .toList(),
         report.sweep().blobIds());
     assertEquals(List.of(store.rowless()), report.untouchable().blobIds());
   }
@@ -273,6 +286,8 @@ class GcTypeConfigTest extends GcFixture {
 
   private static final String COLD_SHA = "a".repeat(40);
   private static final String WARM_SHA = "b".repeat(40);
+  /** A calver tag, which is the only shape of coordinate a belt of this type can see. */
+  private static final String RELEASE_TAG = "2026.905.110103";
   private static final String DAEMON = "qits-ci-daemon";
   private static final String OTHER_ARTIFACT = "eu/wohlben/qits/qits-other";
 

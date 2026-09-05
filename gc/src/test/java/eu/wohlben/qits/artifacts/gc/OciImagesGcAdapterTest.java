@@ -68,8 +68,8 @@ class OciImagesGcAdapterTest extends GcFixture {
   private static final String SHA_C = "c".repeat(40);
   private static final String SHA_D = "d".repeat(40);
 
-  /** The configured window for this type, and the number every case below is aged against. */
-  private static final Duration WINDOW = Duration.ofDays(3);
+  /** The configured window for this type — zero since 2026-09-05, so nothing here is kept by age. */
+  private static final Duration WINDOW = Duration.ZERO;
 
   @Inject OciImageGcStrategy strategy;
   @Inject GcPlanner planner;
@@ -145,16 +145,18 @@ class OciImagesGcAdapterTest extends GcFixture {
   }
 
   @Test
-  void aReleasedVersionNothingHasDeployedYetSurvivesOnItsPushAloneHoweverManyDisplaceIt()
+  void aReleasedVersionNothingHasDeployedYetIsNotSavedByItsPushOnceTheWindowIsZero()
       throws Exception {
-    // THE AUDIT of 2026-09-04, as a case: cd pins only what is LIVE and retention keeps only the
-    // last two, so a third-newest version that was released and never deployed is named by neither
-    // rule. It survives anyway, on the one that was already there — a tag's effective access time
-    // folds updated_at in as a first access, so a version is kept for a full window from its push
-    // whether or not anything ever pulled it.
+    // THE AUDIT of 2026-09-04, re-answered on 2026-09-05 — and the answer flipped. It used to be
+    // that a released-but-undeployed version was covered by the access rule's fold of updated_at: a
+    // release was young for a whole window from its push, deployed or not. At P0D there is no such
+    // window, so a third-newest release that no pin names and no belt covers is condemned on the
+    // run that finds it, however many minutes ago it was pushed.
     //
-    // Four releases, the newest three pushed today; the third-newest is the one under test. Nothing
-    // is deployed, so GcPins.none() is the honest aggregate.
+    // That is not a hole, it is where the safety moved: what protects a JUST-pushed artifact is the
+    // six-hour grace window on its bytes — which withholds the identity whole, rows intact — and
+    // what protects a version anything is going to deploy is qits-platform-deployments naming it.
+    // Four releases, the newest three pushed today; the third-newest is the one under test.
     repository();
     String config = config();
     tag("qits-configuration", "2026.901.10", image("qits-configuration", config, 821), daysAgo(90));
@@ -165,16 +167,26 @@ class OciImagesGcAdapterTest extends GcFixture {
     GcStrategy.Plan plan = strategy.plan(census.take(), GcPins.none());
 
     assertEquals(
-        OwnArtifactsStrategy.keptAccessed(WINDOW),
-        ruleFor(plan.kept(), "qits-configuration:2026.904.35208"),
-        "third-newest, undeployed, pinned by nothing and outside the last two — and still kept,"
-            + " because a release is young for a whole window from the moment it was pushed");
+        OwnArtifactsStrategy.deadUnaccessed(WINDOW),
+        ruleFor(plan.dead(), "qits-configuration:2026.904.35208"),
+        "pushed minutes ago, pinned by nothing, outside the last two — and therefore condemned");
     assertEquals(
         OciImagesGcAdapter.KEPT_NEWEST, ruleFor(plan.kept(), "qits-configuration:2026.904.94820"));
     assertEquals(
-        List.of("qits-configuration:2026.901.10"),
-        identities(plan.dead()),
-        "the only one eligible is the release nobody deployed in 90 days and three have superseded");
+        OwnArtifactsStrategy.KEPT_RELEASE,
+        ruleFor(plan.kept(), "qits-configuration:2026.904.83611"),
+        "the belt of two is what a release has left, and it has it whatever its age");
+    assertEquals(
+        List.of("qits-configuration:2026.901.10", "qits-configuration:2026.904.35208"),
+        identities(plan.dead()).stream().sorted().toList());
+
+    // And the pin is the answer for a version anything would deploy: the same store, with the
+    // deployer naming the coordinate, keeps it under cd's own sentence.
+    assertEquals(
+        GcPins.BY_CD,
+        ruleFor(
+            strategy.plan(census.take(), pinning("qits-configuration", "2026.904.35208")).kept(),
+            "qits-configuration:2026.904.35208"));
   }
 
   @Test
@@ -470,15 +482,13 @@ class OciImagesGcAdapterTest extends GcFixture {
   }
 
   @Test
-  void aShaTagSomethingStillPullsSurvivesTheWindowThatCondemnedItsNeighbour() throws Exception {
-    // The loosening the settlement bought, and the case the structural rule could not have had: two
-    // superseded build tags, one of them pulled yesterday. The old rule condemned both the moment a
-    // newer build existed; this one keeps whatever is in use and names the rule that saved it.
-    //
-    // Since the belt reads the release rather than the newest build, ACCESS is now the only thing
-    // that can save a sha tag with no pin on it — which is what this case was always about, and the
-    // third row is here to show it: SHA_C is younger than both and dies anyway, because being the
-    // newest sha stopped being a reason for anything.
+  void aShaTagNothingPinsGoesAtAZeroWindowHoweverRecentlyItWasPulled() throws Exception {
+    // THE FLIP of 2026-09-05, on the case that used to state the opposite. Three superseded build
+    // tags, one of them pulled yesterday: the settlement kept that one and named the window as the
+    // rule that saved it. At P0D it does not, and the reasoning is the realignment itself — a pull
+    // is a fact about a timestamp, and a timestamp cannot say whether anything will pull again. What
+    // CAN say so is a pin, and the second half of this case is the same store with cd naming the
+    // coordinate.
     repository();
     String config = config();
     String pulled = image("qits-events", config, 411);
@@ -489,11 +499,18 @@ class OciImagesGcAdapterTest extends GcFixture {
     GcStrategy.Plan plan = strategy.plan(census.take(), GcPins.none());
 
     assertEquals(
-        OwnArtifactsStrategy.keptAccessed(WINDOW), ruleFor(plan.kept(), "qits-events:" + SHA_A));
+        Stream.of("qits-events:" + SHA_A, "qits-events:" + SHA_B, "qits-events:" + SHA_C)
+            .sorted()
+            .toList(),
+        identities(plan.dead()),
+        "an image with no release has no belt either, so nothing here is named by anything");
     assertEquals(
-        Stream.of("qits-events:" + SHA_B, "qits-events:" + SHA_C).sorted().toList(),
-        identities(plan.dead()));
-    assertTrue(plan.blobsRetained().contains(pulled));
+        OwnArtifactsStrategy.deadUnaccessed(WINDOW), ruleFor(plan.dead(), "qits-events:" + SHA_A));
+
+    GcStrategy.Plan pinned = strategy.plan(census.take(), pinning("qits-events", SHA_A));
+
+    assertEquals(GcPins.BY_CD, ruleFor(pinned.kept(), "qits-events:" + SHA_A));
+    assertTrue(pinned.blobsRetained().contains(pulled));
   }
 
   @Test
@@ -501,11 +518,14 @@ class OciImagesGcAdapterTest extends GcFixture {
     // The 73 untagged manifests, in miniature: a tag re-push moves the tag row to the new manifest
     // and leaves the old row behind, reachable from no coordinate anyone uses. It is an identity of
     // its own here — and only here, because a TAGGED manifest's identity is its tag.
+    // The live tag is a calver, so the belt holds it and the ONLY thing this case can condemn is the
+    // orphan — which is what makes it a case about the identity model rather than about the window.
+    // It was a sha tag until 2026-09-05, when a sha tag with no pin stopped surviving at all.
     repository();
     String config = config();
     String abandoned = image("qits-events", config, 501, daysAgo(300));
     String current = image("qits-events", config, 502);
-    tag("qits-events", SHA_A, current, daysAgo(2));
+    tag("qits-events", "2026.903.113443", current, daysAgo(2));
 
     GcStrategy.Plan plan = strategy.plan(census.take(), GcPins.none());
 
@@ -606,24 +626,37 @@ class OciImagesGcAdapterTest extends GcFixture {
   }
 
   @Test
-  void againstTheSubstratesOwnFixtureNothingDiesAndTheRetainedSetIsTheCensusSet() throws Exception {
-    // The substrate's store, unchanged: two manifests under one image, tagged v1 and v2, both
-    // written moments ago. Neither tag is a calver release, so what keeps them is the window rather
-    // than the belt — and the set this type hands back is exactly the census's own OCI live set,
-    // which is what makes "one census, two readers" true here rather than merely intended.
+  void againstTheSubstratesOwnFixtureBothUnnamedTagsGoAndTheirManifestsWaitForTheNextRun()
+      throws Exception {
+    // The substrate's store, read under the new doctrine: two manifests under one image, tagged v1
+    // and v2, both written moments ago. Neither tag is a calver release, so no belt covers them, and
+    // nothing pins them — under the old window they were kept for being fresh, and at P0D that is
+    // not a keep. Both go.
+    //
+    // What does NOT go is a single byte, and the reason is the identity model rather than the
+    // window: a manifest under a condemned tag is untagged today and a candidate on the next run, so
+    // its rows still hold their blobs while this run reports them released. The dry-run figure runs
+    // one run ahead of the store here, which is the documented behaviour and is asserted rather than
+    // rediscovered.
     seed();
     LiveBlobCensus.Census taken = census.take();
 
     GcStrategy.Plan plan = strategy.plan(taken, GcPins.none());
 
-    assertEquals(List.of(), plan.dead());
-    assertEquals(List.of("alpha:v1", "alpha:v2"), identities(plan.kept()));
+    assertEquals(List.of("alpha:v1", "alpha:v2"), identities(plan.dead()));
     assertTrue(
-        plan.kept().stream()
-            .allMatch(kept -> OwnArtifactsStrategy.keptAccessed(WINDOW).equals(kept.rule())));
-    assertEquals(taken.live(OciImagesProfile.KEY).keySet(), plan.blobsRetained());
-    GcPlanReport report = planner.plan(taken, List.of(strategy), GcPins.none());
-    assertEquals(List.of(), report.sweep().blobIds());
+        plan.dead().stream()
+            .allMatch(dead -> OwnArtifactsStrategy.deadUnaccessed(WINDOW).equals(dead.rule())));
+    assertEquals(List.of(), plan.kept());
+    assertEquals(
+        taken.live(OciImagesProfile.KEY).keySet(),
+        plan.blobsReleased(),
+        "every blob the two tags reached — which is the type's whole live set here");
+
+    GcStrategy.Applied applied = strategy.apply(plan, blobId -> false);
+    assertEquals(2, applied.deleted().size());
+    ociManifests.getEntityManager().clear();
+    assertEquals(2, ociManifests.count(), "the manifests are next run's candidates, not this one's");
   }
 
   // --- fixture ---------------------------------------------------------------------------------

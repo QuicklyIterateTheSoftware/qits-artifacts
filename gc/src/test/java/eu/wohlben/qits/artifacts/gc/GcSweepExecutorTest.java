@@ -67,12 +67,17 @@ class GcSweepExecutorTest extends GcFixture {
   void aColdPrereleaseLosesItsRowGainsATombstoneAndItsTarballIsUnlinked() throws Exception {
     // The full npm chain, executed: the engine condemns, collect() deletes the row and writes the
     // tombstone in one transaction, and the sweep unlinks the tarball nothing references any more.
-    // The release is as cold as the condemned build and survives on the belt; the newer build was
-    // published moments ago and survives on the window.
+    // The release is as cold as the condemned build and survives on the belt.
+    //
+    // The newer build survives too, and since 2026-09-05 for a DIFFERENT reason, which is the whole
+    // realignment in one fixture: at a zero window a build published a moment ago is condemned like
+    // any other unnamed coordinate, and what saves it is the six-hour grace on its bytes — which
+    // withholds the identity WHOLE, row and tarball together. Its tarball is therefore deliberately
+    // not backdated, and the receipt reports it as withheld rather than deleted.
     repositoryService.ensure("npm", NpmPackagesProfile.KEY);
     String releaseBlob = agedBlob(41);
     String supersededBlob = agedBlob(42);
-    String newestBlob = agedBlob(43);
+    String newestBlob = store(filled(43, (byte) 43)); // as young as a fresh publish
     versionRow(PKG, RELEASE, releaseBlob, daysAgo(400));
     versionRow(PKG, SUPERSEDED, supersededBlob, daysAgo(400));
     versionRow(PKG, NEWEST, newestBlob, Instant.now());
@@ -81,11 +86,14 @@ class GcSweepExecutorTest extends GcFixture {
 
     assertFalse(report.dryRun());
     assertNotNull(report.executedAt());
-    assertEquals("P2D", report.graceWindow());
+    assertEquals("PT6H", report.graceWindow());
     GcTypeSweepResult npm = typeResult(report, NpmPackagesProfile.KEY);
     assertNull(npm.error());
     assertEquals(List.of(PKG + "@" + SUPERSEDED), identities(npm.deleted()));
-    assertEquals(List.of(), npm.withheldByGraceWindow());
+    assertEquals(
+        List.of(PKG + "@" + NEWEST),
+        identities(npm.withheldByGraceWindow()),
+        "the just-published build: condemned by the rule, withheld by the grace, row intact");
 
     detachEntities();
     assertTrue(npmVersions.findOne("npm", PKG, SUPERSEDED).isEmpty(), "the row is gone");
@@ -94,12 +102,14 @@ class GcSweepExecutorTest extends GcFixture {
         "the tombstone is written, so the name can never be silently republished");
     assertFalse(blobStore.exists(supersededBlob), "the tarball file is unlinked");
     assertTrue(blobStore.exists(releaseBlob), "a release survives, always");
-    assertTrue(blobStore.exists(newestBlob), "the newest main build survives");
+    assertTrue(npmVersions.findOne("npm", PKG, NEWEST).isPresent(), "and so does the fresh publish");
+    assertTrue(blobStore.exists(newestBlob));
 
     assertEquals(1, report.sweep().blobsUnlinked());
     assertEquals(42L, report.sweep().bytesReclaimed());
     assertEquals(List.of(supersededBlob), report.sweep().unlinkedBlobIds());
-    assertEquals(0, report.sweep().withheldByGraceWindow());
+    assertEquals(1, report.sweep().withheldByGraceWindow());
+    assertEquals(43L, report.sweep().withheldBytes());
     assertEquals(0, report.sweep().stillReferenced());
   }
 
@@ -111,11 +121,12 @@ class GcSweepExecutorTest extends GcFixture {
     // identity waits out the window with its file, and the next run past it takes both together.
     repositoryService.ensure("npm", NpmPackagesProfile.KEY);
     String supersededBlob = store(filled(52, (byte) 52)); // NOT backdated: as young as a fresh push
-    String newestBlob = store(filled(53, (byte) 53));
+    String releaseBlob = store(filled(53, (byte) 53));
     // The ROW is cold even though its file is young — a republish of the same bytes after a long
-    // silence, which is exactly the shape the two clocks exist to tell apart.
+    // silence, which is exactly the shape the two clocks exist to tell apart. The second row is a
+    // RELEASE, so the belt keeps it and this case is about one identity meeting one young file.
     versionRow(PKG, SUPERSEDED, supersededBlob, daysAgo(400));
-    versionRow(PKG, NEWEST, newestBlob, Instant.now());
+    versionRow(PKG, RELEASE, releaseBlob, daysAgo(400));
 
     GcSweepReport report = executor.execute(census.take(), List.of(npmStrategy), GcPins.none());
 
@@ -209,9 +220,13 @@ class GcSweepExecutorTest extends GcFixture {
     GcTypeSweepResult oci = typeResult(report, OciImagesProfile.KEY);
     assertNull(oci.error());
     assertEquals(
-        List.of("alpha8:" + deadSha, "alpha8@sha256:" + manifestOrphan),
+        List.of(
+            "alpha8:" + deadSha,
+            "alpha8:" + newestSha,
+            "alpha8@sha256:" + manifestOrphan),
         identities(oci.deleted()).stream().sorted().toList(),
-        "the cold tag, and the manifest no tag has ever named");
+        "both sha tags — since 2026-09-05 the newest one has no claim on anything either — and the"
+            + " manifest no tag has ever named");
     assertEquals(List.of(), oci.withheldByGraceWindow());
 
     // Never a kept identity: both kept tag rows and the kept manifest row are exactly where they
@@ -219,9 +234,14 @@ class GcSweepExecutorTest extends GcFixture {
     // manifest's identity is its tag, so it becomes an untagged manifest today and is collected on
     // the next run, which is the mirror's shape verbatim.
     detachEntities();
-    assertTrue(ociTags.findOne("qits", "alpha8", "2026.801.5").isPresent());
-    assertTrue(ociTags.findOne("qits", "alpha8", newestSha).isPresent());
-    assertTrue(ociManifests.findOne("qits", "alpha8", manifestKept).isPresent());
+    assertTrue(ociTags.findOne("qits", "alpha8", "2026.801.5").isPresent(), "the release tag");
+    assertTrue(
+        ociTags.findOne("qits", "alpha8", newestSha).isEmpty(),
+        "and the sha tag beside it goes: the release is what a deploy pulls, and nothing pulls a"
+            + " sha coordinate any more");
+    assertTrue(
+        ociManifests.findOne("qits", "alpha8", manifestKept).isPresent(),
+        "their shared manifest stays, because the release tag still names it");
     assertTrue(ociTags.findOne("qits", "alpha8", deadSha).isEmpty());
     assertTrue(ociManifests.findOne("qits", "alpha8", manifestOrphan).isEmpty());
     assertTrue(
