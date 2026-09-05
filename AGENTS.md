@@ -56,7 +56,7 @@ one in is the library's, not this repository's.
 | `dto/UploadResult` | `@RegisterForReflection` | every upload 500s: the type is behind a `Response` return, so nothing registers it |
 | `npm/NpmUpstream` | the `HttpClient` is an instance field, not static | build fails: an `HttpClientFacade` frozen into the image heap |
 | `maven/MavenUpstream` | the `HttpClient` is an instance field, not static | same as above; the sixth outbound client, and the rule has still not changed. It reads and writes only `String`/`byte[]` and needs nothing else declared — the maven stack, like `registry` and `npm`, still adds zero native-image configuration |
-| `gc/CdHttpDeploymentPins`, `gc/CiHttpDaemonPins`, `gc/MaintenanceHttpDependencyPins`, `gc/ConfigurationHttpImagePins` | the `HttpClient` is an instance field, not static | same as above; the third, fifth, seventh and eighth outbound clients, and the rule has not changed. It moved with the class when GC became its own module — the rule travels with the client, not with the package. The two pin readers added on 2026-09-04 carry it for the same reason and add no other native-image configuration: they read `JsonNode`, never a bound type |
+| `gc/CdHttpDeploymentPins`, `gc/CiHttpDaemonPins`, `gc/MaintenanceHttpDependencyPins`, `gc/ConfigurationHttpImagePins`, `gc/WorkspacesHttpLaunchPins`, `gc/ProjectsHttpLaunchPins` | the `HttpClient` is an instance field, not static | same as above; the third, fifth, seventh, eighth, ninth and tenth outbound clients, and the rule has not changed. It moved with the class when GC became its own module — the rule travels with the client, not with the package. The two pin readers added on 2026-09-04 and the two added on 2026-09-05 carry it for the same reason and add no other native-image configuration: they read `JsonNode`, never a bound type |
 | `registry/MirrorUpstream` | the `HttpClient` is an instance field, not static — and so is `MirrorBearerTokens`' `ObjectMapper`, which is reachable from one | same as above; the fourth outbound client, and the rule still has not changed |
 | artifacts' `microprofile-config.properties` | the `QITS_RESOURCE_DB_*` triple with **no defaults** | nothing — and that is the point: an unset variable dies at Flyway naming the missing one, rather than opening a fallback store. It replaced an H2 file url that resolved `${user.home}` through `getpwuid` and came out as `jdbc:h2:file:?/…` under UID 1001 |
 | `registry/MirrorUpstream`'s config | `endpoint-override` injected as `Optional<String>`, not `String` | the binary dies at boot on `Failed to load config value of type java.lang.String` — SmallRye reads a **configured-empty** value as absent, and that key ships blank. `defaultValue = ""` does not help. Invisible to `mvn verify`, where every test sets a real value |
@@ -192,25 +192,33 @@ places where the duplicate-now register in `migration-plan.md` §5 was already s
 Don't. Declare a port in the package that needs it, inject it as `Instance<T>`, and make absent a
 supported configuration with a documented behaviour — see the table in the README.
 
-**The four GC pin ports are the only ones left, and they break the rule in both halves on purpose.**
+**The six GC pin ports are the only ones left, and they break the rule in both halves on purpose.**
 `CdDeploymentPins` (`GET /platform-deployments/api/pins`), `CiDaemonPins` (`GET /ci/api/daemon`),
-`MaintenanceDependencyPins` (`GET /maintenance/api/pins`) and `ConfigurationImagePins` (`GET
-/configuration/api/pins`) are ports this repo
+`MaintenanceDependencyPins` (`GET /maintenance/api/pins`), `ConfigurationImagePins` (`GET
+/configuration/api/pins`), `WorkspacesLaunchPins` (`GET /workspaces/api/pins`) and
+`ProjectsLaunchPins` (`GET /projects/api/pins`) are ports this repo
 also implements, as plain GETs on qits-net, and absent is *not* a supported configuration: they
 throw, and a run that cannot read a pin deletes nothing at all. All of them were decided rather than
-drifted into (the GC settlement's ⚖4, and the P3D windows of 2026-09-04 for the last two), and all
+drifted into (the GC settlement's ⚖4, the P3D windows of 2026-09-04 for the third and fourth, and
+the effective-pin addendum of 2026-09-05 for the last two), and all
 live in the `gc` module, which
 narrows the exception rather than removing it: the `artifacts` library dials nothing and is
-domain-blind again, and the four outbound calls belong to the process that needs them. The keep-sets
+domain-blind again, and the six outbound calls belong to the process that needs them. The keep-sets
 are "which image coordinates would a restart or a rollback pull", "which daemon would a run launch",
-"which internal versions do repositories' manifests on main still reference" and "which container
-images is the platform configured to launch"; those four services are the only things that know, and
+"which internal versions do repositories' manifests on main still reference", "which container
+images is the platform configured to launch" and — twice — "which image would THIS service pull if
+somebody started something right now"; those six services are the only things that know, and
 the alternative — a driver assembling those
 lists and handing them in — puts a safety-critical input outside the service that acts on it, where
 the two drift and the drift deletes something live. They are fetched **once per run** and never
 cached: a cached pin list is a plan on stale facts, and two fetches inside one run can disagree.
-**The last two are what make a P3D window defensible**: a short window is only honest while what is
+**The last four are what make a P3D window defensible**: a short window is only honest while what is
 in use is named outright rather than inferred from a pull that may not have happened in three days.
+**And the last two are the fourth in a different TENSE**, not a duplicate of it: qits-configuration
+holds what the NEXT deploy of a launching service will be handed, while that service keeps launching
+what it was deployed with — so for the length of that gap the configured coordinate names an image
+nobody pulls and the one everybody pulls is named by nothing. The consumer that pulls is the only
+thing that can close it.
 
 **Neither policy is re-derived here.** cd answers with a set of shas per application, and this repo
 keeps all of them under one rule. It used to derive "ACTIVE plus the previous distinct sha" from raw
@@ -355,14 +363,20 @@ collection" section is the contract; these are the rules that get "helpfully" re
   store younger than the window a sweep provably deletes nothing.
 
 - **Live pins are read once per run, and a source that cannot answer aborts the whole run.**
-  `GcPinSources` reads four sources at the start of every plan and every sweep, never cached, and
+  `GcPinSources` reads six sources at the start of every plan and every sweep, never cached, and
   folds them into one `GcPins`: qits-platform-deployments (`GET /platform-deployments/api/pins`,
   what is serving), qits-ci (`GET /ci/api/daemon`, what a runner would launch),
   qits-platform-maintenance (`GET /maintenance/api/pins`, which internal maven/npm/docker versions
-  repositories' manifests still reference on main) and qits-configuration
-  (`GET /configuration/api/pins`, which container images the platform is configured to launch).
-  The last two answer for **consumption** where the first two answer for execution, and they are
-  what the P3D windows rest on. Their coordinates are spelled exactly as the adapters spell
+  repositories' manifests still reference on main), qits-configuration
+  (`GET /configuration/api/pins`, which container images the platform is configured to launch), and
+  qits-workspaces / qits-projects (`GET /workspaces/api/pins`, `GET /projects/api/pins`, which
+  images each of them would pull TODAY, out of the configuration it is actually running with).
+  The last four answer for **consumption** where the first two answer for execution, and they are
+  what the P3D windows rest on. The two launch answers are kept as **separate keep-sets** —
+  `workspaceLaunchImages` and `projectLaunchImages`, rules `BY_WORKSPACE_LAUNCH` /
+  `BY_PROJECT_LAUNCH` — because both services launch `qits/workspace` and a folded set could not say
+  which of them saved a tag. `launches` on such a pin is provenance: parsed, carried, deciding
+  nothing. Their coordinates are spelled exactly as the adapters spell
   identities — `g:a:v`, `name@version`, and for images the FULL name (`qits/workspace-base:<tag>`,
   repository row plus image, which cd's `applicationName` does not carry) — so every lookup is an
   equality test and never a translation. The maintenance answer's `repositories` array is scan
@@ -375,12 +389,18 @@ collection" section is the contract; these are the rules that get "helpfully" re
   `pinFailures` and the pin-dependent types refused.
 - **Pins may be supplied in the request, and the parsers are shared.** `POST /gc/plan` (the `GET`'s
   twin) and both sweeps take an optional
-  `{"pins":{"deployments":…,"ciDaemon":…,"dependencies":…,"configuredImages":…}}`, each member the
+  `{"pins":{"deployments":…,"ciDaemon":…,"dependencies":…,"configuredImages":…,
+  "workspaceLaunches":…,"projectLaunches":…}}`, each member the
   peer's response verbatim, read by `CdHttpDeploymentPins.parse` / `CiHttpDaemonPins.parse` /
-  `MaintenanceHttpDependencyPins.parse` / `ConfigurationHttpImagePins.parse` — the
-  same code the HTTP readers use, so one document cannot be read two ways. **The envelope grew from
-  two members to four on 2026-09-04, which is why this service ships LAST in that rollout**: an
-  orchestrator still sending two supplies half a keep-set, and a missing member is fail-closed. qits-platform-orchestrator
+  `MaintenanceHttpDependencyPins.parse` / `ConfigurationHttpImagePins.parse` /
+  `LaunchImagePins.parse` — the
+  same code the HTTP readers use, so one document cannot be read two ways. The last of those is
+  shared by BOTH launch readers, which is allowed only because it takes the answering service's name
+  and puts it in every refusal — a message saying "a launch service" would send a debugger to the
+  wrong one of two. **The envelope grew from
+  two members to four on 2026-09-04 and to six on 2026-09-05, which is why this service ships LAST in
+  each of those rollouts**: an orchestrator still sending an older envelope supplies a partial
+  keep-set, and a missing member is fail-closed. qits-platform-orchestrator
   sends it: one platform-wide pin set, read once per run, given to every deleter. A missing member
   is that source **unanswered**, not "nothing is pinned", so the run refuses as before; no body is
   the old call exactly. `POST /gc/plan` allows `qits:admin` **or** `qits:system` (the `GET` stays
@@ -396,8 +416,9 @@ collection" section is the contract; these are the rules that get "helpfully" re
   *answer* meaning "no daemon is pinned" (the shipped default) and must not abort a run; a 64-hex
   daemon version pins the **blob** at that digest as well as any row, because the pin has been a
   sha256 digest since the daemon shipped and may name bytes no row exists for.
-- **The pin config keys are `qits.artifacts.gc.pins.cd-*`, `.ci-*`, `.maintenance-*` and
-  `.configuration-*`** (`-base-url` and `-timeout` each), the first renamed from
+- **The pin config keys are `qits.artifacts.gc.pins.cd-*`, `.ci-*`, `.maintenance-*`,
+  `.configuration-*`, `.workspaces-*` and `.projects-*`** (`-base-url` and `-timeout` each), the
+  first renamed from
   `qits.artifacts.gc.oci.cd-*`, and they live in the `gc` jar's own
   `META-INF/microprofile-config.properties`. A deployment carrying the old spelling silently loses
   the value.
@@ -533,8 +554,8 @@ implemented rule is a guess. A few things the strategies share cost time otherwi
   for the type when nothing dies.
 - **No strategy performs an HTTP call any more** — every type on an engine declares `readsPins()`
   and is handed the run's `GcPins`. See "Adding a dependency on another context" above; the suites
-  point all four of `qits.artifacts.gc.pins.{cd,ci,maintenance,configuration}-base-url` at a closed
-  port, so `GcPinsTest` and `GcPlanControllerTest` assert the refusal path rather than avoiding it.
+  point all six of `qits.artifacts.gc.pins.{cd,ci,maintenance,configuration,workspaces,projects}-base-url`
+  at a closed port, so `GcPinsTest` and `GcPlanControllerTest` assert the refusal path rather than avoiding it.
   A new pin source therefore needs a closed-port line in **three** test `application.properties`
   (`gc`, `artifacts`, `service`) and in `PackagedProcessIT`'s overrides, or the suite dials a real
   host. Only the two CI stubs plan

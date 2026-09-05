@@ -36,8 +36,8 @@ import java.util.regex.Pattern;
  *
  * <h2>The two belts this type derives itself: the newest RELEASE tag, and {@code latest}</h2>
  *
- * <p>{@link #pinnedBy} keeps every coordinate the three pin sources name <b>and</b> each image's
- * newest calver tag. The second is a pin in all but name — the pull the <em>next</em> deploy
+ * <p>{@link #pinnedBy} keeps every coordinate the five image pin sources name <b>and</b> each
+ * image's newest calver tag. The second is a pin in all but name — the pull the <em>next</em> deploy
  * will make — and it is here rather than in cd because cd cannot answer for a deployment that has
  * not happened: {@code qits-spa-home} has tags and not a single deployment row, and without this
  * line the next deploy could pull a tag this run deleted. That is the measured {@code
@@ -189,21 +189,28 @@ public class OciImagesGcAdapter implements GcTypeAdapter {
   }
 
   /**
-   * Three coordinate pins and two structural belts: every coordinate qits-platform-deployments
-   * holds, every image a repository's Dockerfile references, every image qits-configuration would
-   * launch, the moving {@code latest} pointer, and each image's newest release tag.
+   * Five coordinate pins and two structural belts: every coordinate qits-platform-deployments holds,
+   * every image a repository's Dockerfile references, every image qits-configuration would
+   * configure, every image qits-workspaces or qits-projects would launch today, the moving {@code
+   * latest} pointer, and each image's newest release tag.
    *
-   * <p><b>The two pin sources differ by tense and both are needed.</b> The deployer names containers
-   * that exist; qits-platform-maintenance names what source still builds {@code FROM}; and
-   * qits-configuration names what a service would launch the next time somebody asks it to — a
-   * workspace image, an editor, a project agent. None of those three can answer for the other two,
-   * and only the first is implied by anything a deployment row carries.
+   * <p><b>The pin sources differ by TENSE and no two of them are the same claim.</b> The deployer
+   * names containers that exist; qits-platform-maintenance names what source still builds {@code
+   * FROM}; qits-configuration names what the NEXT deploy of a launching service will be handed; and
+   * qits-workspaces and qits-projects each name what they would pull if somebody clicked right now.
+   * The last is not implied by the one before it — a service keeps launching the version it was
+   * deployed with, so the two disagree for as long as that service is behind its configuration, and
+   * the coordinate everybody is actually pulling is the one on the wrong side of that gap.
    *
-   * <p><b>They join on the FULL image name and the deployer does not.</b> A Dockerfile and a
-   * configuration entry both spell {@code qits/workspace-base}, while an {@code oci_tag} row carries
-   * the repository and the image in two columns; cd's {@code applicationName} is the image half
-   * alone, because it deploys within one repository. So the two new lookups compose the name and the
-   * old one does not, and conflating them would silently pin nothing.
+   * <p>The order below is the order they are checked in and it is only a report-readability
+   * decision: a tag pinned by two sources is kept once, under the first sentence, and the first is
+   * the deployer because "a deployment holds it" is the answer a reviewer expects to see first.
+   *
+   * <p><b>Four of the five join on the FULL image name and the deployer does not.</b> A Dockerfile,
+   * a configuration entry and a launch answer all spell {@code qits/workspace-base}, while an {@code
+   * oci_tag} row carries the repository and the image in two columns; cd's {@code applicationName}
+   * is the image half alone, because it deploys within one repository. So the four lookups compose
+   * the name and the old one does not, and conflating them would silently pin nothing.
    *
    * <p>The newest release is read straight off the enumeration in hand — no second query and no
    * timestamp. {@link #BY_CALVER} orders releases by the version itself, so nothing a pull or a
@@ -233,6 +240,14 @@ public class OciImagesGcAdapter implements GcTypeAdapter {
       String byConfiguration = pins.pinsConfiguredImage(fullImage, tag);
       if (byConfiguration != null) {
         return byConfiguration;
+      }
+      String byWorkspaceLaunch = pins.pinsWorkspaceLaunchImage(fullImage, tag);
+      if (byWorkspaceLaunch != null) {
+        return byWorkspaceLaunch;
+      }
+      String byProjectLaunch = pins.pinsProjectLaunchImage(fullImage, tag);
+      if (byProjectLaunch != null) {
+        return byProjectLaunch;
       }
       if (LATEST.equals(tag)) {
         return KEPT_LATEST;

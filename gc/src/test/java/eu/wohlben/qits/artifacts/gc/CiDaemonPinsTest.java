@@ -118,7 +118,7 @@ class CiDaemonPinsTest {
   @Test
   void everySourceIsAskedSoOneOutageNeverHidesAnother() throws IOException {
     // A run that stopped at the first failure would report one broken service and hide the other
-    // three, and whoever fixed it would find the next run just as dead with nothing to say why.
+    // five, and whoever fixed it would find the next run just as dead with nothing to say why.
     GcPinSources sources = sources("http://127.0.0.1:1/ci/api");
     sources.cd =
         () -> {
@@ -138,14 +138,26 @@ class CiDaemonPinsTest {
           throw new IllegalStateException(
               "qits-configuration unreachable at http://qits-configuration:8080");
         };
+    sources.workspaces =
+        () -> {
+          throw new IllegalStateException(
+              "qits-workspaces unreachable at http://qits-workspaces:8080");
+        };
+    sources.projects =
+        () -> {
+          throw new IllegalStateException(
+              "qits-projects unreachable at http://qits-projects:8080");
+        };
 
     GcPins pins = sources.fetch();
 
-    assertEquals(4, pins.failures().size());
+    assertEquals(6, pins.failures().size());
     assertTrue(pins.whyIncomplete().contains("qits-platform-deployments"));
     assertTrue(pins.whyIncomplete().contains("qits-ci"));
     assertTrue(pins.whyIncomplete().contains("qits-platform-maintenance"));
     assertTrue(pins.whyIncomplete().contains("qits-configuration"));
+    assertTrue(pins.whyIncomplete().contains("qits-workspaces"));
+    assertTrue(pins.whyIncomplete().contains("qits-projects"));
   }
 
   @Test
@@ -187,10 +199,10 @@ class CiDaemonPinsTest {
   }
 
   /**
-   * The four sources as CDI would wire them, with only ci at the stub and the other three answering
+   * The six sources as CDI would wire them, with only ci at the stub and the other five answering
    * with nothing.
    *
-   * <p>All four are set because they are all injection points: a collector built by hand with two of
+   * <p>All six are set because they are all injection points: a collector built by hand with any of
    * them left null meets an NPE rather than the fold the case is about. Answering with nothing is
    * the honest stand-in — this suite is about qits-ci, and a source that answers empty neither fails
    * the aggregate nor contributes to it.
@@ -205,6 +217,8 @@ class CiDaemonPinsTest {
     sources.ci = ci;
     sources.maintenance = List::of;
     sources.configuration = List::of;
+    sources.workspaces = List::of;
+    sources.projects = List::of;
     return sources;
   }
 }
